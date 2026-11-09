@@ -2941,6 +2941,8 @@ function a2xAttackInfo (message, roll) {
   const vars = typeof a2pVars === 'function' ? a2pVars(attacker, item) : null // eslint-disable-line no-undef
   const evaluate = typeof a2pEval === 'function' ? a2pEval : null // eslint-disable-line no-undef
   const parsed = a2xParseDamage(dmg?.dealsDamage ? dmg.formula : '', { strength: str, discipline: item?.system?.disciplineType ?? null, vars, evaluate })
+  // A power that adds to an attack (Powerful Strike rolls Strength + Potence, with no Fighting) is a melee attack.
+  if (parsed.rider) kind.melee = true
   const mods = a2xAttackMods(attacker, item, kind, parsed, str)
   let base = parsed.rider ? null : parsed.base
   let baseNote = parsed.expr && base !== null && !/^\d+$/.test(parsed.text) ? `${parsed.text} = ${base}${parsed.usesMargin ? ' before the margin' : ''}.` : ''
