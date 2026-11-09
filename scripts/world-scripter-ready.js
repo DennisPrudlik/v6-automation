@@ -1325,7 +1325,7 @@ function a2HealthRow (actor, editable, rules, creature) {
       <div class="a2-subnote">${notes.map(a2Esc).join(' ')}${status.length ? `<br><strong>${status.map(a2Esc).join(' ')}</strong>` : ''}</div>
     </div>
     <div class="a2-side">
-      <label class="a2-creature" title="Alpha 2 blood rules for this actor (flags.world.a2.creature)">Creature <select ${editable ? '' : 'disabled'}>${opts}</select></label>
+      <label class="a2-creature" title="Alpha 2 blood rules for this actor (flags.world.a2.creature)">Creature <select ${editable && game.user.isGM ? '' : 'disabled'}>${opts}</select></label>
       ${npc ? `<div class="a2-npc-strip" title="${a2Esc(npc.notes ?? '')}">NPC${npc.role ? ` (${a2Esc(npc.role)})` : ''}${a2Int(npc.trueFaith) ? ` · True Faith ${a2Int(npc.trueFaith)}` : ''} <label title="Minion: Health 1 (ST p.43)"><input type="checkbox" class="a2-minion"${npc.minion ? ' checked' : ''}${editable ? '' : ' disabled'}> Minion</label></div>` : ''}
       <div class="a2-subnote">Willpower = Composure + Resolve (PG p.104). At 0 Willpower, Social and Mental Attributes are impaired (−2).${rules.surge ? '' : ' No Blood Surge.'}</div>
     </div>`
@@ -2512,7 +2512,9 @@ function a2xDecorateBlock (message, roll, i, block) {
     btn('fa-solid fa-face-angry', 'Clan frenzy test', 'A bestial failure can risk a frenzy; clan frenzy Difficulty 3 + generation modifier (PG p.103, p.147).', () => a2xFrenzyTest(actor, { type: 'clan' })).dataset.a2x = 'frenzy'
   }
   const info = a2xAttackInfo(message, roll)
-  if (info && (game.user.isGM || owner) && (v.win !== false || act.bargain)) {
+  // A power whose own card deals its damage gets no second button here (Draining Darkness).
+  const byPowerCard = info?.item?.type === 'discipline' && typeof a2pHandlesDamage === 'function' && a2pHandlesDamage(info.item) // eslint-disable-line no-undef
+  if (info && !byPowerCard && (game.user.isGM || owner) && (v.win !== false || act.bargain)) {
     btn('fa-solid fa-burst', 'Apply damage', `Weapon damage + margin to the targeted tokens, or the selected ones (PG p.116). ${info.label}.`, () => a2xPromptCardDamage(message, i)).dataset.a2x = 'damage'
   }
   if (bar.childElementCount) block.append(bar)
@@ -6071,6 +6073,15 @@ function a2pFindSpec (item, data = {}) {
 
 // No table entry (a power made after the build): track it by its own duration
 // and offer its printed damage as a card button.
+// Does this power's own card deal its damage (automatically or by its Apply
+// button)? Then the roll card needs no "Apply damage" of its own. Attack riders
+// (Powerful Strike) don't count: they ride on the attack card's damage dialog.
+function a2pHandlesDamage (item) {
+  if (!a2pOn() || !a2pState.data || item?.type !== 'discipline') return false
+  const spec = a2pFindSpec(item, a2pState.data) ?? a2pFallbackSpec(item)
+  const all = [...(spec?.fx ?? []), ...(spec?.repeat?.fx ?? [])]
+  return all.some((f) => f.kind === 'damage' && !f.rider)
+}
 function a2pFallbackSpec (item) {
   const a = item?.system?.activation ?? {}
   const duration = A2P_FROM_ITEM_DURATION[a.duration] ?? 'scene'
