@@ -23,6 +23,8 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Trackers:** Health (Stamina + 5), Vitae (5 + 5 × generation modifier), Willpower (Composure + Resolve), a 10-box Humanity or Path tracker, impairment.
 - **Powers:** pays Vitae and Willpower costs (asks first when you can't afford it), tracks scene and night durations, rolls opposing pools and applies the result.
 - **Toggles:** merit, flaw, clan trait and power bonuses appear as checkboxes in the roll dialog.
+- **Damage:** formulas such as "½ Oblivion dots + margin" are worked out and follow the margin; unarmed attacks offer natural weapons from active powers; attack riders (Powerful Strike, Might of the Heroes) are tick boxes; worn armour is found on the target; Retributive Hide sends half back.
+- **Frenzy:** tests made in a frenzy can take the + or − dice for its aim. Long-term impairments heal by themselves on New Night.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.
