@@ -711,6 +711,9 @@ function a2PatchActorPrep () {
   const orig = proto.prepareDerivedData
   proto.prepareDerivedData = function (...args) {
     const out = orig.apply(this, args) // the system's version is async, but its maxima are set before its first await
+    // wod6e 1.0.11 saves a player character's default ownership from inside data prep; on a
+    // brand-new actor that runs before it has an id and rejects unhandled. The next prep, after creation, does it properly.
+    if (!this.id && out && typeof out.catch === 'function') out.catch(() => {})
     try { if (a2Enabled()) a2PrepareActor(this) } catch (e) { console.error('V6 Alpha 2 | data prep', this?.name, e) }
     return out
   }
@@ -1710,6 +1713,15 @@ function a2Hooks () {
   Hooks.on('createChatMessage', a2OnCreateMessage)
   Hooks.on('preUpdateActor', a2PreUpdateActor)
   Hooks.on('updateActor', a2UpdateActor)
+  // A new character starts with its full Vitae (the system's default is 5, the Alpha 1 figure).
+  Hooks.on('preCreateActor', (actor, data) => {
+    try {
+      if (!a2Enabled() || actor.type !== 'vampire' || data?.system?.health?.value !== undefined) return
+      const creature = A2_CREATURES.includes(data?.flags?.world?.a2?.creature) ? data.flags.world.a2.creature : 'vampire'
+      const total = a2TotalVitae(creature, creature === 'vampire' ? a2GenModifier(data?.system?.vampire?.generation?.value) : 0)
+      if (total) actor.updateSource({ 'system.health.value': total, 'system.health.max': total })
+    } catch (e) { console.error('V6 Alpha 2 | new actor', e) }
+  })
   Hooks.on('createActor', (actor, options, userId) => {
     if (a2Enabled() && game.user.id === userId && game.user.isGM && actor.type === 'vampire') a2MigrateHumanity({ actors: [actor] }).then(a2ReportMigration)
   })
