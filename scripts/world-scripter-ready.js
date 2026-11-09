@@ -1367,7 +1367,7 @@ function a2HumanityTracker (actor, editable, rules, creature) {
   const path = a2PathInfo(actor)
   const band = a2RankBand(hum.rank, path.bands)
   const boxes = a2HumanityBoxes(hum)
-  const buttons = boxes.map((state, i) => `<button type="button" class="resource-tracker-space a2-square${state === 'filled' ? ' filled' : ''}${state === 'violation' ? ' a2-violation' : ''}" data-pos="${i + 1}" title="${state === 'violation' ? 'Violation' : `Set rank ${i + 1}`}"></button>`)
+  const buttons = boxes.map((state, i) => `<button type="button" class="resource-tracker-space a2-square${state === 'filled' ? ' filled' : ''}${state === 'violation' ? ' a2-violation' : ''}" data-pos="${i + 1}" title="${state === 'violation' ? 'Violation: click to erase it (right-click anywhere marks one)' : `Set rank ${i + 1} (right-click: mark a violation)`}"></button>`)
   const mod = band ? `${a2Signed(band.modifier)} dice${path.teachings ? ` on ${path.teachings}` : ''} and with humans` : 'wight (rank 0)'
   wrap.className = 'resource-tracker a2-humanity'
   wrap.innerHTML = `
@@ -1381,10 +1381,15 @@ function a2HumanityTracker (actor, editable, rules, creature) {
   if (!editable) return wrap
   wrap.querySelectorAll('button[data-pos]').forEach((btn) => {
     const pos = a2Int(btn.dataset.pos)
-    a2On(btn, 'click', () => {
+    a2On(btn, 'click', (ev) => {
       const cur = a2ActorHumanity(actor)
+      // A click on a slashed box erases that slash; it never sets the rank.
+      if (pos > 10 - cur.violations) { a2WriteHumanity(actor, a2HumanityErase(cur, 1)); return }
       const rank = pos === cur.rank ? pos - 1 : pos
-      if (rank > cur.rank && cur.violations) ui.notifications.warn('Alpha 2: you can\'t raise your rank while you have violations (PG p.127).')
+      if (rank > cur.rank && cur.violations && !ev?.shiftKey) {
+        ui.notifications.warn('Alpha 2: you can\'t raise your rank while you have violations (PG p.127). Erase them first, or Shift-click to override.')
+        return
+      }
       a2WriteHumanity(actor, a2HumanitySetRank(cur, rank))
     })
     a2On(btn, 'contextmenu', (ev) => {
@@ -4464,7 +4469,7 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
   }
   const upd = uses ? a2tUsesUpdates(actor.items ?? [], durations) : []
   if (upd.length) { await actor.updateEmbeddedDocuments('Item', upd); parts.push(`${a2Plural(upd.length, 'use', 'uses')} reset`) }
-  return `${actor.name}: ${parts.length ? parts.join('; ') : 'nothing to do'}.`
+  return `${actor.name}: ${parts.length ? parts.map((x) => String(x).replace(/[.\s]+$/, '')).join('; ') : 'nothing to do'}.`
 }
 
 // ---- feeding ------------------------------------------------------------------------
