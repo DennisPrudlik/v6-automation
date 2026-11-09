@@ -6743,7 +6743,7 @@ function a2pRenderCard (message, root) {
       btn(`Roll for ${t.name}`, 'fa-dice-d10', `Roll ${c.opposeText} for ${t.name} against this power`, () => a2RollForTarget(rollMsg, roll, target)) // eslint-disable-line no-undef
     }
     if (gm) {
-      btn(`${t.name} won`, 'fa-check', 'The power beat this target: apply its effects (asks for the margin)', () => a2pResolveByHand(message, t))
+      btn(`Affects ${t.name}`, 'fa-check', 'The power beat this target: apply its effects (asks for the margin)', () => a2pResolveByHand(message, t))
       btn(`${t.name} resisted`, 'fa-xmark', 'The target resisted: no effect', () => a2pResolve(message, t.uuid, false, 0))
     }
   }
