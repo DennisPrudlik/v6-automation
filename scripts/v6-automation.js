@@ -711,6 +711,7 @@ function a2PrepareActor (actor) {
     s.health.value = a2Clamp(a2Int(stored ?? s.health.value), 0, total - a2Int(s.health.disabled))
   }
   if (!rules.surge) s.canBloodSurge = false
+  else if (a2Creature(actor) !== 'vampire') s.canBloodSurge = true // a ghoul surges (PG p.114), whatever its sheet was saved with
 }
 
 function a2PatchActorPrep () {
@@ -1006,7 +1007,7 @@ function a2AdjustContext (res, args, WOD6eTest) {
     attr = a2Half(lvl.value) // ST p.42: Attribute rank = half the pool
     const label = `${lvl.label} (${lvl.value})`
     const none = game.i18n.localize('WOD6E.ROLL.NoTraitsSelected')
-    t.testText = String(t.testText ?? '').startsWith(none) ? String(t.testText).replace(none, label) : `${label} · ${t.testText}`
+    t.testText = String(t.testText ?? '').startsWith(none) ? String(t.testText).replace(none, label) : `${label} · ${String(t.testText).replace(/ \(0\)/g, '')}` // the simple sheet has no traits: name them, without the zeros
   } else {
     raw = a2RawPool(actor, { ...data, focus: t.focus })
     const imp = a2Impairment(actor, t.attributes)
@@ -10339,6 +10340,7 @@ async function a2MovesBoot () {
   if (!a2vState.hooked) {
     a2vState.hooked = true
     Hooks.on('chatMessage', (log, text) => a2vChat(text))
+    for (const h of ['updateSetting', 'createSetting']) Hooks.on(h, (setting) => { try { if (String(setting?.key ?? '').startsWith(`${a2eNs()}.`)) ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn */ } })
     Hooks.on('renderActorSheetV2', a2vRenderSheet)
     Hooks.on('getSceneControlButtons', (controls) => {
       const tools = controls?.tokens?.tools
@@ -11314,7 +11316,7 @@ async function a2wRecap () {
       continue
     }
     const w = m.flags?.world ?? {}
-    if (w.a2t || w.a2socEnd || w.a2zcard || /a2y-bond|a2v-result|a2y-downtime/.test(m.content ?? '')) notable.push(strip(m.content).slice(0, 260))
+    if (w.a2t || w.a2socEnd || w.a2zcard || /a2y-bond|a2v-result|a2y-downtime|a2n-note/.test(m.content ?? '')) notable.push(strip(m.content).slice(0, 260))
     else if (w.a2task && a2yTaskState(w.a2task).state !== 'open') notable.push(`Task "${strip(m.content)}": ${a2yTaskState(w.a2task).state} at ${a2yTaskState(w.a2task).total}/${w.a2task.target}.`)
   }
   let clock = { night: 1, session: 1 }
