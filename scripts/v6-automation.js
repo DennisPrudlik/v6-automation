@@ -8478,7 +8478,10 @@ a.v6-actor { cursor: pointer; white-space: nowrap; }
 a.v6-item i { font-size: 0.8em; opacity: 0.75; margin-right: 0.3em; }
 a.v6-item.v6-item-icon { padding: 0 4px; font-size: 0.6em; vertical-align: middle; }
 a.v6-item.v6-item-icon i { margin: 0; }
-td > a.v6-item, th > a.v6-item { display: inline-block; white-space: normal; }
+a.v6-item { word-break: normal !important; overflow-wrap: normal; white-space: normal; }
+td a.v6-item, th a.v6-item, body.v6-theme .application.journal-sheet .journal-page-content td a.v6-item { background: none; border: 0; padding: 0; box-shadow: none; }
+td a.v6-item:hover { text-decoration: underline; text-shadow: none; }
+.v6-doc td.v6-span { min-width: 7.5em; }
 a.v6-actor i { font-size: 0.8em; opacity: 0.7; margin-right: 0.25em; }
 .a2l-request h4 { margin: 0 0 2px; font-weight: 700; }
 .a2l-request p { margin: 0 0 6px; }
