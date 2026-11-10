@@ -32,6 +32,9 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Roll requests:** the megaphone tool asks chosen characters for a pool against a Difficulty (shown or hidden); each gets a Roll button and the card collects the results.
 - **Combat flow:** turn order by Wits without rolling (players win ties), and a turn card for whoever is up: movement, action, minor action, a reaction counter, and what weighs on the character.
 - **Character creation:** a step-by-step window on blank characters: creature, generation and tier, ages, sire, clan, lifepaths, Attributes, Skills, Disciplines and powers, clan traits, merits, flaws, Resources. It counts every budget and writes the finished sheet.
+- **States:** surprised, on the ground, held, tied up, staked, torpor, burning, in sunlight, awake by day, cover, a hurt limb, blissful and failed Justify are token statuses that add or take dice by themselves. Fire and sunlight deal their damage at the start of the turn, with Put out and the fear frenzy test on the card.
+- **Action menu:** the fist tool opens every combat action: attacks, called shot, stake, decapitate, wrestling (grab, crush, tie up, escape), feed attack, coordinate, demoralize, distract, find flaw, assist, steady aim, cover. Each rolls the right contest and applies the result; one-off edges are used up by the roll they fit.
+- **Chat commands:** `/test wits+awareness 3`, `/req`, `/act`, `/states`, `/feed`, `/frenzy`, `/night` and more; `/v6 help` lists them.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.

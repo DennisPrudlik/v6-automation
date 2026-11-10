@@ -991,6 +991,9 @@ function a2AdjustContext (res, args, WOD6eTest) {
   // modifier on tests that don't (PG p.145). The player says which this test is.
   const fz = a2FrenzyAim(actor, c?.aim)
   if (fz.dice) { raw += fz.dice; notes.push(fz.note) }
+  // token states and one-off edges (alpha2-states)
+  const sm = typeof a2zMods === 'function' ? a2zMods(actor, t) : null
+  if (sm) { raw += sm.dice; notes.push(...sm.notes) }
   const tfRank = a2Int(a2NpcInfo(actor)?.trueFaith)
   const useTF = Boolean(c?.trueFaith) && tfRank > 0
   if (useTF) { raw += tfRank; notes.push(`True Faith +${tfRank} against the supernatural (ST p.28).`) }
@@ -1787,7 +1790,9 @@ async function a2Boot () {
       ['self-ticking bonuses', globalThis.a2AutoBoot ?? (typeof a2AutoBoot === 'function' ? a2AutoBoot : null)],
       ['journal links', globalThis.a2LinksBoot ?? (typeof a2LinksBoot === 'function' ? a2LinksBoot : null)],
       ['combat flow', globalThis.a2CombatBoot ?? (typeof a2CombatBoot === 'function' ? a2CombatBoot : null)],
-      ['character creation', globalThis.a2CreateBoot ?? (typeof a2CreateBoot === 'function' ? a2CreateBoot : null)]]) {
+      ['character creation', globalThis.a2CreateBoot ?? (typeof a2CreateBoot === 'function' ? a2CreateBoot : null)],
+      ['states', globalThis.a2StatesBoot ?? (typeof a2StatesBoot === 'function' ? a2StatesBoot : null)],
+      ['moves', globalThis.a2MovesBoot ?? (typeof a2MovesBoot === 'function' ? a2MovesBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -3000,7 +3005,7 @@ function a2xAttackInfo (message, roll) {
     resource: dmg?.resource === 'willpower' ? 'willpower' : 'health',
     rage: a2xFrenzyState(attacker)?.type === 'rage' && kind.melee ? 1 : 0, // PG p.146
     weapons: mods.weapons,
-    riders: mods.riders,
+    riders: [...mods.riders, ...(typeof a2zDamageRiders === 'function' ? a2zDamageRiders() : [])], // eslint-disable-line no-undef
     calc: parsed.rider || mods.weapons.length ? null : parsed.calc,
     formula: parsed.text,
     label: item?.name ?? (kind.kind === 'unarmed' ? 'Unarmed attack' : 'Ranged attack')
@@ -3109,6 +3114,7 @@ async function a2xApplyDamage (targets, opts = {}) {
   const list = a2xResolveTargets(targets)
   if (!list.length) { ui.notifications.warn('No target: target a token (T) or select one.'); return [] }
   const o = a2xDamageOpts(opts)
+  if (typeof a2zDamageApplied === 'function') a2zDamageApplied(list.map((t) => t.actor), o) // eslint-disable-line no-undef
   if (!game.user.isGM && !list.every((t) => t.actor.isOwner)) {
     if (!a2xGMActive()) { ui.notifications.warn('Damage to a token you don\'t own needs the GM online.'); return [] }
     a2xRelay('damage', { targets: list.map((t) => t.uuid), opts: o })
@@ -4320,6 +4326,7 @@ async function a2tEndSceneApply ({ surges = true, conditions = true, uses = true
   if (!game.user?.isGM) return null
   const list = actors ?? a2tAllActors()
   const lines = []
+  if (typeof a2zSceneEnd === 'function') await a2zSceneEnd(list) // eslint-disable-line no-undef
   for (const actor of list) {
     const ended = (actor.items ?? []).filter((i) => (i.flags?.wod6e?.bloodSurge ? surges : conditions && a2tExpires(i, ['scene'])))
     if (ended.length) await actor.deleteEmbeddedDocuments('Item', ended.map((i) => i.id))
@@ -4396,6 +4403,7 @@ async function a2tNewNightApply (entries = [], { expire = true, uses = true, thr
   await a2tSet('clock', { ...clock, night })
   const lines = []
   const actors = []
+  if (typeof a2zNightEnd === 'function') await a2zNightEnd(entries.map((e) => e.actor).filter(Boolean)) // eslint-disable-line no-undef
   for (const e of entries) {
     const actor = e.actor
     if (!actor) continue
@@ -7629,6 +7637,15 @@ function a2oPools (actor) {
   const dex = eff('system.attributes.dexterity')
   return { dodge: dex + eff('system.skills.athletics'), parry: dex + eff('system.skills.fighting') }
 }
+// The defences open to this target: Dodge and Parry for an attack, or the pools the
+// move names (alpha2-moves: a grab is avoided with Strength or Dexterity + Athletics).
+function a2oOptions (def, actor) {
+  if (!def?.move?.defences?.length) return a2oDefences({ melee: def?.melee, pools: a2oPools(actor) })
+  const eff = (path) => a2Int(foundry.utils.getProperty(actor, `${path}.effective`) ?? foundry.utils.getProperty(actor, `${path}.value`))
+  return def.move.defences.map((d) => ({ key: d.key, label: d.label, text: d.text, test: { attributes: d.attributes ?? [], skills: d.skills ?? [], disciplines: [] }, pool: (d.attributes ?? []).reduce((t, k) => t + eff(`system.attributes.${k}`), 0) + (d.skills ?? []).reduce((t, k) => t + eff(`system.skills.${k}`), 0) })).sort((a, b) => b.pool - a.pool)
+}
+// alpha2-moves: the next roll of this actor is this move.
+function a2oSetMove (actor, move) { if (actor?.uuid) a2oState.moves.set(actor.uuid, { ...move, at: Date.now() }) }
 function a2oOn () { return a2Enabled() && a2eGet('oppose', true) !== false }
 function a2oRoll (message) {
   const i = (message?.rolls ?? []).findIndex((r) => r?.options?.a2?.built)
@@ -7652,17 +7669,31 @@ async function a2oOnCreate (message, options, userId) {
       const attacker = a2xSpeaker(message)
       const info = a2xAttackInfo(message, r.roll)
       const targets = [...(game.user.targets ?? [])].map((t) => t.actor).filter((a) => a && a.uuid !== attacker?.uuid)
-      if (a2oWants({ built: true, isDefence: Boolean(a2.vsMessage), frenzy: Boolean(a2.frenzyTest), difficulty: r.roll.options.difficulty, opponent: a2.opponent, kind: info?.kind ?? null, hasOppose: Boolean(a2.oppose), targets: targets.length })) {
-        await message.update({ 'flags.world.a2def': { v: 1, melee: Boolean(info.melee), successes: a2Int(r.roll.total), attacker: attacker?.name ?? message.alias ?? 'Attacker', attackerUuid: attacker?.uuid ?? null, targets: targets.slice(0, 6).map((a) => ({ uuid: a.uuid, name: a.name })) } })
+      let move = attacker ? a2oState.moves.get(attacker.uuid) : null
+      if (move) { a2oState.moves.delete(attacker.uuid); if (Date.now() - move.at > 180000 || a2.vsMessage) move = null }
+      const wants = move
+        ? targets.length > 0 && !(a2Int(r.roll.options.difficulty) > 0)
+        : a2oWants({ built: true, isDefence: Boolean(a2.vsMessage), frenzy: Boolean(a2.frenzyTest), difficulty: r.roll.options.difficulty, opponent: a2.opponent, kind: info?.kind ?? null, hasOppose: Boolean(a2.oppose), targets: targets.length })
+      if (wants) {
+        const list = targets.slice(0, move ? 1 : 6)
+        // a target that can't act (tied up, staked, in torpor) doesn't defend
+        const helpless = (a) => typeof a2zHas === 'function' && ['tied', 'staked', 'torpor'].some((id) => a2zHas(a, id)) // eslint-disable-line no-undef
+        await message.update({ 'flags.world.a2def': { v: 1, melee: move ? Boolean(move.melee) : Boolean(info.melee), successes: a2Int(r.roll.total), attacker: attacker?.name ?? message.alias ?? 'Attacker', attackerUuid: attacker?.uuid ?? null,
+          targets: list.map((a) => ({ uuid: a.uuid, name: a.name, helpless: helpless(a) })),
+          move: move ? { id: move.id, label: move.label, defences: move.defences ?? null, effect: move.effect ?? null } : null } })
       }
     }
     // 5. A defence roll arrived: apply the damage at once, if set so.
-    if (a2.vsMessage && a2xIsGM() && a2eGet('opposeDamage', 'button') === 'auto') await a2oAutoDamage(game.messages.get(a2.vsMessage), a2xSpeaker(message))
+    if (a2.vsMessage && a2xIsGM()) {
+      const attack = game.messages.get(a2.vsMessage)
+      if (attack?.flags?.world?.a2def?.move?.effect && typeof a2vResolve === 'function') await a2vResolve(attack, a2xSpeaker(message)) // eslint-disable-line no-undef
+      else if (a2eGet('opposeDamage', 'button') === 'auto') await a2oAutoDamage(attack, a2xSpeaker(message))
+    }
   } catch (e) { console.error('V6 Automation | opposed test', e) }
 }
 
 // 2 and 3. Everyone sees the flag arrive: the GM rolls for its NPCs, players are told.
-const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve() }
+const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve(), moves: new Map() }
 function a2oOnUpdate (message, change) {
   try {
     if (!a2oOn() || !change?.flags?.world?.a2def) return
@@ -7673,6 +7704,10 @@ function a2oOnUpdate (message, change) {
     for (const t of def.targets ?? []) {
       const actor = a2FromUuid(t.uuid)
       if (!actor) continue
+      if (t.helpless) {
+        if (gm && def.move?.effect && typeof a2vResolve === 'function') a2oState.queue = a2oState.queue.then(() => a2vResolve(message, actor)).catch((e) => console.error('V6 Automation | move', e)) // eslint-disable-line no-undef
+        continue
+      }
       if (gm && !a2oPlayerOwned(actor)) {
         if (a2eGet('opposeNpcAuto', true) !== false) a2oState.queue = a2oState.queue.then(() => a2oDefend(message, actor, null, { auto: true })).catch((e) => console.error('V6 Automation | auto defence', e))
       } else if (!game.user.isGM && actor.isOwner) {
@@ -7687,17 +7722,17 @@ async function a2oDefend (message, actor, key = null, { auto = false } = {}) {
   const r = a2oRoll(message)
   if (!def || !r || !actor?.isOwner) return null
   if (a2oDefenceOf(message.id, actor.uuid)) { if (!auto) ui.notifications?.info(`${actor.name} has already defended against this attack.`); return null }
-  const list = a2oDefences({ melee: def.melee, pools: a2oPools(actor) })
+  const list = a2oOptions(def, actor)
   const pick = list.find((d) => d.key === key) ?? list[0]
   // the simple npc sheet has no Dexterity: it defends with its Physical level
   if (actor.type === 'npc' && typeof a2NpcBestLevel === 'function') a2State.pendingPreset.set(actor.uuid, { level: a2NpcBestLevel(actor, pick.test.attributes).key })
-  if (typeof a2uHint === 'function') a2uHint(actor, { against: def.attackerUuid ?? null }) // eslint-disable-line no-undef
+  if (typeof a2uHint === 'function') a2uHint(actor, { against: def.attackerUuid ?? null, defence: pick.key, vsRanged: !def.melee && !def.move }) // eslint-disable-line no-undef
   return a2eOpenRoll(actor, pick.test, { auto, vs: { messageId: message.id, successes: a2Int(r.roll.total), name: def.attacker } })
 }
 
 async function a2oAutoDamage (attack, defender) {
   const r = a2oRoll(attack)
-  if (!attack?.flags?.world?.a2def || !r || !defender) return
+  if (!attack?.flags?.world?.a2def || attack.flags.world.a2def.move?.effect || !r || !defender) return
   if (a2xAct(attack, r.index).damage?.length) return // already applied
   const { v } = a2xVerdict(attack, r.roll)
   if (v.win !== true) return
@@ -7733,10 +7768,10 @@ function a2oRenderChat (message, html) {
     const row = document.createElement('div')
     row.className = 'a2o-row'
     const label = document.createElement('span')
-    label.textContent = done ? `${t.name} defended.` : `${t.name}: defence pending (PG p.120).`
+    label.textContent = t.helpless ? `${t.name} can't defend.` : done ? `${t.name} ${def.move?.defences ? 'resisted' : 'defended'}.` : `${t.name}: ${def.move?.defences ? 'resistance' : 'defence'} pending.`
     row.append(label)
-    if (!done && actor?.isOwner) {
-      for (const d of a2oDefences({ melee: def.melee, pools: a2oPools(actor) })) {
+    if (!done && !t.helpless && actor?.isOwner) {
+      for (const d of a2oOptions(def, actor)) {
         const b = document.createElement('button')
         b.type = 'button'
         b.innerHTML = `<i class="fa-solid fa-shield-halved"></i> ${a2Esc(d.label)} (${d.pool})`
@@ -7778,7 +7813,7 @@ async function a2OpposeBoot () {
     Hooks.on('updateChatMessage', a2oOnUpdate)
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2oRenderChat(message, html) } catch (e) { console.error('V6 Automation | defence card', e) } })
   }
-  api.oppose = { booted: true, defend: a2oDefend, openRoll: a2eOpenRoll, rules: { defences: a2oDefences, wants: a2oWants } }
+  api.oppose = { booted: true, defend: a2oDefend, setMove: a2oSetMove, openRoll: a2eOpenRoll, rules: { defences: a2oDefences, wants: a2oWants } }
   console.log('V6 Automation | opposed tests loaded')
   return true
 }
@@ -8476,6 +8511,13 @@ function a2kRenderChat (message, html) {
       row.append(u)
     }
   }
+  if (used !== null && c?.isOwner && typeof a2vOpen === 'function') { // eslint-disable-line no-undef
+    const act = document.createElement('button')
+    act.type = 'button'
+    act.innerHTML = '<i class="fa-solid fa-hand-fist"></i> Actions'
+    act.addEventListener('click', (ev) => { ev.preventDefault(); a2vOpen(c.actor) }) // eslint-disable-line no-undef
+    row.append(act)
+  }
   box.append(row)
 }
 
@@ -9123,5 +9165,694 @@ async function a2CreateBoot () {
   return true
 }
 globalThis.a2CreateBoot ??= a2CreateBoot
+
+// ---- states that work by themselves (PG p.105-120, p.139-147) --------------------------
+// The rules name a handful of states. Here each is a token status (token HUD, or the
+// States window) that changes rolls without anyone remembering it:
+//   surprised        −2 on every test; ends at the start of its turn in the next round
+//   on the ground    melee attacks against it +2, ranged attacks −2 (beyond Close)
+//   held, tied up    a note on its rolls; the action menu offers Escape
+//   staked, torpor   can't act; attackers are told the target can't defend
+//   burning (1-4)    baneful damage at the start of its turn, rising every second turn;
+//                    a card with Put out (Dexterity + Athletics) and the fear frenzy test
+//   in sunlight (1-2) baneful damage at the start of its turn, fear frenzy test
+//   awake by day     −2 × generation modifier on every test
+//   in cover (1-3)   + dice on Dodge against ranged attacks; partial/superior cover takes
+//                    1/2 dice from its own ranged attacks
+//   hurt limb (1-3)  − dice on Strength and Dexterity tests (those that use the limb)
+//   blissful         −2 on Awareness and Investigation, until End Scene
+//   failed Justify   −2 on every test, until New Night
+// One-off edges from actions (Distract, Demoralize, Find Flaw, Coordinate, Assist, a
+// strong parry, Expose Vulnerability) are kept on the character as "edges": they add or
+// take dice on the next roll they fit, show why, and are used up by that roll.
+//
+// Settings (world): states (on), stateTurns (fire and sunlight tick at turn start, on).
+// Data: actor.statuses (v6-…), flags.world.a2.states.<id>.level, flags.world.a2.edges[].
+
+const A2Z_STATES = [
+  { id: 'surprised', name: 'Surprised', img: 'icons/svg/daze.svg', page: 'PG p.115' },
+  { id: 'prone', name: 'On the ground', img: 'icons/svg/falling.svg', page: 'PG p.109' },
+  { id: 'held', name: 'Held (wrestled)', img: 'icons/svg/net.svg', page: 'PG p.118' },
+  { id: 'tied', name: 'Tied up', img: 'icons/svg/anchor.svg', page: 'PG p.119' },
+  { id: 'staked', name: 'Staked', img: 'icons/svg/paralysis.svg', page: 'PG p.139' },
+  { id: 'torpor', name: 'Torpor', img: 'icons/svg/sleep.svg', page: 'PG p.140' },
+  { id: 'burning', name: 'Burning', img: 'icons/svg/fire.svg', page: 'PG p.139', levels: [1, 2, 3, 4], levelNames: { 1: 'small flame', 2: 'a third of the body', 3: 'half the body', 4: 'engulfed' }, start: 1 },
+  { id: 'sunlight', name: 'In sunlight', img: 'icons/svg/sun.svg', page: 'PG p.139', levels: [1, 2], levelNames: { 1: 'obscured or indirect', 2: 'direct' }, start: 2 },
+  { id: 'day', name: 'Awake by day', img: 'icons/svg/eye.svg', page: 'PG p.147' },
+  { id: 'cover', name: 'In cover', img: 'icons/svg/shield.svg', page: 'PG p.120', levels: [1, 2, 3], levelNames: { 1: 'light', 2: 'partial', 3: 'superior' }, start: 1 },
+  { id: 'limb', name: 'Hurt limb', img: 'icons/svg/bones.svg', page: 'PG p.117', levels: [1, 2, 3], levelNames: { 1: '−1', 2: 'mangled −2', 3: 'mangled −3' }, start: 1 },
+  { id: 'blissful', name: 'Blissful (the Kiss)', img: 'icons/svg/heal.svg', page: 'PG p.141' },
+  { id: 'justify', name: 'Failed Justify', img: 'icons/svg/downgrade.svg', page: 'PG p.127' }
+]
+const A2Z_BY_ID = Object.fromEntries(A2Z_STATES.map((s) => [s.id, s]))
+const a2zSid = (id) => `v6-${id}`
+// Fear frenzy Difficulty for the exposure (PG p.146).
+const A2Z_FEAR = { burning: { 1: 2, 2: 2, 3: 3, 4: 4 }, sunlight: { 1: 1, 2: 5 } }
+
+// What the states do to one roll. Pure.
+//  self / foe: { states: { id: level|true }, genMod, edges: [{ id, label, dice, when, from }] }
+//  roll: { attributes:[keys], skills:[keys], attack: 'melee'|'ranged'|null, defence: bool, vsRanged: bool, contested: bool, selfUuid, foeUuid }
+//  → { dice, notes: [text], used: [{ who: 'self'|'foe', id }] }
+function a2zCompute ({ self = {}, foe = null, roll = {} } = {}) {
+  const out = { dice: 0, notes: [], used: [] }
+  const add = (n, text) => { if (n) out.dice += n; out.notes.push(n ? `${text}: ${n > 0 ? '+' : '−'}${Math.abs(n)} ${Math.abs(n) === 1 ? 'die' : 'dice'}.` : `${text}.`) }
+  const st = self.states ?? {}
+  const has = (arr, k) => (arr ?? []).includes(k)
+  if (st.torpor || st.staked) add(0, `${st.staked ? 'Staked' : 'In torpor'}: can't act (PG p.140)`)
+  if (st.tied) add(0, 'Tied up: no movement or attacks; break out with Strength + Stamina (PG p.119)')
+  if (st.held) add(0, 'Held: unarmed or light weapons only; escape with Strength or Dexterity + Athletics (PG p.118)')
+  if (st.surprised) add(-2, 'Surprised (PG p.115)')
+  if (st.day) add(-2 * Math.max(1, a2Int(self.genMod, 1)), 'Awake by day (PG p.147)')
+  if (st.justify) add(-2, 'Failed Justify, until the next night (PG p.127)')
+  if (st.blissful && (has(roll.skills, 'awareness') || has(roll.skills, 'investigation'))) add(-2, 'Blissful from the Kiss (PG p.141)')
+  if (st.limb && (has(roll.attributes, 'strength') || has(roll.attributes, 'dexterity'))) add(-a2Clamp(a2Int(st.limb, 1), 1, 3), 'Hurt limb, if this test uses it (PG p.117)')
+  if (st.cover) {
+    const lvl = a2Clamp(a2Int(st.cover, 1), 1, 3)
+    if (roll.defence && roll.vsRanged && has(roll.skills, 'athletics')) add(lvl, `${['Light', 'Partial', 'Superior'][lvl - 1]} cover against a ranged attack (PG p.120)`)
+    if (roll.attack === 'ranged' && lvl > 1) add(-(lvl - 1), `Shooting from ${lvl === 2 ? 'partial' : 'superior'} cover (PG p.120)`)
+  }
+  const fits = (e, side) => {
+    if (e.only && e.only !== (side === 'self' ? roll.foeUuid : roll.selfUuid)) return false
+    if (side === 'self') return e.when === 'own-test' || (e.when === 'own-contested' && roll.contested) || (e.when === 'own-attack' && roll.attack)
+    return (e.when === 'foe-any' && roll.contested) || (e.when === 'foe-attack' && roll.attack) || (e.when === 'foe-defence' && roll.defence)
+  }
+  for (const e of self.edges ?? []) if (fits(e, 'self')) { add(a2Int(e.dice), e.label); out.used.push({ who: 'self', id: e.id }) }
+  if (foe) {
+    const fs = foe.states ?? {}
+    if (roll.attack) {
+      if (fs.prone) add(roll.attack === 'melee' ? 2 : -2, roll.attack === 'melee' ? 'Target on the ground (PG p.109)' : 'Target on the ground, shot from beyond Close (PG p.109)')
+      if (fs.torpor || fs.staked || fs.tied) add(0, `Target ${fs.tied ? 'tied up' : fs.staked ? 'staked' : 'in torpor'}: it can't defend; outside a fight it can be staked or beheaded with the right tool (PG p.139)`)
+    }
+    for (const e of foe.edges ?? []) if (fits(e, 'foe')) { add(a2Int(e.dice), e.label); out.used.push({ who: 'foe', id: e.id }) }
+  }
+  return out
+}
+// Fire grows: every second turn +1, up to 4 a turn (PG p.139). Pure. → { damage, next: { level, turns } }
+function a2zBurn ({ level = 1, turns = 0 } = {}) {
+  const lvl = a2Clamp(a2Int(level, 1), 1, 5)
+  const t = a2Int(turns) + 1
+  return { damage: lvl, next: { level: t % 2 === 0 ? Math.min(Math.max(lvl, 4), lvl + 1) : lvl, turns: t } }
+}
+
+const a2zState = { hooked: false, last: new Map(), seen: new Set() }
+function a2zOn () { return a2Enabled() && a2eGet('states', true) !== false }
+function a2zHas (actor, id) { return Boolean(actor?.statuses?.has?.(a2zSid(id))) }
+function a2zLevel (actor, id) { const d = A2Z_BY_ID[id]; return d?.levels ? a2Clamp(a2Int(actor?.flags?.world?.a2?.states?.[id]?.level, d.start), d.levels[0], d.levels.at(-1)) : true }
+function a2zEdges (actor) { const e = actor?.flags?.world?.a2?.edges; return Array.isArray(e) ? e : [] }
+function a2zSide (actor) {
+  if (!actor) return null
+  const states = {}
+  for (const s of A2Z_STATES) if (a2zHas(actor, s.id)) states[s.id] = a2zLevel(actor, s.id)
+  let genMod = 1
+  try { genMod = a2Creature(actor) === 'vampire' ? a2GenModifier(a2Int(actor.system?.vampire?.generation?.value, 13)) : 1 } catch (e) { /* 1 */ }
+  return { states, genMod, edges: a2zEdges(actor) }
+}
+// Called from the roll dialog's pool building (alpha2-core). → { dice, notes } or null
+function a2zMods (actor, t) {
+  if (!a2zOn() || !actor) return null
+  const key = (p) => String(p).split('.').pop()
+  const attributes = (t?.attributes ?? []).map(key)
+  const skills = (t?.skills ?? []).map(key)
+  const ctx = typeof a2uContext === 'function' ? a2uContext(actor) : {}
+  const hint = (typeof a2uState !== 'undefined' && a2uState.hints.get(actor.uuid)) || {}
+  const fresh = hint.at && Date.now() - hint.at < 120000
+  const defence = Boolean(fresh && hint.defence)
+  const foeActor = [...(game.user?.targets ?? [])].map((x) => x.actor).find((a) => a && a.uuid !== actor.uuid) ?? (fresh && hint.against ? a2FromUuid(hint.against) : null)
+  const attack = defence ? null : skills.includes('shooting') ? 'ranged' : skills.includes('fighting') ? 'melee' : null
+  const res = a2zCompute({
+    self: a2zSide(actor),
+    foe: a2zSide(foeActor),
+    roll: { attributes, skills, attack, defence, vsRanged: Boolean(fresh && hint.vsRanged), contested: Boolean(foeActor) || Boolean(ctx.target), selfUuid: actor.uuid, foeUuid: foeActor?.uuid ?? null }
+  })
+  a2zState.last.set(actor.uuid, { at: Date.now(), used: res.used.map((u) => ({ uuid: u.who === 'self' ? actor.uuid : foeActor?.uuid, id: u.id })).filter((u) => u.uuid) })
+  return res.dice || res.notes.length ? res : null
+}
+// Extra damage waiting on a target (Find Flaw). → riders for the damage window
+function a2zDamageRiders () {
+  if (!a2zOn()) return []
+  const out = []
+  for (const t of game.user?.targets ?? []) for (const e of a2zEdges(t.actor)) if (e.when === 'foe-damage') out.push({ label: `${e.label} (${t.actor.name})`, amount: a2Int(e.dice), baneful: false, edge: { uuid: t.actor.uuid, id: e.id } })
+  return out
+}
+
+// Damage went in: a Find Flaw waiting on the target is used up (PG p.111).
+function a2zDamageApplied (actors, o) {
+  if (!a2zOn() || /^(?:Fire|Sunlight)$/.test(o?.source ?? '')) return
+  for (const a of actors ?? []) {
+    const ids = a2zEdges(a).filter((e) => e.when === 'foe-damage').map((e) => e.id)
+    if (ids.length && a.isOwner) a2zDropEdges(a, ids).catch(() => {})
+  }
+}
+
+// ---- setting and clearing ----
+async function a2zSet (actorLike, id, on = true, { level = null } = {}) {
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : a2FromUuid(actorLike)
+  const def = A2Z_BY_ID[id]
+  if (!actor || !def) return false
+  if (!actor.isOwner) { ui.notifications?.warn(`You can't change ${actor.name}.`); return false }
+  if (def.levels && on) await actor.update({ [`flags.world.a2.states.${id}`]: { level: a2Clamp(a2Int(level, def.start), def.levels[0], def.levels.at(-1)), turns: 0, round: game.combat?.round ?? null } })
+  else if (id === 'surprised' && on) await actor.update({ 'flags.world.a2.states.surprised': { round: game.combat?.round ?? null } })
+  if (a2zHas(actor, id) !== Boolean(on)) await actor.toggleStatusEffect(a2zSid(id), { active: Boolean(on) })
+  // a stake means torpor (PG p.139)
+  if (id === 'staked' && on && !a2zHas(actor, 'torpor')) await actor.toggleStatusEffect(a2zSid('torpor'), { active: true })
+  return true
+}
+// kind: { label, dice, when, only?, from?, combatantId? }
+async function a2zAddEdge (actorLike, edge) {
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : a2FromUuid(actorLike)
+  if (!actor) return null
+  const c = game.combat?.started ? game.combat : null
+  const e = { id: foundry.utils.randomID(8), label: String(edge.label ?? 'Edge'), dice: a2Int(edge.dice), when: edge.when ?? 'own-test', only: edge.only ?? null, from: edge.from ?? null, combat: c?.id ?? null, until: edge.combatantId ?? null, round: c?.round ?? null }
+  await actor.update({ 'flags.world.a2.edges': [...a2zEdges(actor), e] })
+  return e
+}
+async function a2zDropEdges (actor, ids) {
+  const keep = a2zEdges(actor).filter((e) => !ids.includes(e.id))
+  if (keep.length !== a2zEdges(actor).length) await actor.update({ 'flags.world.a2.edges': keep })
+}
+
+// ---- the turn ----
+async function a2zTurnStart (combat) {
+  const c = combat?.combatant
+  const actor = c?.actor
+  if (!actor) return
+  // edges given "until your next turn" by this combatant end now
+  for (const other of combat.combatants) {
+    const a = other.actor
+    const gone = a2zEdges(a).filter((e) => e.combat === combat.id && e.until === c.id && e.round !== combat.round).map((e) => e.id)
+    if (a && gone.length) await a2zDropEdges(a, gone)
+  }
+  if (a2zHas(actor, 'surprised')) {
+    const r = actor.flags?.world?.a2?.states?.surprised?.round
+    if (r === null || r === undefined || combat.round > r) { await a2zSet(actor, 'surprised', false); await ChatMessage.create({ content: `<p><strong>${a2Esc(c.name)}</strong> is no longer surprised.</p>`, speaker: { alias: `Round ${combat.round}` }, whisper: game.users.filter((u) => u.isGM).map((u) => u.id) }) }
+  }
+  if (a2eGet('stateTurns', true) === false) return
+  for (const id of ['burning', 'sunlight']) {
+    if (!a2zHas(actor, id)) continue
+    const st = actor.flags?.world?.a2?.states?.[id] ?? {}
+    const level = a2zLevel(actor, id)
+    const burn = id === 'burning' ? a2zBurn({ level, turns: st.turns }) : { damage: level, next: { level, turns: a2Int(st.turns) + 1 } }
+    let line = ''
+    try {
+      const res = await a2xApplyDamage([actor], { amount: burn.damage, margin: 0, baneful: true, source: id === 'burning' ? 'Fire' : 'Sunlight', quiet: true })
+      line = res?.length ? '' : ' (not applied: apply it by hand)'
+    } catch (e) { console.error('V6 Automation | exposure damage', e); line = ' (not applied: apply it by hand)' }
+    await actor.update({ [`flags.world.a2.states.${id}`]: { ...st, ...burn.next } })
+    const vamp = a2Creature(actor) === 'vampire'
+    const fear = A2Z_FEAR[id][Math.min(level, id === 'burning' ? 4 : 2)]
+    await ChatMessage.create({
+      content: `<div class="a2z-card"><h4>${a2Esc(c.name)}: ${id === 'burning' ? 'burning' : 'in sunlight'}</h4><p>${burn.damage} ${vamp ? 'baneful ' : ''}damage at the start of the turn${line} (PG p.139).${id === 'burning' && burn.next.level > level ? ` The fire grows to ${burn.next.level} a turn.` : ''}</p></div>`,
+      speaker: { alias: `Round ${combat.round}` },
+      flags: { world: { a2zcard: { v: 1, actor: actor.uuid, id, level, fear: vamp ? fear : 0 } } }
+    })
+  }
+}
+function a2zRenderChat (message, html) {
+  const d = message.flags?.world?.a2zcard
+  if (!d) return
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  const box = root?.querySelector('.a2z-card')
+  const actor = a2FromUuid(d.actor)
+  if (!box || box.querySelector('.a2z-row') || !actor?.isOwner) return
+  const row = document.createElement('div')
+  row.className = 'a2z-row'
+  const btn = (label, title, fn) => { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = label; b.title = title; b.addEventListener('click', (ev) => { ev.preventDefault(); fn() }); row.append(b) }
+  if (d.id === 'burning' && a2zHas(actor, 'burning')) {
+    btn('<i class="fa-solid fa-fire-extinguisher"></i> Put out', `Roll on the ground: Dexterity + Athletics, Difficulty ${a2zLevel(actor, 'burning')} (PG p.139)`, async () => {
+      const roll = await a2eOpenRoll(actor, { attributes: ['dexterity'], skills: ['athletics'], disciplines: [], difficulty: a2zLevel(actor, 'burning') })
+      const v = roll?.a2Verdict ?? (roll ? a2RollVerdict(roll) : null)
+      if (v?.win) { await a2zSet(actor, 'burning', false); await a2zSet(actor, 'prone', true); ui.notifications.info(`${actor.name} is out, and on the ground.`) }
+    })
+  }
+  if (d.fear > 0 && typeof a2xFrenzyTest === 'function') btn('<i class="fa-solid fa-ghost"></i> Fear frenzy', `Fear frenzy test, Difficulty ${d.fear} (PG p.146)`, () => a2xFrenzyTest(actor, { type: 'fear', difficulty: d.fear }))
+  if (a2zHas(actor, d.id)) btn('Out of it', `${actor.name} is no longer ${d.id === 'burning' ? 'burning' : 'in sunlight'}`, async () => { await a2zSet(actor, d.id, false); ui.chat?.updateMessage?.(message) })
+  if (row.children.length) box.append(row)
+}
+
+// ---- the States window ----
+async function a2zOpen (actorLike = null) {
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character)
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
+  const rows = A2Z_STATES.map((s) => {
+    const on = a2zHas(actor, s.id)
+    const lvl = s.levels ? `<select name="lvl.${s.id}">${s.levels.map((l) => `<option value="${l}" ${a2zLevel(actor, s.id) === l ? 'selected' : ''}>${l}: ${a2Esc(s.levelNames[l])}</option>`).join('')}</select>` : ''
+    return `<label class="a2z-state"><input type="checkbox" name="st.${s.id}" ${on ? 'checked' : ''}> <img src="${s.img}" width="18" height="18" alt=""> <span>${a2Esc(s.name)} <small>${s.page}</small></span> ${lvl}</label>`
+  }).join('')
+  const edges = a2zEdges(actor)
+  const edgeRows = edges.length ? `<fieldset><legend>Edges waiting for a roll</legend>${edges.map((e) => `<label class="a2z-state"><input type="checkbox" name="edge.${e.id}" checked> <span>${a2Esc(e.label)} (${e.dice > 0 ? '+' : ''}${e.dice})</span></label>`).join('')}</fieldset>` : ''
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: `States: ${actor.name}` },
+    content: `<div class="a2z-window">${rows}${edgeRows}</div>`,
+    ok: { label: 'Apply', callback: (ev, button) => {
+      const f = button.form
+      return { states: Object.fromEntries(A2Z_STATES.map((s) => [s.id, { on: f.elements[`st.${s.id}`].checked, level: s.levels ? a2Int(f.elements[`lvl.${s.id}`].value) : null }])), drop: edges.filter((e) => !f.elements[`edge.${e.id}`]?.checked).map((e) => e.id) }
+    } },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return null
+  for (const [id, v] of Object.entries(res.states)) {
+    const d = A2Z_BY_ID[id]
+    if (v.on !== a2zHas(actor, id) || (v.on && d.levels && v.level !== a2zLevel(actor, id))) await a2zSet(actor, id, v.on, { level: v.level })
+  }
+  if (res.drop.length) await a2zDropEdges(actor, res.drop)
+  return res
+}
+
+// Called by End Scene and New Night (alpha2-tools).
+async function a2zSceneEnd (actors) {
+  for (const a of actors ?? []) {
+    try {
+      for (const id of ['blissful', 'surprised', 'cover', 'prone']) if (a2zHas(a, id)) await a2zSet(a, id, false)
+      if (a2zEdges(a).length) await a.update({ 'flags.world.a2.edges': [] })
+    } catch (e) { console.error('V6 Automation | states at End Scene', e) }
+  }
+}
+async function a2zNightEnd (actors) {
+  for (const a of actors ?? []) { try { for (const id of ['justify', 'day', 'sunlight']) if (a2zHas(a, id)) await a2zSet(a, id, false) } catch (e) { console.error('V6 Automation | states at New Night', e) } }
+}
+
+function a2zHooks () {
+  if (a2zState.hooked) return
+  a2zState.hooked = true
+  // a level state switched on from the token HUD gets its starting level
+  Hooks.on('createActiveEffect', (effect, options, userId) => {
+    try {
+      if (userId !== game.user.id) return
+      const actor = effect.parent
+      for (const s of effect.statuses ?? []) {
+        const id = String(s).replace(/^v6-/, '')
+        const d = A2Z_BY_ID[id]
+        if (!String(s).startsWith('v6-') || !d || actor?.documentName !== 'Actor') continue
+        if (d.levels && !actor.flags?.world?.a2?.states?.[id]?.level) actor.update({ [`flags.world.a2.states.${id}`]: { level: d.start, turns: 0, round: game.combat?.round ?? null } })
+        if (id === 'surprised' && !actor.flags?.world?.a2?.states?.surprised) actor.update({ 'flags.world.a2.states.surprised': { round: game.combat?.round ?? null } })
+        if (id === 'staked' && !a2zHas(actor, 'torpor')) actor.toggleStatusEffect(a2zSid('torpor'), { active: true })
+      }
+    } catch (e) { console.error('V6 Automation | state', e) }
+  })
+  Hooks.on('deleteActiveEffect', (effect, options, userId) => {
+    try {
+      if (userId !== game.user.id) return
+      const actor = effect.parent
+      for (const s of effect.statuses ?? []) {
+        const id = String(s).replace(/^v6-/, '')
+        if (String(s).startsWith('v6-') && A2Z_BY_ID[id] && actor?.documentName === 'Actor' && actor.flags?.world?.a2?.states?.[id]) actor.update({ [`flags.world.a2.states.${id}`]: null })
+      }
+    } catch (e) { /* nothing to clear */ }
+  })
+  Hooks.on('updateCombat', (combat, changes) => {
+    if (!a2zOn() || !a2xIsGM() || !combat?.started) return
+    if (!('turn' in (changes ?? {})) && !('round' in (changes ?? {}))) return
+    a2zTurnStart(combat).catch((e) => console.error('V6 Automation | states at turn start', e))
+  })
+  // the roller's client names the edges its roll used; the Storyteller's client spends them
+  Hooks.on('createChatMessage', (message, options, userId) => {
+    try {
+      if (userId !== game.user.id || !message.rolls?.some((r) => r?.options?.a2?.built)) return
+      const actor = a2xSpeaker(message)
+      const last = actor ? a2zState.last.get(actor.uuid) : null
+      if (!last?.used?.length || Date.now() - last.at > 120000) return
+      a2zState.last.delete(actor.uuid)
+      message.update({ 'flags.world.a2used': last.used })
+    } catch (e) { console.error('V6 Automation | edges', e) }
+  })
+  Hooks.on('updateChatMessage', (message, change) => {
+    try {
+      const used = change?.flags?.world?.a2used
+      if (!Array.isArray(used) || !a2xIsGM() || a2zState.seen.has(message.id)) return
+      a2zState.seen.add(message.id)
+      const by = new Map()
+      for (const u of used) by.set(u.uuid, [...(by.get(u.uuid) ?? []), u.id])
+      for (const [uuid, ids] of by) { const a = a2FromUuid(uuid); if (a) a2zDropEdges(a, ids) }
+    } catch (e) { console.error('V6 Automation | edges', e) }
+  })
+  Hooks.on('renderChatMessageHTML', (message, html) => { try { a2zRenderChat(message, html) } catch (e) { console.error('V6 Automation | state card', e) } })
+}
+
+function a2zInjectStyles () {
+  document.getElementById('v6a-states-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-states-style'
+  style.textContent = `
+.a2z-card h4 { margin: 0 0 2px; font-weight: 700; }
+.a2z-card p { margin: 0 0 6px; }
+.a2z-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.a2z-row button { flex: 1 1 0; line-height: 1.6; min-width: 7em; }
+.a2z-window { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 14px; }
+.a2z-window fieldset { grid-column: 1 / -1; }
+.a2z-state { display: flex; align-items: center; gap: 6px; min-height: 28px; }
+.a2z-state span { flex: 1; }
+.a2z-state small { opacity: 0.6; }
+.a2z-state select { flex: 0 0 9.5em; }
+.a2z-state img { border: 0; filter: drop-shadow(0 0 1px #000); }
+`
+  document.head.appendChild(style)
+}
+
+async function a2StatesBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.states?.booted) return true
+  a2eReg('states', { name: 'States change rolls', hint: 'Token states from the rules (surprised, on the ground, cover, awake by day, a hurt limb and so on) add or take dice by themselves, and one-off edges from actions are used up by the roll they fit.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('stateTurns', { name: 'Fire and sunlight tick each turn', hint: 'A burning or sunlit combatant takes its damage at the start of its turn and gets a card with Put out and the fear frenzy test.', scope: 'world', config: true, type: Boolean, default: true })
+  if (Array.isArray(CONFIG?.statusEffects)) for (const s of A2Z_STATES) if (!CONFIG.statusEffects.some((x) => x.id === a2zSid(s.id))) CONFIG.statusEffects.push({ id: a2zSid(s.id), name: `V6: ${s.name}`, img: s.img })
+  a2zInjectStyles()
+  a2zHooks()
+  api.states = { booted: true, open: a2zOpen, set: a2zSet, has: a2zHas, level: a2zLevel, addEdge: a2zAddEdge, edges: a2zEdges, list: A2Z_STATES, rules: { compute: a2zCompute, burn: a2zBurn } }
+  console.log('V6 Automation | states loaded')
+  return true
+}
+globalThis.a2StatesBoot ??= a2StatesBoot
+
+// ---- the action menu and chat commands (PG p.110-120) ----------------------------------
+// One window with everything a character can do in a fight. Pick an action; it rolls the
+// right pool, asks the target for the right resistance (the Storyteller's characters
+// answer by themselves), and applies what the rules say on a win:
+//   attacks        unarmed, melee, shoot, throw, called shot (−2)
+//   stake (−2)     margin 3+: staked and in torpor.  behead (−2): margin 4+
+//   wrestle        grab → held; crush → ½ Strength + margin; tie up → tied; escape
+//   feed attack    +2 dice vs Strength + Stamina; gentle or tear; Vitae to the attacker
+//   coordinate     margin + 1 dice shared among allies' next actions
+//   demoralize     the defender of the target's next attack gets margin + 1
+//   distract       the target's next contested test takes −(margin + 1)
+//   find flaw      the next damage to the target gets +(margin + 1)
+//   assist, steady aim, drop/stand, take cover, put out a fire
+// Open it: the fist tool in the token controls, the Actions button on a turn card, or
+// /act in chat. Chat commands: /v6 help lists them.
+//
+// Setting (world): moves (on).
+
+const A2V_ATT = { key: 'strength+fighting', test: { attributes: ['strength'], skills: ['fighting'] } }
+const A2V_GRAB_DEF = [
+  { key: 'str', label: 'Strength', text: 'Strength + Athletics', attributes: ['strength'], skills: ['athletics'] },
+  { key: 'dex', label: 'Dexterity', text: 'Dexterity + Athletics', attributes: ['dexterity'], skills: ['athletics'] }
+]
+const A2V_MOVES = [
+  { id: 'unarmed', group: 'Attack', label: 'Unarmed attack', icon: 'fa-hand-fist', pool: 'Strength + Fighting', test: A2V_ATT.test, target: true, hint: 'Damage ½ Strength + margin.' },
+  { id: 'melee', group: 'Attack', label: 'Melee weapon', icon: 'fa-gavel', pool: 'Strength + Fighting', test: A2V_ATT.test, target: true, hint: 'Pick the weapon when you apply damage.' },
+  { id: 'shoot', group: 'Attack', label: 'Shoot', icon: 'fa-gun', pool: 'Dexterity + Shooting', test: { attributes: ['dexterity'], skills: ['shooting'] }, target: true, hint: 'Point-blank −1, one band beyond range −2: use the modifier field.' },
+  { id: 'throw', group: 'Attack', label: 'Throw', icon: 'fa-baseball', pool: 'Strength + Shooting', test: { attributes: ['strength'], skills: ['shooting'] }, target: true, hint: 'Short range.' },
+  { id: 'called', group: 'Attack', label: 'Called shot', icon: 'fa-crosshairs', pool: 'Strength + Fighting −2', test: A2V_ATT.test, modifier: -2, target: true, hint: 'No margin on the damage; the margin sets the injury. Tick "Called shot" when you apply damage.' },
+  { id: 'calledR', group: 'Attack', label: 'Called shot (ranged)', icon: 'fa-crosshairs', pool: 'Dexterity + Shooting −2', test: { attributes: ['dexterity'], skills: ['shooting'] }, modifier: -2, target: true, hint: 'No margin on the damage; the margin sets the injury.' },
+  { id: 'stake', group: 'Attack', label: 'Stake', icon: 'fa-location-pin', pool: 'Strength + Fighting −2', test: A2V_ATT.test, modifier: -2, target: true, melee: true, effect: { kind: 'stake' }, hint: 'Sharpened wood. Margin 3+: paralysed, in torpor.' },
+  { id: 'behead', group: 'Attack', label: 'Decapitate', icon: 'fa-skull', pool: 'Strength + Fighting −2', test: A2V_ATT.test, modifier: -2, target: true, melee: true, effect: { kind: 'behead' }, hint: 'Medium or heavy edged weapon. Margin 4+.' },
+  { id: 'grab', group: 'Wrestle', label: 'Grab', icon: 'fa-hands-holding', pool: 'Strength + Fighting', test: A2V_ATT.test, target: true, melee: true, defences: A2V_GRAB_DEF, effect: { kind: 'state', state: 'held' }, hint: 'Within Close. On a win you hold the target; keeping hold is a minor action each turn.' },
+  { id: 'crush', group: 'Wrestle', label: 'Crush', icon: 'fa-compress', pool: 'Strength + Fighting', test: A2V_ATT.test, target: true, melee: true, needs: 'held', defences: [{ key: 'sta', label: 'Resist', text: 'Strength + Stamina', attributes: ['strength', 'stamina'], skills: [] }], effect: { kind: 'crush' }, hint: 'Against someone you hold: ½ Strength + margin. A miss doesn\'t end the hold.' },
+  { id: 'tie', group: 'Wrestle', label: 'Tie up', icon: 'fa-link', pool: 'Strength + Fighting', test: A2V_ATT.test, target: true, melee: true, needs: 'held', defences: A2V_GRAB_DEF, effect: { kind: 'tie' }, hint: 'Rope or cuffs needed. On a win the target is bound and the wrestle ends.' },
+  { id: 'escapeS', group: 'Wrestle', label: 'Escape (Strength)', icon: 'fa-person-running', pool: 'Strength + Athletics', test: { attributes: ['strength'], skills: ['athletics'] }, target: true, self: 'held', defences: [{ key: 'hold', label: 'Keep hold', text: 'Strength + Fighting', attributes: ['strength'], skills: ['fighting'] }], effect: { kind: 'escape' }, hint: 'Target whoever holds you.' },
+  { id: 'escapeD', group: 'Wrestle', label: 'Escape (Dexterity)', icon: 'fa-person-running', pool: 'Dexterity + Athletics', test: { attributes: ['dexterity'], skills: ['athletics'] }, target: true, self: 'held', defences: [{ key: 'hold', label: 'Keep hold', text: 'Strength + Fighting', attributes: ['strength'], skills: ['fighting'] }], effect: { kind: 'escape' }, hint: 'Target whoever holds you.' },
+  { id: 'feedG', group: 'Wrestle', label: 'Feed: gentle', icon: 'fa-droplet', pool: 'Strength + Fighting +2', test: A2V_ATT.test, modifier: 2, target: true, melee: true, vampire: true, defences: [{ key: 'sta', label: 'Resist', text: 'Strength + Stamina', attributes: ['strength', 'stamina'], skills: [] }], effect: { kind: 'feed', mode: 'gentle' }, hint: 'Target held, tied or helpless. Damage ½ Strength less your margin (at least 1); you drink.' },
+  { id: 'feedT', group: 'Wrestle', label: 'Feed: tear throat', icon: 'fa-droplet', pool: 'Strength + Fighting +2', test: A2V_ATT.test, modifier: 2, target: true, melee: true, vampire: true, defences: [{ key: 'sta', label: 'Resist', text: 'Strength + Stamina', attributes: ['strength', 'stamina'], skills: [] }], effect: { kind: 'feed', mode: 'tear' }, hint: 'Target held, tied or helpless. Damage ½ Strength + margin; you drink.' },
+  { id: 'coordinate', group: 'Team and tricks', label: 'Coordinate', icon: 'fa-people-group', pool: 'Intelligence + Awareness', test: { attributes: ['intelligence'], skills: ['awareness'] }, target: true, defences: [{ key: 'wits', label: 'Outthink', text: 'Intelligence + Wits', attributes: ['intelligence', 'wits'], skills: [] }], effect: { kind: 'coordinate' }, hint: 'Target the most cunning foe within Short. Margin + 1 dice shared among your allies\' next actions.' },
+  { id: 'demoralize', group: 'Team and tricks', label: 'Demoralize', icon: 'fa-face-frown', pool: 'Charisma + Persuasion', test: { attributes: ['charisma'], skills: ['persuasion'] }, target: true, defences: [{ key: 'nerve', label: 'Hold your nerve', text: 'Composure + Resolve', attributes: ['composure', 'resolve'], skills: [] }], effect: { kind: 'edge', when: 'foe-defence', sign: 1, label: 'Demoralized attacker' }, hint: 'When the target next attacks, its defender gets margin + 1 dice.' },
+  { id: 'distract', group: 'Team and tricks', label: 'Distract', icon: 'fa-wand-sparkles', pool: 'Manipulation + Subterfuge', test: { attributes: ['manipulation'], skills: ['subterfuge'] }, target: true, defences: [{ key: 'focus', label: 'Stay focused', text: 'Composure + Wits', attributes: ['composure', 'wits'], skills: [] }], effect: { kind: 'edge', when: 'own-contested', sign: -1, label: 'Distracted' }, hint: 'The target\'s next contested test takes −(margin + 1).' },
+  { id: 'findflaw', group: 'Team and tricks', label: 'Find flaw', icon: 'fa-magnifying-glass', pool: 'Wits + Awareness', test: { attributes: ['wits'], skills: ['awareness'] }, target: true, defences: [{ key: 'guard', label: 'Guard', text: 'Dexterity + Wits', attributes: ['dexterity', 'wits'], skills: [] }], effect: { kind: 'edge', when: 'foe-damage', sign: 1, label: 'Flaw found' }, hint: 'Within Medium, in sight. The next damage to the target gets +(margin + 1).' },
+  { id: 'assist', group: 'Team and tricks', label: 'Assist', icon: 'fa-handshake-angle', pool: 'no roll', target: true, instant: 'assist', hint: 'The targeted ally gets +1 die on its next test (at most 3 helpers).' },
+  { id: 'aim', group: 'Yourself', label: 'Steady aim', icon: 'fa-bullseye', pool: 'your movement', instant: 'aim', hint: '+1 die on your next ranged attack.' },
+  { id: 'prone', group: 'Yourself', label: 'Drop or stand up', icon: 'fa-person-falling', pool: 'your movement', instant: 'prone', hint: 'On the ground: melee attacks against you +2, ranged −2.' },
+  { id: 'cover', group: 'Yourself', label: 'Take cover', icon: 'fa-shield-halved', pool: 'movement', instant: 'cover', hint: 'Light +1, partial +2, superior +3 on Dodge against ranged attacks.' },
+  { id: 'putout', group: 'Yourself', label: 'Put out the fire', icon: 'fa-fire-extinguisher', pool: 'Dexterity + Athletics', self: 'burning', instant: 'putout', hint: 'Difficulty = the fire\'s damage per turn.' },
+  { id: 'states', group: 'Yourself', label: 'States…', icon: 'fa-list-check', pool: '', instant: 'states', hint: 'Set or clear this character\'s states.' }
+]
+const A2V_BY_ID = Object.fromEntries(A2V_MOVES.map((m) => [m.id, m]))
+
+// ---- pure rules ----
+// What a won or lost move does. Pure. → { text, set: [{ who: 'target'|'self', state, on }], edge: {...}|null, damage: n|null, vitae: n }
+function a2vOutcome (effect, { win = false, margin = 0, attacker = {}, target = {} } = {}) {
+  const m = Math.max(0, a2Int(margin))
+  const out = { text: '', set: [], edge: null, damage: null, vitae: 0, button: false }
+  const A = attacker.name ?? 'The attacker'
+  const T = target.name ?? 'the target'
+  const half = Math.max(0, Math.ceil(a2Int(attacker.strength) / 2))
+  switch (effect?.kind) {
+    case 'state':
+      if (win) { out.set.push({ who: 'target', state: effect.state, on: true }); out.text = `${A} holds ${T}. Keeping hold costs a minor action each turn (PG p.118).` } else out.text = `${T} slips the grab.`
+      break
+    case 'tie':
+      if (win) { out.set.push({ who: 'target', state: 'tied', on: true }, { who: 'target', state: 'held', on: false }); out.text = `${T} is tied up; the wrestle ends (PG p.119).` } else out.text = `${T} isn't bound. The hold stays.`
+      break
+    case 'escape':
+      if (win) { out.set.push({ who: 'self', state: 'held', on: false }); out.text = `${A} breaks free of ${T}.` } else out.text = `${A} stays held.`
+      break
+    case 'crush':
+      if (win) { out.damage = half + m; out.text = `${A} crushes ${T}: ½ Strength (${half}) + margin ${m} = ${out.damage} damage (PG p.119).` } else out.text = `${T} resists the crush. The hold stays.`
+      break
+    case 'stake':
+      if (win && m >= 3) { out.set.push({ who: 'target', state: 'staked', on: true }); out.text = `Margin ${m}: the stake finds the heart. ${T} is paralysed, in torpor until it is removed (PG p.117).` } else if (win) { out.button = true; out.text = `Margin ${m}: a hit, but not the heart (it needs 3). Apply the weapon's damage.` } else out.text = `${A} misses with the stake.`
+      break
+    case 'behead':
+      if (win && m >= 4) out.text = `Margin ${m}: ${T} is decapitated (PG p.117). A vampire is destroyed.`
+      else if (win) { out.button = true; out.text = `Margin ${m}: a hit, but the head stays on (it needs 4). Apply the weapon's damage.` } else out.text = `${A} misses.`
+      break
+    case 'feed':
+      if (win) {
+        out.damage = effect.mode === 'gentle' ? Math.max(1, half - m) : half + m
+        const want = Math.max(a2Int(attacker.strength), a2Int(attacker.stamina))
+        out.vitae = Math.max(0, Math.min(want, a2Int(attacker.missing, want), target.blood === null || target.blood === undefined ? want : a2Int(target.blood)))
+        out.text = `${A} feeds on ${T}: ${out.damage} damage (${effect.mode === 'gentle' ? `gentle, ½ Strength ${half} − margin ${m}, at least 1` : `tear throat, ½ Strength ${half} + margin ${m}`}), ${out.vitae} Vitae taken (PG p.118).${target.vampire ? ' Vampire blood: this counts toward a Blood Bond.' : ''}`
+      } else out.text = `${T} keeps ${A}'s fangs off.`
+      break
+    case 'edge':
+      if (win) { out.edge = { when: effect.when, dice: effect.sign * (m + 1), label: effect.label }; out.text = effect.when === 'foe-defence' ? `${T} is demoralized: whoever defends against its next attack gets +${m + 1} (PG p.111).` : effect.when === 'own-contested' ? `${T} is distracted: −${m + 1} on its next contested test (PG p.111).` : `${A} finds a flaw: the next damage to ${T} gets +${m + 1} (PG p.111).` } else out.text = `${T} isn't fooled.`
+      break
+    case 'coordinate':
+      if (win) out.text = `${A} coordinates: ${m + 1} ${m + 1 === 1 ? 'die' : 'dice'} for the allies' next actions (PG p.110).`
+      else out.text = `${A}'s plan is read.`
+      break
+    default: out.text = ''
+  }
+  return out
+}
+// Share n dice among allies: nobody gets a second die before everyone has one. Pure. → [count per ally]
+function a2vShare (n, allies) {
+  const out = new Array(Math.max(0, allies)).fill(0)
+  for (let i = 0; i < Math.max(0, a2Int(n)) && allies > 0; i++) out[i % allies]++
+  return out
+}
+// "/test wits+awareness 3" → { attributes, skills, disciplines, difficulty }. Pure.
+function a2vParsePool (text) {
+  const m = String(text ?? '').trim().match(/^([a-z ]+?)(?:\s*\+\s*([a-z ]+?))?(?:\s+(?:vs\.?\s*|diff(?:iculty)?\s*)?(\d{1,2}))?$/i)
+  if (!m) return null
+  const attrs = ['strength', 'dexterity', 'stamina', 'charisma', 'manipulation', 'composure', 'intelligence', 'wits', 'resolve']
+  const skills = ['athletics', 'awareness', 'craft', 'expression', 'fighting', 'investigation', 'knowledge', 'medicine', 'persuasion', 'sabotage', 'shooting', 'subterfuge', 'survival']
+  const discs = { animalism: 'animalism', auspex: 'auspex', 'blood sorcery': 'bloodSorcery', celerity: 'celerity', corruption: 'corruption', dominate: 'dominate', fortitude: 'fortitude', necromancy: 'necromancy', obfuscate: 'obfuscate', oblivion: 'oblivion', potence: 'potence', presence: 'presence', tellurgy: 'tellurgy', vicissitude: 'vicissitude' }
+  const find = (w) => { const k = String(w ?? '').trim().toLowerCase(); if (!k) return null; const hit = (list) => list.find((x) => x === k) ?? (k.length >= 3 ? list.find((x) => x.startsWith(k)) : null); const a = hit(attrs); if (a) return ['attributes', a]; const s = hit(skills); if (s) return ['skills', s]; const d = hit(Object.keys(discs)); return d ? ['disciplines', discs[d]] : null }
+  const test = { attributes: [], skills: [], disciplines: [] }
+  const a = find(m[1])
+  const b = m[2] ? find(m[2]) : null
+  if (!a || (m[2] && !b)) return null
+  test[a[0]].push(a[1])
+  if (b) test[b[0]].push(b[1])
+  if (m[3] !== undefined) test.difficulty = a2Int(m[3])
+  return test
+}
+
+const a2vState = { hooked: false }
+function a2vOn () { return a2Enabled() && a2eGet('moves', true) !== false }
+function a2vTarget (actor) { return [...(game.user?.targets ?? [])].map((t) => t.actor).find((a) => a && a.uuid !== actor?.uuid) ?? null }
+function a2vEff (actor, key) { const a = actor?.system?.attributes?.[key]; return a2Int(a?.effective ?? a?.value) }
+function a2vCombatantId (actor) { const c = game.combat?.started ? game.combat.combatants.find((x) => x.actor?.uuid === actor?.uuid) : null; return c?.id ?? null }
+async function a2vSay (html, actor = null) { return ChatMessage.create({ content: `<div class="a2v-result">${html}</div>`, speaker: actor ? ChatMessage.getSpeaker({ actor }) : { alias: 'Storyteller' } }) }
+
+async function a2vRun (actor, id) {
+  const move = A2V_BY_ID[id]
+  if (!move || !actor) return null
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const target = a2vTarget(actor)
+  if (move.target && !target) { ui.notifications.warn(`${move.label}: target a token first (T).`); return null }
+  if (move.needs && target && !a2zHas(target, move.needs)) ui.notifications.info(`${move.label} is for a target you hold. Rolling anyway.`)
+  if (move.instant) return a2vInstant(actor, move, target)
+  if (move.effect || move.defences) a2oSetMove(actor, { id: move.id, label: move.label, melee: Boolean(move.melee), defences: move.defences ?? null, effect: move.effect ?? null })
+  const test = { attributes: [...move.test.attributes], skills: [...move.test.skills], disciplines: [] }
+  if (move.modifier) test.modifier = { valueSource: 'flat', value: Math.abs(move.modifier), mode: move.modifier < 0 ? 'subtract' : 'add' }
+  if (typeof a2uHint === 'function' && target) a2uHint(actor, { against: target.uuid })
+  return a2eOpenRoll(actor, test)
+}
+async function a2vInstant (actor, move, target) {
+  switch (move.instant) {
+    case 'assist': {
+      const helpers = a2zEdges(target).filter((e) => e.label.startsWith('Assisted'))
+      if (helpers.length >= 3) { ui.notifications.warn(`${target.name} already has 3 helpers (PG p.110).`); return null }
+      if (!target.isOwner && !a2xIsGM()) { await a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> assists <strong>${a2Esc(target.name)}</strong>: +1 die on its next test (PG p.110). <em>Storyteller: add the edge in States.</em></p>`, actor); return null }
+      await a2zAddEdge(target, { label: `Assisted by ${actor.name}`, dice: 1, when: 'own-test', from: actor.uuid, combatantId: a2vCombatantId(actor) })
+      return a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> assists <strong>${a2Esc(target.name)}</strong>: +1 die on its next test (PG p.110).</p>`, actor)
+    }
+    case 'aim':
+      await a2zAddEdge(actor, { label: 'Steady aim', dice: 1, when: 'own-attack', from: actor.uuid, combatantId: null })
+      return a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> steadies the aim: +1 die on the next ranged attack, for the movement (PG p.109).</p>`, actor)
+    case 'prone': {
+      const on = !a2zHas(actor, 'prone')
+      await a2zSet(actor, 'prone', on)
+      return a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> ${on ? 'drops to the ground' : 'stands up'} (the movement, PG p.109).</p>`, actor)
+    }
+    case 'cover': {
+      const lvl = await foundry.applications.api.DialogV2.wait({ window: { title: 'Take cover' }, content: '<p>How good is the cover? (PG p.120)</p>', buttons: [{ action: '1', label: 'Light +1' }, { action: '2', label: 'Partial +2' }, { action: '3', label: 'Superior +3' }, { action: '0', label: 'Leave cover' }], rejectClose: false }).catch(() => null)
+      if (lvl === null || lvl === undefined) return null
+      await a2zSet(actor, 'cover', a2Int(lvl) > 0, { level: a2Int(lvl) })
+      return null
+    }
+    case 'putout': {
+      if (!a2zHas(actor, 'burning')) { ui.notifications.info(`${actor.name} isn't burning.`); return null }
+      const roll = await a2eOpenRoll(actor, { attributes: ['dexterity'], skills: ['athletics'], disciplines: [], difficulty: a2zLevel(actor, 'burning') })
+      const v = roll?.a2Verdict ?? (roll ? a2RollVerdict(roll) : null)
+      if (v?.win) { await a2zSet(actor, 'burning', false); await a2zSet(actor, 'prone', true) }
+      return roll
+    }
+    case 'states': return a2zOpen(actor)
+  }
+  return null
+}
+
+// The Storyteller's client settles a move once the resistance is in (or the target can't resist).
+async function a2vResolve (attack, defender) {
+  const def = attack?.flags?.world?.a2def
+  const effect = def?.move?.effect
+  const r = a2oRoll(attack)
+  if (!effect || !r || !defender || def.resolved) return null
+  const attacker = a2FromUuid(def.attackerUuid)
+  const helpless = (def.targets ?? []).find((t) => t.uuid === defender.uuid)?.helpless
+  let win, margin
+  if (helpless) { win = a2Int(r.roll.total) > 0 || effect.kind === 'feed'; margin = a2Int(r.roll.total) } else {
+    const { v } = a2xVerdict(attack, r.roll)
+    win = v.win === true
+    margin = Math.max(0, a2Int(v.margin))
+  }
+  const vit = attacker?.system?.health
+  const out = a2vOutcome(effect, { win, margin, attacker: { name: attacker?.name, strength: a2vEff(attacker, 'strength'), stamina: a2vEff(attacker, 'stamina'), missing: vit ? a2Int(vit.max) - a2Int(vit.value) : 0 }, target: { name: defender.name, vampire: a2Creature(defender) === 'vampire', blood: a2Creature(defender) === 'vampire' ? a2Int(defender.system?.health?.value) : null } })
+  await attack.update({ 'flags.world.a2def.resolved': true })
+  try {
+    for (const s of out.set) await a2zSet(s.who === 'self' ? attacker : defender, s.state, s.on)
+    if (out.edge) await a2zAddEdge(defender, { ...out.edge, from: attacker?.uuid ?? null, combatantId: a2vCombatantId(attacker) })
+    if (out.damage) await a2xApplyDamage([defender], { amount: out.damage, margin: 0, source: def.move.label, attackerUuid: attacker?.uuid ?? null, bodyAttack: true, messageId: attack.id, rollIndex: r.index })
+    if (out.vitae && attacker) {
+      await attacker.update({ 'system.health.value': Math.min(a2Int(vit.max), a2Int(vit.value) + out.vitae) })
+      if (a2Creature(defender) === 'vampire') await defender.update({ 'system.health.value': Math.max(0, a2Int(defender.system.health.value) - out.vitae) })
+    }
+    if (effect.kind === 'coordinate' && win && attacker) {
+      const mine = game.combat?.started ? game.combat.combatants.filter((c) => c.actor && c.actor.uuid !== attacker.uuid && c.token?.disposition === game.combat.combatants.find((x) => x.actor?.uuid === attacker.uuid)?.token?.disposition).map((c) => c.actor) : []
+      const share = a2vShare(margin + 1, mine.length)
+      for (let i = 0; i < mine.length; i++) if (share[i]) await a2zAddEdge(mine[i], { label: `Coordinated by ${attacker.name}`, dice: share[i], when: 'own-test', from: attacker.uuid, combatantId: a2vCombatantId(attacker) })
+      out.text += mine.length ? ` ${mine.map((a, i) => (share[i] ? `${a.name} +${share[i]}` : '')).filter(Boolean).join(', ')}.` : ' No allies in the fight to give them to: hand them out by hand.'
+    }
+  } catch (e) { console.error('V6 Automation | move', e); out.text += ' (Part of this could not be applied: see the console.)' }
+  if (out.text) await a2vSay(`<p><strong>${a2Esc(def.move.label)}:</strong> ${a2Esc(out.text)}</p>`, attacker)
+  return out
+}
+
+// ---- the window ----
+async function a2vOpen (actorLike = null) {
+  if (!a2vOn()) return null
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character)
+  if (!actor) { ui.notifications.warn('Select your token first.'); return null }
+  const target = a2vTarget(actor)
+  const vamp = a2Creature(actor) === 'vampire'
+  const groups = [...new Set(A2V_MOVES.map((m) => m.group))]
+  const usable = (m) => (!m.vampire || vamp) && (!m.self || a2zHas(actor, m.self))
+  const content = `<div class="a2v-window"><p class="a2v-who"><strong>${a2Esc(actor.name)}</strong> ${target ? `→ <strong>${a2Esc(target.name)}</strong>` : '<em>(no target: press T on a token for actions against someone)</em>'}</p>
+    ${groups.map((g) => `<fieldset><legend>${g}</legend><div class="a2v-grid">${A2V_MOVES.filter((m) => m.group === g && usable(m)).map((m) => `<button type="button" data-move="${m.id}" title="${a2Esc(m.hint)}" ${m.target && !target ? 'disabled' : ''}><i class="fa-solid ${m.icon}"></i> <span>${a2Esc(m.label)}</span><small>${a2Esc(m.pool)}</small></button>`).join('')}</div></fieldset>`).join('')}</div>`
+  let picked = null
+  await foundry.applications.api.DialogV2.wait({
+    window: { title: 'Actions', resizable: true },
+    position: { width: 620 },
+    content,
+    buttons: [{ action: 'close', label: 'Close' }],
+    rejectClose: false,
+    render: (ev, dialog) => {
+      dialog.element?.querySelectorAll('button[data-move]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); picked = b.dataset.move; dialog.close() }))
+    }
+  }).catch(() => null)
+  return picked ? a2vRun(actor, picked) : null
+}
+
+// ---- chat commands ----
+const A2V_HELP = [
+  ['/test wits+awareness 3', 'open the roll for your character (Difficulty optional)'],
+  ['/req wits+awareness 3', 'Storyteller: ask the players for that roll'],
+  ['/act', 'the action menu for the selected token'],
+  ['/states', 'set or clear states on the selected token'],
+  ['/feed, /surge, /frenzy [fear|rage|hunger], /xp', 'the matching tool for the selected token'],
+  ['/night, /scene, /award, /masquerade', 'Storyteller: New Night, End Scene, Award XP, Masquerade Tracker'],
+  ['/create', 'character creation for the selected or assigned character']
+]
+function a2vCommand (text) {
+  const m = String(text ?? '').trim().match(/^\/(v6\s+)?([a-z]+)\b\s*(.*)$/i)
+  if (!m) return null
+  const cmd = m[2].toLowerCase()
+  const arg = m[3].trim()
+  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help']
+  if (!known.includes(cmd)) return null
+  // without the "/v6" prefix only the unambiguous ones are ours
+  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade'].includes(cmd)) return null
+  return { cmd, arg }
+}
+function a2vChat (text) {
+  if (!a2vOn()) return true
+  const c = a2vCommand(text)
+  if (!c) return true
+  const A = globalThis.V6Alpha2 ?? {}
+  const actor = globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null
+  const gm = () => { if (!game.user.isGM) { ui.notifications.warn('That one is for the Storyteller.'); return false } return true }
+  try {
+    switch (c.cmd) {
+      case 'help': ChatMessage.create({ content: `<div class="a2v-result"><p><strong>V6 chat commands</strong> (with or without "/v6 " in front)</p><ul>${A2V_HELP.map(([a, b]) => `<li><code>${a}</code>: ${b}</li>`).join('')}</ul></div>`, whisper: [game.user.id] }); break
+      case 'test': { const t = a2vParsePool(c.arg); if (!t) ui.notifications.warn('Use it like: /test wits+awareness 3'); else a2lRollTest(t, {}) ; break }
+      case 'req': { if (!gm()) break; const t = a2vParsePool(c.arg); a2lRequestDialog(t ? { test: t } : {}); break }
+      case 'act': a2vOpen(actor); break
+      case 'states': a2zOpen(actor); break
+      case 'feed': A.tools?.feed?.(actor); break
+      case 'surge': A.tools?.bloodSurge?.(actor); break
+      case 'xp': A.tools?.spendXP?.(actor); break
+      case 'frenzy': if (typeof a2xFrenzyTest === 'function') a2xFrenzyTest(actor, ['fear', 'rage', 'hunger', 'clan'].includes(c.arg.toLowerCase()) ? { type: c.arg.toLowerCase() } : {}); break
+      case 'night': if (gm()) A.tools?.newNight?.(); break
+      case 'scene': if (gm()) A.tools?.endScene?.(); break
+      case 'award': if (gm()) A.tools?.awardXP?.(); break
+      case 'masquerade': if (gm()) A.tools?.masquerade?.(); break
+      case 'create': A.create?.(actor); break
+    }
+  } catch (e) { console.error('V6 Automation | chat command', e) }
+  return false
+}
+
+function a2vInjectStyles () {
+  document.getElementById('v6a-moves-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-moves-style'
+  style.textContent = `
+.a2v-window fieldset { margin: 4px 0; }
+.a2v-who { margin: 0 0 4px; }
+.a2v-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.a2v-grid button { display: grid; grid-template-columns: 1.4em 1fr; grid-template-rows: auto auto; align-items: center; column-gap: 4px; text-align: left; line-height: 1.25; padding: 4px 8px; height: auto; min-height: 40px; }
+.a2v-grid button i { grid-row: 1 / 3; }
+.a2v-grid button small { grid-column: 2; opacity: 0.65; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.a2v-grid button:disabled { opacity: 0.45; }
+.a2v-result p { margin: 0 0 2px; }
+.a2v-result ul { margin: 2px 0; padding-left: 18px; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2MovesBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.moves?.booted) return true
+  a2eReg('moves', { name: 'Action menu and chat commands', hint: 'The fist tool in the token controls opens every combat action (attacks, wrestling, feeding, team actions); /v6 help lists the chat commands.', scope: 'world', config: true, type: Boolean, default: true })
+  a2vInjectStyles()
+  if (!a2vState.hooked) {
+    a2vState.hooked = true
+    Hooks.on('chatMessage', (log, text) => a2vChat(text))
+    Hooks.on('getSceneControlButtons', (controls) => {
+      const tools = controls?.tokens?.tools
+      if (!tools || !a2vOn()) return
+      tools['v6a2-actions'] = { name: 'v6a2-actions', title: 'Actions (attacks, wrestling, team actions)', icon: 'fa-solid fa-hand-fist', order: 105, button: true, onChange: () => a2vOpen() }
+      tools['v6a2-states'] = { name: 'v6a2-states', title: 'States (surprised, on the ground, burning, cover…)', icon: 'fa-solid fa-list-check', order: 106, button: true, onChange: () => a2zOpen() }
+    })
+    try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
+  }
+  api.moves = { booted: true, open: a2vOpen, run: a2vRun, list: A2V_MOVES, rules: { outcome: a2vOutcome, share: a2vShare, parsePool: a2vParsePool, command: a2vCommand } }
+  api.act = a2vOpen
+  console.log('V6 Automation | action menu and chat commands loaded')
+  return true
+}
+globalThis.a2MovesBoot ??= a2MovesBoot
 
 if (game.ready) v6aBoot(); else Hooks.once('ready', v6aBoot)
