@@ -64,6 +64,7 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Automation log:** the Storyteller's client notes every change to Health, Vitae, Willpower and Humanity and can undo any of them. Such changes also float over the token for a moment.
 - **Shared Resources in downtime:** Acquire Resources can add a dot to a Resource the coterie shares.
 - **Dice modifiers kept (Foundry 14):** the system's roll window lost a test's own dice modifier in Foundry 14, so a called shot rolled without its −2 and a feed attack without its +2. The module puts it back, and lists the reasons for the pool (distance, states, impairment) under it.
+- **Importer, compare first:** tick "Only compare" and the importer writes nothing; it shows per bundle what an import would create, change or leave alone, down to the field, so your own edits aren't overwritten unseen.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.

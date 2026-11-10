@@ -13574,7 +13574,8 @@ globalThis.a2DeskBoot ??= a2DeskBoot
 // need its clans, Disciplines and journals); every book becomes an Adventure in
 // the world compendium "V6 Conversion", ready to import piece by piece - or,
 // if you prefer, straight into the world. Re-running updates what it made
-// before (matched by a hidden key) instead of duplicating it.
+// before (matched by a hidden key) instead of duplicating it. "Only compare"
+// writes nothing: it lists what an import would create, change or leave alone.
 // ---------------------------------------------------------------------------
 /* global game, ui, foundry, Folder, Item, Actor, JournalEntry, Scene, CONFIG, CONST, Image, File */
 
@@ -13640,6 +13641,69 @@ function v6iPages (pages) {
   return out
 }
 
+// ---- comparing a bundle with what is there (the "Only compare" run) ----------
+function v6iFlat (o, p = '', out = {}) {
+  for (const [k, v] of Object.entries(o ?? {})) {
+    const key = p ? `${p}.${k}` : k
+    if (v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length) v6iFlat(v, key, out); else out[key] = v
+  }
+  return out
+}
+function v6iSame (a, b) { return JSON.stringify(a ?? null) === JSON.stringify(b ?? null) }
+// What writing `want` over `have` would change: the paths. A field the bundle doesn't
+// mention keeps the system's default, so only what the bundle sets is compared; flags are
+// replaced whole, so a flag the world has and the bundle lacks is lost.
+function v6iChanges (have = {}, want = {}, { keys = ['name', 'type', 'img', 'system', 'flags', 'ownership', 'folder'], flagsReplace = true } = {}) {
+  const out = []
+  for (const k of keys) {
+    if (k === 'flags') {
+      const h = v6iFlat(have.flags ?? {})
+      const w = v6iFlat(want.flags ?? {})
+      for (const p of new Set([...Object.keys(h), ...Object.keys(w)])) {
+        if (p in w ? !v6iSame(h[p], w[p]) : (flagsReplace && !v6iEmpty(h[p]))) out.push(`flags.${p}${p in w ? '' : ' (lost)'}`)
+      }
+      continue
+    }
+    if (k === 'system' || k === 'ownership') {
+      const h = v6iFlat(have[k] ?? {})
+      for (const [p, v] of Object.entries(v6iFlat(want[k] ?? {}))) if (!v6iSame(h[p], v) && !(v6iEmpty(h[p]) && v6iEmpty(v))) out.push(`${k}.${p}`)
+      continue
+    }
+    if (!(k in want)) continue
+    if (!v6iSame(have[k], want[k]) && !(v6iEmpty(have[k]) && v6iEmpty(want[k]))) out.push(k)
+  }
+  return out
+}
+function v6iEmpty (v) { return v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length) }
+// Journal pages: by position, name and text.
+function v6iPageChanges (have = [], want = []) {
+  const out = []
+  if (have.length !== want.length) out.push(`pages ${have.length} → ${want.length}`)
+  for (let i = 0; i < Math.min(have.length, want.length); i++) {
+    if ((have[i].name ?? '') !== (want[i].name ?? '')) out.push(`page ${i + 1} name: "${have[i].name}" → "${want[i].name}"`)
+    else if ((have[i].text?.content ?? '') !== (want[i].text?.content ?? '')) out.push(`page "${want[i].name}" text`)
+  }
+  return out
+}
+// Embedded items of an actor: by position.
+function v6iItemChanges (have = [], want = []) {
+  const out = []
+  if (have.length !== want.length) out.push(`items ${have.length} → ${want.length}`)
+  for (let i = 0; i < Math.min(have.length, want.length); i++) {
+    if ((have[i].name ?? '') !== (want[i].name ?? '')) { out.push(`item ${i + 1}: "${have[i].name}" → "${want[i].name}"`); continue }
+    const c = v6iChanges(have[i], want[i], { keys: ['type', 'img', 'system', 'flags'], flagsReplace: true })
+    if (c.length) out.push(`item "${want[i].name}": ${c.slice(0, 3).join(', ')}${c.length > 3 ? '…' : ''}`)
+  }
+  return out
+}
+// One line of the report. → { kind, name, state: 'new' | 'changed' | 'same' | 'kept', paths }
+function v6iRow (kind, name, have, paths) { return { kind, name, state: !have ? 'new' : paths.length ? 'changed' : 'same', paths } }
+function v6iTally (rows = []) {
+  const out = {}
+  for (const r of rows) { out[r.kind] ??= { new: 0, changed: 0, same: 0, kept: 0 }; out[r.kind][r.state]++ }
+  return out
+}
+
 async function runV6Importer (opts = {}) {
   const FLAG = 'v6key'
   const ROOT_DIR = 'vtm-v6'
@@ -13655,7 +13719,7 @@ async function runV6Importer (opts = {}) {
   const servedList = served.map((f, i) => `<label style="display:block"><input type="checkbox" name="served" value="${i}" checked> ${decodeURIComponent(f.split('/').pop())}</label>`).join('')
 
   const choice = opts.auto
-    ? { list: served.filter((u) => !opts.only || opts.only.some((o) => u.includes(o))).map(fromUrl), images: true, mode: opts.mode ?? 'compendium' }
+    ? { list: served.filter((u) => !opts.only || opts.only.some((o) => u.includes(o))).map(fromUrl), images: opts.images !== false, mode: opts.mode ?? 'compendium', dry: Boolean(opts.dryRun) }
     : await foundry.applications.api.DialogV2.prompt({
       window: { title: 'V6 Conversion Importer' },
       content: (served.length ? `<p>Bundles found in <code>${ROOT_DIR}/bundles</code>:</p>${servedList}<hr>` : '') +
@@ -13665,7 +13729,8 @@ async function runV6Importer (opts = {}) {
            <label><input type="radio" name="mode" value="compendium" checked> the "V6 Conversion" compendium, one Adventure per book (recommended)</label><br>
            <label><input type="radio" name="mode" value="world"> the world sidebar</label></p>
          <p><em>The V6 Rules bundle always goes into the world.</em></p>
-         <p><label><input type="checkbox" name="images" checked> Download images from Alchemy into <code>${ROOT_DIR}/</code></label></p>`,
+         <p><label><input type="checkbox" name="images" checked> Download images from Alchemy into <code>${ROOT_DIR}/</code></label></p>
+         <p><label><input type="checkbox" name="dry"> <strong>Only compare:</strong> write nothing, and show what an import would create, change or leave alone</label></p>`,
       ok: {
         label: 'Import',
         callback: (ev, button) => {
@@ -13673,13 +13738,15 @@ async function runV6Importer (opts = {}) {
           const picked = [...(el.bundles.files ?? [])]
           const boxes = el.served ? (el.served.length !== undefined ? [...el.served] : [el.served]) : []
           for (const b of boxes) if (b.checked) picked.push(fromUrl(served[Number(b.value)]))
-          return { list: picked, images: el.images.checked, mode: [...el.mode].find((r) => r.checked)?.value ?? 'compendium' }
+          return { list: picked, images: el.images.checked, mode: [...el.mode].find((r) => r.checked)?.value ?? 'compendium', dry: Boolean(el.dry?.checked) }
         }
       },
       rejectClose: false
     })
   if (!choice?.list?.length) return ui.notifications.warn('No bundle selected.')
 
+  const dry = Boolean(choice.dry)
+  const report = [] // one entry per bundle: { name, target, rows, images }
   const log = (m) => console.log(`V6 Importer | ${m}`)
   const note = (m) => { ui.notifications.info(m); log(m) }
 
@@ -13746,10 +13813,17 @@ async function runV6Importer (opts = {}) {
   const withFlags = (e) => ({ ...e.data, flags: foundry.utils.mergeObject(e.data.flags ?? {}, { world: { [FLAG]: e.key } }) })
 
   async function mirrorAll (bundle) {
-    if (!choice.images) return
+    if (!choice.images) return null
     const urls = [...collectUrls(bundle)]
-    if (!urls.length) return
+    if (!urls.length) return null
     const dir = `${ROOT_DIR}/${bundle.slug}`
+    if (dry) {
+      // nothing is fetched: note where each image would live, and how many are not there yet
+      const have = await listDir(dir)
+      let missing = 0
+      for (const u of urls) { const name = u.split('/').pop().split('?')[0]; if (!have.has(name)) missing++; urlMap.set(u, `${dir}/${name}`) }
+      return { total: urls.length, missing }
+    }
     await ensureDir(dir)
     let done = 0; let failed = 0; const queue = [...urls]
     await Promise.all(Array.from({ length: 4 }, async () => {
@@ -13759,17 +13833,40 @@ async function runV6Importer (opts = {}) {
   }
 
   // ---------- world import (sidebar) ----------
-  async function importToWorld (data) {
+  async function importToWorld (data, rows = null) {
     const folderIds = {}
     const folders = byKey(game.folders)
     for (const f of data.folders ?? []) {
       const parent = f.parent ? folderIds[f.parent] : null
       let doc = folders.get(f.key)
       const fd = { name: f.name, type: f.type, folder: parent ?? null, color: f.color ?? null, sorting: f.sorting ?? 'a', flags: { world: { [FLAG]: f.key } } }
+      if (rows) { rows.push(v6iRow('folder', f.name, doc, doc ? v6iChanges(doc.toObject(), { name: fd.name, folder: fd.folder }, { keys: ['name', 'folder'] }) : [])); folderIds[f.key] = doc?.id ?? `new:${f.key}`; continue }
       if (doc) await doc.update(fd); else doc = await Folder.create(fd)
       folderIds[f.key] = doc.id
     }
     const meta = (e) => ({ ...withFlags(e), folder: e.folder ? folderIds[e.folder] ?? null : null })
+    if (rows) {
+      // the comparison: the same data an import would write, held against what is there
+      const seenDry = (d) => ({ ...d, ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER, ...(d.ownership ?? {}) } })
+      const items = byKey(game.items)
+      for (const e of data.items ?? []) { const ex = items.get(e.key); rows.push(v6iRow('item', e.data?.name ?? e.key, ex, ex ? v6iChanges(ex.toObject(), seenDry(meta(e))) : [])) }
+      const actors = byKey(game.actors)
+      for (const e of data.actors ?? []) {
+        const d = meta(e); const ex = actors.get(e.key)
+        if (ex?.hasPlayerOwner) { rows.push({ kind: 'actor', name: ex.name, state: 'kept', paths: ['a player owns it: an import leaves it alone'] }); continue }
+        if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
+        rows.push(v6iRow('actor', d.name ?? e.key, ex, ex ? [...v6iChanges(ex.toObject(), d, { keys: ['name', 'type', 'img', 'system', 'flags', 'folder'] }), ...v6iItemChanges(ex.items.map((i) => i.toObject()), d.items ?? [])] : []))
+      }
+      const journals = byKey(game.journal)
+      for (const e of data.journals ?? []) {
+        const d = meta(e); const ex = journals.get(e.key)
+        const pages = v6iPages(d.pages)
+        rows.push(v6iRow('journal', d.name ?? e.key, ex, ex ? [...v6iChanges(ex.toObject(), d, { keys: ['name', 'folder'] }), ...v6iPageChanges([...ex.pages].sort((a, b) => a.sort - b.sort).map((p) => p.toObject()), pages)] : []))
+      }
+      const scenes = byKey(game.scenes)
+      for (const e of data.scenes ?? []) { const ex = scenes.get(e.key); rows.push(v6iRow('scene', e.name || 'Untitled scene', ex, ex ? v6iChanges(ex.toObject(), { name: e.name || 'Untitled scene' }, { keys: ['name'] }) : [])) }
+      return
+    }
 
     const items = byKey(game.items); const newItems = []; const upd = []
     // rules items are for everyone to look up: players can see them unless the bundle says otherwise
@@ -13816,8 +13913,8 @@ async function runV6Importer (opts = {}) {
     if (pack.locked) await pack.configure({ locked: false })
     return pack
   }
-  async function importToAdventure (data) {
-    const pack = await getPack()
+  async function importToAdventure (data, rows = null) {
+    const pack = rows ? (game.packs.get(`world.${PACK_NAME}`) ?? null) : await getPack()
     const fid = {}
     for (const f of data.folders ?? []) fid[f.key] = stableId(f.key)
     const folders = (data.folders ?? []).map((f, i) => ({ _id: fid[f.key], name: f.name, type: f.type, folder: f.parent ? fid[f.parent] ?? null : null, sorting: 'a', sort: (i + 1) * 100, color: null, flags: { world: { [FLAG]: f.key } } }))
@@ -13839,7 +13936,20 @@ async function runV6Importer (opts = {}) {
       description: `<p>${data.name}: ${counts}.</p><p>Import everything or pick parts. Re-importing replaces what came from this Adventure and keeps everything else.</p>`,
       folders, items, actors, journal, scenes, flags: { world: { [FLAG]: data.slug } }
     }
-    const old = (await pack.getDocuments()).find((a) => a.getFlag('world', FLAG) === data.slug)
+    const old = pack ? (await pack.getDocuments()).find((a) => a.getFlag('world', FLAG) === data.slug) : null
+    if (rows) {
+      const have = old ? old.toObject() : null
+      const by = (list) => new Map((list ?? []).map((d) => [d._id, d]))
+      const hf = by(have?.folders); const hi = by(have?.items); const ha = by(have?.actors); const hj = by(have?.journal); const hs = by(have?.scenes)
+      for (const f of folders) rows.push(v6iRow('folder', f.name, hf.get(f._id), hf.get(f._id) ? v6iChanges(hf.get(f._id), f, { keys: ['name', 'folder'] }) : []))
+      for (const d of items) rows.push(v6iRow('item', d.name, hi.get(d._id), hi.get(d._id) ? v6iChanges(hi.get(d._id), d) : []))
+      for (const d of actors) { const ex = ha.get(d._id); rows.push(v6iRow('actor', d.name, ex, ex ? [...v6iChanges(ex, d, { keys: ['name', 'type', 'img', 'system', 'flags', 'folder'] }), ...v6iItemChanges(ex.items ?? [], d.items ?? [])] : [])) }
+      for (const d of journal) { const ex = hj.get(d._id); rows.push(v6iRow('journal', d.name, ex, ex ? [...v6iChanges(ex, d, { keys: ['name', 'folder'] }), ...v6iPageChanges([...(ex.pages ?? [])].sort((a, b) => a.sort - b.sort), d.pages)] : [])) }
+      for (const d of scenes) rows.push(v6iRow('scene', d.name, hs.get(d._id), hs.get(d._id) ? v6iChanges(hs.get(d._id), d, { keys: ['name', 'folder'] }) : []))
+      // what the Adventure holds now and the bundle no longer does
+      for (const [kind, map, want] of [['item', hi, items], ['actor', ha, actors], ['journal', hj, journal], ['scene', hs, scenes]]) { const ids = new Set(want.map((d) => d._id)); for (const [id, d] of map) if (!ids.has(id)) rows.push({ kind, name: d.name, state: 'changed', paths: ['in the Adventure but not in the bundle: an import removes it'] }) }
+      return
+    }
     // the new one first: if Foundry rejects it, the old Adventure is still there
     const made = await CONFIG.Adventure.documentClass.create(adv, { pack: pack.collection })
     if (!made) throw new Error('Foundry rejected the Adventure data (see the console for the field)')
@@ -13850,14 +13960,51 @@ async function runV6Importer (opts = {}) {
   for (const f of choice.list) {
     try {
       const bundle = JSON.parse(await f.text())
+      const toWorld = bundle.target === 'world' || choice.mode === 'world'
+      if (dry) {
+        log(`Comparing "${bundle.name}"…`)
+        const images = await mirrorAll(bundle)
+        const rows = []
+        if (toWorld) await importToWorld(rewrite(bundle), rows); else await importToAdventure(rewrite(bundle), rows)
+        report.push({ name: bundle.name, slug: bundle.slug, target: toWorld ? 'world' : 'compendium', rows, tally: v6iTally(rows), images })
+        continue
+      }
       note(`Importing "${bundle.name}"…`)
       await mirrorAll(bundle)
       const data = rewrite(bundle)
-      if (bundle.target === 'world' || choice.mode === 'world') await importToWorld(data)
+      if (toWorld) await importToWorld(data)
       else await importToAdventure(data)
-    } catch (err) { ui.notifications.error(`Import of ${f.name} failed: ${err.message}`); console.error(err) }
+    } catch (err) { ui.notifications.error(`${dry ? 'Comparing' : 'Import of'} ${f.name} failed: ${err.message}`); console.error(err) }
+  }
+  if (dry) {
+    if (!opts.quiet) v6iShowReport(report)
+    return report
   }
   note('V6 import finished.')
+}
+
+// The "Only compare" result as a window: per bundle what is new, changed, the same.
+function v6iShowReport (report = []) {
+  const esc = v6iEscape
+  const kinds = ['folder', 'item', 'actor', 'journal', 'scene']
+  const cell = (t) => (t ? [t.new ? `${t.new} new` : '', t.changed ? `<strong>${t.changed} changed</strong>` : '', t.same ? `${t.same} same` : '', t.kept ? `${t.kept} kept` : ''].filter(Boolean).join(', ') : '')
+  const body = report.map((b) => {
+    const changed = b.rows.filter((r) => r.state === 'changed' || r.state === 'kept')
+    const detail = changed.length ? `<details><summary>${changed.length} to look at</summary><ul>${changed.slice(0, 60).map((r) => `<li><strong>${esc(r.kind)}</strong> ${esc(r.name)}: ${esc(r.paths.slice(0, 6).join('; '))}${r.paths.length > 6 ? ` … (${r.paths.length})` : ''}</li>`).join('')}${changed.length > 60 ? `<li>… and ${changed.length - 60} more (the full list is in the console, F12)</li>` : ''}</ul></details>` : ''
+    const img = b.images ? `<br><small>${b.images.missing} of ${b.images.total} images would be downloaded</small>` : ''
+    return `<tr><td><strong>${esc(b.name)}</strong><br><small>${b.target === 'world' ? 'into the world' : 'Adventure in the compendium'}</small>${img}${detail}</td>${kinds.map((k) => `<td>${cell(b.tally[k])}</td>`).join('')}</tr>`
+  }).join('')
+  console.log('V6 Importer | comparison', report)
+  const total = report.reduce((t, b) => t + b.rows.filter((r) => r.state === 'changed').length, 0)
+  const fresh = report.reduce((t, b) => t + b.rows.filter((r) => r.state === 'new').length, 0)
+  return foundry.applications.api.DialogV2.prompt({
+    window: { title: 'V6 Importer: what an import would do', resizable: true },
+    position: { width: 860 },
+    content: `<div style="max-height:65vh;overflow-y:auto"><p>Nothing was written. An import of these bundles would create <strong>${fresh}</strong> and change <strong>${total}</strong> things. "Changed" means the bundle differs from what is there now: your own edits to such a thing would be overwritten.</p>
+      <table><thead><tr><th>Bundle</th>${kinds.map((k) => `<th>${k[0].toUpperCase()}${k.slice(1)}s</th>`).join('')}</tr></thead><tbody>${body || '<tr><td colspan="6"><em>No bundle could be read.</em></td></tr>'}</tbody></table></div>`,
+    ok: { label: 'Close' },
+    rejectClose: false
+  }).catch(() => null)
 }
 
 
