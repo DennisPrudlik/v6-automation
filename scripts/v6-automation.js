@@ -9792,7 +9792,9 @@ const A2V_HELP = [
   ['/bonds, /downtime', 'Blood Bonds and downtime actions for the selected token (/v6 downtime reset: Storyteller)']
 ]
 function a2vCommand (text) {
-  const m = String(text ?? '').trim().match(/^\/(v6\s+)?([a-z]+)\b\s*(.*)$/i)
+  // typed into Foundry's chat box, the text arrives as HTML: "<p>/test wits+awareness 3</p>"
+  const plain = String(text ?? '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#43;|&plus;/g, '+').replace(/\s+/g, ' ').trim()
+  const m = plain.match(/^\/(v6\s+)?([a-z]+)\b\s*(.*)$/i)
   if (!m) return null
   const cmd = m[2].toLowerCase()
   const arg = m[3].trim()
