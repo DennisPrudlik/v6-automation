@@ -1002,6 +1002,9 @@ function a2AdjustContext (res, args, WOD6eTest) {
   // token states and one-off edges (alpha2-states)
   const sm = typeof a2zMods === 'function' ? a2zMods(actor, t) : null
   if (sm) { raw += sm.dice; notes.push(...sm.notes) }
+  // distance between the tokens (alpha2-fight)
+  const fm = typeof a2fMods === 'function' ? a2fMods(actor, t, item) : null // eslint-disable-line no-undef
+  if (fm) { raw += fm.dice; notes.push(...fm.notes) }
   const tfRank = a2Int(a2NpcInfo(actor)?.trueFaith)
   const useTF = Boolean(c?.trueFaith) && tfRank > 0
   if (useTF) { raw += tfRank; notes.push(`True Faith +${tfRank} against the supernatural (ST p.28).`) }
@@ -1809,7 +1812,10 @@ async function a2Boot () {
       ['table tools', globalThis.a2TableBoot ?? (typeof a2TableBoot === 'function' ? a2TableBoot : null)],
       ['guide', globalThis.a2GuideBoot ?? (typeof a2GuideBoot === 'function' ? a2GuideBoot : null)],
       ['tracked powers', globalThis.a2TrackBoot ?? (typeof a2TrackBoot === 'function' ? a2TrackBoot : null)],
-      ['sheet actions', globalThis.a2ActsBoot ?? (typeof a2ActsBoot === 'function' ? a2ActsBoot : null)]]) {
+      ['sheet actions', globalThis.a2ActsBoot ?? (typeof a2ActsBoot === 'function' ? a2ActsBoot : null)],
+      ['weapons and injuries', globalThis.a2FightBoot ?? (typeof a2FightBoot === 'function' ? a2FightBoot : null)],
+      ['Humanity, day and torpor', globalThis.a2NightBoot ?? (typeof a2NightBoot === 'function' ? a2NightBoot : null)],
+      ['Storyteller desk', globalThis.a2DeskBoot ?? (typeof a2DeskBoot === 'function' ? a2DeskBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -3001,9 +3007,16 @@ function a2xAttackInfo (message, roll) {
   // A power that adds to an attack (Powerful Strike rolls Strength + Potence, with no Fighting) is a melee attack.
   if (parsed.rider) kind.melee = true
   const mods = a2xAttackMods(attacker, item, kind, parsed, str)
+  // the weapon picked for this attack action (alpha2-fight): its damage, no question later
+  const mv = message?.flags?.world?.a2def?.move ?? null
+  const mw = mv?.weapon && !item ? mv.weapon : null
+  if (mw) { mods.weapons = []; kind.kind = mw.body ? 'unarmed' : mw.mode === 'melee' ? 'weapon' : 'ranged'; kind.melee = mw.mode === 'melee' }
   let base = parsed.rider ? null : parsed.base
   let baseNote = parsed.expr && base !== null && !/^\d+$/.test(parsed.text) ? `${parsed.text} = ${base}${parsed.usesMargin ? ' before the margin' : ''}.` : ''
-  if (mods.weapons.length) {
+  if (mw) {
+    base = a2Int(mw.damage)
+    baseNote = `${mw.label}: damage ${a2Int(mw.damage)}${mw.improvised ? ', improvised (−1)' : ''} (PG p.55).`
+  } else if (mods.weapons.length) {
     base = mods.weapons[0].damage
     baseNote = ''
   } else if (base === null && kind.melee) {
@@ -3019,8 +3032,9 @@ function a2xAttackInfo (message, roll) {
     attacker,
     base,
     baseNote,
-    addMargin: dmg?.dealsDamage ? Boolean(dmg.extraSuccesses) : true,
-    baneful: parsed.baneful,
+    addMargin: mv?.limb ? false : dmg?.dealsDamage ? Boolean(dmg.extraSuccesses) : true, // a called shot adds no margin (PG p.117)
+    limb: mv?.limb ?? null,
+    baneful: parsed.baneful || Boolean(mw?.baneful),
     ignoreEndurance: parsed.ignoreEndurance,
     resource: dmg?.resource === 'willpower' ? 'willpower' : 'health',
     rage: a2xFrenzyState(attacker)?.type === 'rage' && kind.melee ? 1 : 0, // PG p.146
@@ -3028,7 +3042,7 @@ function a2xAttackInfo (message, roll) {
     riders: [...mods.riders, ...(typeof a2zDamageRiders === 'function' ? a2zDamageRiders() : [])], // eslint-disable-line no-undef
     calc: parsed.rider || mods.weapons.length ? null : parsed.calc,
     formula: parsed.text,
-    label: item?.name ?? (kind.kind === 'unarmed' ? 'Unarmed attack' : 'Ranged attack')
+    label: item?.name ?? (mw ? `${mv.label}: ${mw.label}` : kind.kind === 'unarmed' ? 'Unarmed attack' : 'Ranged attack')
   }
 }
 
@@ -3120,6 +3134,7 @@ function a2xDamageOpts (opts = {}) {
     attackerUuid: opts.attackerUuid ?? null,
     bodyAttack: Boolean(opts.bodyAttack),
     reflected: Boolean(opts.reflected),
+    injury: opts.injury && typeof opts.injury === 'object' ? { limb: String(opts.injury.limb ?? 'limb').slice(0, 40), margin: Math.max(0, a2Int(opts.injury.margin)) } : null,
     source: String(opts.source ?? ''),
     chat: opts.chat !== false,
     messageId: opts.messageId ?? null,
@@ -3211,6 +3226,10 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
     try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
     try { await actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }) } catch (e) { console.error('V6 Automation | torpor', e) }
   }
+  // a called shot: the margin sets the injury (PG p.117; alpha2-fight)
+  if (o.injury && o.injury.margin >= 1 && !o.reflected && typeof a2fInjure === 'function') { // eslint-disable-line no-undef
+    try { const inj = await a2fInjure(actor, o.injury.limb, o.injury.margin); if (inj) extra.push(`${name}: ${inj.text}`) } catch (e) { console.error('V6 Automation | injury', e) } // eslint-disable-line no-undef
+  }
   // Retributive Hide and the like: a creature that hit with its own body takes
   // half the damage that got through (PG, Fortitude). Never bounces twice.
   if (res.taken > 0 && o.bodyAttack && o.attackerUuid && !o.reflected && typeof a2pList === 'function') { // eslint-disable-line no-undef
@@ -3251,7 +3270,7 @@ async function a2xMarkDamage (o, results) {
 }
 
 // The damage dialog for a card (or, without one, for a macro).
-async function a2xDamageDialog ({ title = 'Apply damage', source = '', formula = '', base = 0, baseNote = '', margin = 0, marginNote = '', addMargin = true, rage = 0, baneful = false, ignoreEndurance = false, willpower = false, targets = [], from = '', weapons = [], riders = [], calc = null } = {}) {
+async function a2xDamageDialog ({ title = 'Apply damage', source = '', formula = '', base = 0, baseNote = '', margin = 0, marginNote = '', addMargin = true, rage = 0, baneful = false, ignoreEndurance = false, willpower = false, targets = [], from = '', weapons = [], riders = [], calc = null, called = false } = {}) {
   const names = targets.map((t) => {
     const rules = a2Rules(t.actor)
     const rating = a2xArmourRating(t.actor)
@@ -3269,7 +3288,7 @@ async function a2xDamageDialog ({ title = 'Apply damage', source = '', formula =
     ${marginNote ? `<p class="hint">${a2Esc(marginNote)}</p>` : ''}
     ${calc ? '<p class="hint">The formula already counts the margin: change the margin and the damage follows.</p>' : cb('addMargin', addMargin, 'Add the margin of success (PG p.116)')}
     ${riders.map((r, i) => cb(`rider${i}`, true, `${a2Esc(r.label)}: +${a2Int(r.amount)}${r.baneful ? ' baneful' : ''}`)).join('')}
-    ${cb('calledShot', false, 'Called shot: no margin added; the margin sets the injury (PG p.117)')}
+    ${cb('calledShot', called, 'Called shot: no margin added; the margin sets the injury (PG p.117)')}
     ${rage ? cb('rage', true, 'Rage frenzy: +1 melee damage (PG p.146)') : ''}
     ${cb('baneful', baneful, 'Baneful (fire, sunlight, True Faith): no Endurance or armour (PG p.100)')}
     ${cb('armour', true, 'Armour (house rule: its rating for mortals and ghouls, +1 Endurance for vampires; minimum 1)')}
@@ -3334,7 +3353,7 @@ async function a2xPromptCardDamage (message, i) {
   const tg = a2xCardTargets(message, roll, info.attacker)
   const targets = a2xResolveTargets(tg.list)
   if (!targets.length) { ui.notifications.warn('Target a token (T), or select one, to apply the damage to.'); return null }
-  const r = await a2xDamageDialog({ title: `Apply damage: ${info.label}`, source: info.label, formula: info.formula, base: info.base, baseNote: info.baseNote, margin, marginNote, addMargin: info.riders.some((x) => x.own) ? true : info.addMargin, rage: info.rage, baneful: info.baneful || Boolean(info.weapons[0]?.baneful), ignoreEndurance: info.ignoreEndurance, willpower: info.resource === 'willpower', targets, from: tg.from, weapons: info.weapons, riders: info.riders, calc: info.calc })
+  const r = await a2xDamageDialog({ title: `Apply damage: ${info.label}`, source: info.label, formula: info.formula, base: info.base, baseNote: info.baseNote, margin, marginNote, addMargin: info.riders.some((x) => x.own) ? true : info.addMargin, rage: info.rage, baneful: info.baneful || Boolean(info.weapons[0]?.baneful), ignoreEndurance: info.ignoreEndurance, willpower: info.resource === 'willpower', targets, from: tg.from, weapons: info.weapons, riders: info.riders, calc: info.calc, called: Boolean(info.limb) })
   if (!r) return null
   return a2xApplyDamage(targets.map((t) => t.ref), {
     amount: r.base + r.rage,
@@ -3348,6 +3367,7 @@ async function a2xPromptCardDamage (message, i) {
     attackerUuid: info.attacker?.uuid ?? null,
     // fists, claws and other natural weapons are part of the attacker
     bodyAttack: info.kind === 'unarmed' || (r.weapon !== null && Boolean(info.weapons[r.weapon]) && (r.weapon === info.weapons.findIndex((w) => /^Unarmed/.test(w.label)) || Boolean(info.weapons[r.weapon].natural))),
+    injury: r.calledShot && info.limb ? { limb: info.limb, margin: r.margin } : null,
     messageId: message.id,
     rollIndex: i
   })
@@ -7791,12 +7811,12 @@ async function a2oOnCreate (message, options, userId) {
         ? targets.length > 0 && !(a2Int(r.roll.options.difficulty) > 0)
         : a2oWants({ built: true, isDefence: Boolean(a2.vsMessage), frenzy: Boolean(a2.frenzyTest), difficulty: r.roll.options.difficulty, opponent: a2.opponent, kind: info?.kind ?? null, hasOppose: Boolean(a2.oppose), targets: targets.length })
       if (wants) {
-        const list = targets.slice(0, move ? 1 : 6)
+        const list = targets.slice(0, move && (move.effect || move.defences) ? 1 : 6)
         // a target that can't act (tied up, staked, in torpor) doesn't defend
         const helpless = (a) => typeof a2zHas === 'function' && ['tied', 'staked', 'torpor'].some((id) => a2zHas(a, id)) // eslint-disable-line no-undef
         await message.update({ 'flags.world.a2def': { v: 1, melee: move ? Boolean(move.melee) : Boolean(info.melee), successes: a2Int(r.roll.total), attacker: attacker?.name ?? message.alias ?? 'Attacker', attackerUuid: attacker?.uuid ?? null,
           targets: list.map((a) => ({ uuid: a.uuid, name: a.name, helpless: helpless(a) })),
-          move: move ? { id: move.id, label: move.label, defences: move.defences ?? null, effect: move.effect ?? null } : null } })
+          move: move ? { id: move.id, label: move.label, defences: move.defences ?? null, effect: move.effect ?? null, weapon: move.weapon ?? null, limb: move.limb ?? null } : null } })
       }
     }
     // 5. A defence roll arrived: apply the damage at once, if set so.
@@ -7861,7 +7881,7 @@ async function a2oDefend (message, actor, key = null, { auto = false } = {}) {
   const pick = list.find((d) => d.key === key) ?? list[0]
   // the simple npc sheet has no Dexterity: it defends with its Physical level
   if (actor.type === 'npc' && typeof a2NpcBestLevel === 'function') a2State.pendingPreset.set(actor.uuid, { level: a2NpcBestLevel(actor, pick.test.attributes).key })
-  if (typeof a2uHint === 'function') a2uHint(actor, { against: def.attackerUuid ?? null, defence: pick.key, vsRanged: !def.melee && !def.move }) // eslint-disable-line no-undef
+  if (typeof a2uHint === 'function') a2uHint(actor, { against: def.attackerUuid ?? null, defence: pick.key, vsRanged: !def.melee && !(def.move?.defences || def.move?.effect) }) // eslint-disable-line no-undef
   return a2eOpenRoll(actor, pick.test, { auto, vs: { messageId: message.id, successes: a2Int(r.roll.total), name: def.attacker } })
 }
 
@@ -7884,6 +7904,7 @@ async function a2oAutoDamage (attack, defender) {
     source: info.label,
     attackerUuid: info.attacker?.uuid ?? null,
     bodyAttack: info.kind === 'unarmed',
+    injury: info.limb ? { limb: info.limb, margin } : null,
     messageId: attack.id,
     rollIndex: r.index
   })
@@ -9485,7 +9506,7 @@ const A2Z_STATES = [
   { id: 'sunlight', name: 'In sunlight', img: 'icons/svg/sun.svg', page: 'PG p.139', levels: [1, 2], levelNames: { 1: 'obscured or indirect', 2: 'direct' }, start: 2 },
   { id: 'day', name: 'Awake by day', img: 'icons/svg/eye.svg', page: 'PG p.147' },
   { id: 'cover', name: 'In cover', img: 'icons/svg/shield.svg', page: 'PG p.120', levels: [1, 2, 3], levelNames: { 1: 'light', 2: 'partial', 3: 'superior' }, start: 1 },
-  { id: 'limb', name: 'Hurt limb', img: 'icons/svg/bones.svg', page: 'PG p.117', levels: [1, 2, 3], levelNames: { 1: '−1', 2: 'mangled −2', 3: 'mangled −3' }, start: 1 },
+  { id: 'limb', name: 'Hurt limb', img: 'icons/svg/bones.svg', page: 'PG p.117', levels: [1, 2, 3, 4, 5], levelNames: { 1: '−1', 2: 'mangled −2', 3: 'mangled −3', 4: 'disabled', 5: 'destroyed' }, start: 1 },
   { id: 'blissful', name: 'Blissful (the Kiss)', img: 'icons/svg/heal.svg', page: 'PG p.141' },
   { id: 'justify', name: 'Failed Justify', img: 'icons/svg/downgrade.svg', page: 'PG p.127' }
 ]
@@ -9510,7 +9531,10 @@ function a2zCompute ({ self = {}, foe = null, roll = {} } = {}) {
   if (st.day) add(-2 * Math.max(1, a2Int(self.genMod, 1)), 'Awake by day (PG p.147)')
   if (st.justify) add(-2, 'Failed Justify, until the next night (PG p.127)')
   if (st.blissful && (has(roll.skills, 'awareness') || has(roll.skills, 'investigation'))) add(-2, 'Blissful from the Kiss (PG p.141)')
-  if (st.limb && (has(roll.attributes, 'strength') || has(roll.attributes, 'dexterity'))) add(-a2Clamp(a2Int(st.limb, 1), 1, 3), 'Hurt limb, if this test uses it (PG p.117)')
+  if (st.limb && (has(roll.attributes, 'strength') || has(roll.attributes, 'dexterity'))) {
+    if (a2Int(st.limb, 1) >= 4) add(0, `Limb ${a2Int(st.limb) >= 5 ? 'destroyed' : 'disabled'}: a test that relies on it fails (PG p.117)`)
+    else add(-a2Clamp(a2Int(st.limb, 1), 1, 3), 'Hurt limb, if this test uses it (PG p.117)')
+  }
   if (st.cover) {
     const lvl = a2Clamp(a2Int(st.cover, 1), 1, 3)
     if (roll.defence && roll.vsRanged && has(roll.skills, 'athletics')) add(lvl, `${['Light', 'Partial', 'Superior'][lvl - 1]} cover against a ranged attack (PG p.120)`)
@@ -9962,8 +9986,14 @@ async function a2vRun (actor, id) {
     if (!go) return null
   }
   if (move.instant) return a2vInstant(actor, move, target)
+  // which weapon, at what distance, aimed where (alpha2-fight)
+  let gear = null
+  if (typeof a2fPrepare === 'function') { // eslint-disable-line no-undef
+    try { gear = await a2fPrepare(actor, move, target) } catch (e) { console.error('V6 Automation | weapon', e); gear = null } // eslint-disable-line no-undef
+    if (gear === false) return null
+  }
   const before = new Set(foundry.applications.instances.keys())
-  const token = move.effect || move.defences ? a2oSetMove(actor, { id: move.id, label: move.label, melee: Boolean(move.melee), defences: move.defences ?? null, effect: move.effect ?? null }) : null
+  const token = move.effect || move.defences || gear ? a2oSetMove(actor, { id: move.id, label: move.label, melee: Boolean(move.melee) || gear?.weapon?.mode === 'melee', defences: move.defences ?? null, effect: move.effect ?? null, weapon: gear?.weapon ?? null, limb: gear?.limb ?? null, band: gear?.band ?? null }) : null
   if (token) a2oMoveGuard(actor, token, before).catch(() => {})
   else a2oState.moves.delete(actor.uuid)
   const test = { attributes: [...move.test.attributes], skills: [...move.test.skills], disciplines: [] }
@@ -10062,7 +10092,9 @@ async function a2vOpen (actorLike = null) {
   const vamp = a2Creature(actor) === 'vampire'
   const groups = [...new Set(A2V_MOVES.map((m) => m.group))]
   const usable = (m) => (!m.vampire || vamp) && (!m.self || a2zHas(actor, m.self))
-  const content = `<div class="a2v-window"><p class="a2v-who"><strong>${a2Esc(actor.name)}</strong> ${target ? `→ <strong>${a2Esc(target.name)}</strong>` : '<em>(no target: press T on a token for actions against someone)</em>'}</p>
+  let far = null
+  try { far = target && typeof a2fBetween === 'function' ? a2fBetween(actor, target) : null } catch (e) { far = null } // eslint-disable-line no-undef
+  const content = `<div class="a2v-window"><p class="a2v-who"><strong>${a2Esc(actor.name)}</strong> ${target ? `→ <strong>${a2Esc(target.name)}</strong>${far ? ` <small>${a2Esc(far.text)}</small>` : ''}` : '<em>(no target: press T on a token for actions against someone)</em>'}</p>
     ${groups.map((g) => `<fieldset><legend>${g}</legend><div class="a2v-grid">${A2V_MOVES.filter((m) => m.group === g && usable(m)).map((m) => `<button type="button" data-move="${m.id}" title="${a2Esc(m.hint)}" ${m.target && !target ? 'disabled' : ''}><i class="fa-solid ${m.icon}"></i> <span>${a2Esc(m.label)}</span><small>${a2Esc(m.pool)}</small></button>`).join('')}</div></fieldset>`).join('')}</div>`
   let picked = null
   await foundry.applications.api.DialogV2.wait({
@@ -10091,6 +10123,10 @@ const A2V_HELP = [
   ['/bonds, /downtime', 'Blood Bonds and downtime actions for the selected token (/v6 downtime reset: Storyteller)'],
   ['/coterie', 'the coterie page: domain, haven, shared Resources, members'],
   ['/dash, /npc, /hunt, /vaulderie, /recap', 'Storyteller: dashboard, NPC maker, group hunt, Vaulderie, session recap'],
+  ['/humanity, /v6 day, /torpor', 'Humanity (violations, Justify), the daylight tests, the ways out of torpor'],
+  ['/powers, /limbs', 'every power with its cost and state; hurt limbs and mending them'],
+  ['/boons', 'the ledger of favours owed'],
+  ['/diablerie, /ghouls, /group, /v6 log, /v6 sunrise 3', 'Storyteller: diablerie on the targeted victim, the ghoul list, a group acting as one, the log with undo, the sunrise clock'],
   ['/v6 guide', 'the how-to-play journal: player quick-start and Storyteller cheat sheet']
 ]
 function a2vCommand (text) {
@@ -10100,10 +10136,10 @@ function a2vCommand (text) {
   if (!m) return null
   const cmd = m[2].toLowerCase()
   const arg = m[3].trim()
-  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help', 'social', 'task', 'bonds', 'downtime', 'dash', 'coterie', 'npc', 'hunt', 'vaulderie', 'recap', 'guide']
+  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help', 'social', 'task', 'bonds', 'downtime', 'dash', 'coterie', 'npc', 'hunt', 'vaulderie', 'recap', 'guide', 'humanity', 'day', 'torpor', 'diablerie', 'ghouls', 'sunrise', 'powers', 'boons', 'log', 'limbs', 'group']
   if (!known.includes(cmd)) return null
   // without the "/v6" prefix only the unambiguous ones are ours
-  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade', 'social', 'task', 'bonds', 'downtime', 'dash', 'coterie', 'npc', 'hunt', 'vaulderie', 'recap'].includes(cmd)) return null
+  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade', 'social', 'task', 'bonds', 'downtime', 'dash', 'coterie', 'npc', 'hunt', 'vaulderie', 'recap', 'humanity', 'torpor', 'diablerie', 'ghouls', 'powers', 'boons', 'limbs', 'group'].includes(cmd)) return null
   return { cmd, arg }
 }
 function a2vChat (text) {
@@ -10140,6 +10176,7 @@ function a2vChat (text) {
       case 'recap': if (gm()) A.table?.recap?.(); break
       case 'guide': A.guide?.open?.(); break
       case 'downtime': if (c.arg.toLowerCase() === 'reset') { if (gm()) A.story?.downtimeReset?.() } else A.story?.downtime?.(actor); break
+      default: if (!A.night?.command?.(c.cmd, c.arg, actor)) A.desk?.command?.(c.cmd, c.arg, actor)
     }
   } catch (e) { console.error('V6 Automation | chat command', e) }
   return false
@@ -10178,11 +10215,16 @@ function a2vTracking (actor) {
   const f = actor?.flags?.world?.a2 ?? {}
   try { for (const d of A2Z_STATES) if (a2zHas(actor, d.id)) { const lv = d.levels ? a2zLevel(actor, d.id) : null; out.push(lv && d.levelNames?.[lv] ? `${d.name} (${d.levelNames[lv]})` : d.name) } } catch (e) { /* states are off */ }
   if (f.frenzy?.type) out.push(`${a2Cap(String(f.frenzy.type))} frenzy`)
+  for (const l of (Array.isArray(f.limbs) ? f.limbs : [])) if (l?.limb) out.push(`${a2Cap(String(l.limb))}: ${['', 'hurt −1', 'mangled −2', 'mangled −3', 'disabled', 'destroyed'][a2Clamp(a2Int(l.level, 1), 1, 5)]}`)
+  if (f.torpor) out.push(`In torpor (${f.torpor.reason ?? 'manual'})`)
+  if (f.soul?.name) out.push(`A soul hides within: ${f.soul.name}`)
+  if (f.diablerie?.until) out.push('Black veins of diablerie')
   if (f.aegis?.points) out.push(`Blood Aegis ${f.aegis.points}`)
   if (f.haruspex?.uses) out.push(`Haruspex rerolls ${f.haruspex.uses}`)
   if (f.pactRa) out.push('Pact with Ra')
   for (const b of (Array.isArray(f.bonds) ? f.bonds : [])) if (a2Int(b?.stage) > 0) out.push(`Bond to ${b.name}: stage ${a2Int(b.stage)}`)
   try { const n = a2tClock().night; if (n) out.push(`Night ${n}`) } catch (e) { /* no clock */ }
+  try { const h = typeof a2nSunrise === 'function' ? a2nSunrise() : null; if (h !== null) out.push(h > 0 ? `Sunrise in ${h} h` : 'The sun is up') } catch (e) { /* no clock */ } // eslint-disable-line no-undef
   try { const m = a2tMasqState(); const lv = a2tMasqLevel(m.rank); if (lv?.name ?? lv?.label) out.push(`Masquerade: ${lv.name ?? lv.label}`) } catch (e) { /* no tracker */ }
   return out
 }
@@ -10211,10 +10253,16 @@ function a2vRenderSheet (app, element) {
       ['Feed', 'fa-droplet', () => A.tools?.feed?.(actor), vamp],
       ['Blood Surge', 'fa-bolt', () => A.tools?.bloodSurge?.(actor), vamp],
       ['Frenzy test', 'fa-face-angry', () => a2xFrenzyTest(actor, {}), vamp],
+      ['Powers', 'fa-bolt-lightning', () => A.desk?.powers?.(actor), Boolean(A.desk) && actor.items.some((i) => i.type === 'discipline')],
+      ['Humanity', 'fa-scale-balanced', () => A.night?.humanity?.(actor), Boolean(A.night) && Boolean(a2Rules(actor)?.humanity)],
+      ['Day', 'fa-sun', () => A.night?.day?.(actor), Boolean(A.night) && vamp],
+      ['Torpor', 'fa-bed', () => A.night?.torpor?.(actor), Boolean(A.night) && vamp],
+      ['Limbs', 'fa-bone', () => A.fight?.limbs?.(actor), Boolean(A.fight) && actor.type === 'vampire'],
       ['Spend XP', 'fa-star', () => A.tools?.spendXP?.(actor), true],
       ['Blood Bonds', 'fa-link', () => A.story?.bonds?.(actor), true],
       ['Downtime', 'fa-moon', () => A.story?.downtime?.(actor), true],
       ['Coterie', 'fa-people-roof', () => A.table?.coterie?.(), true],
+      ['Boons', 'fa-handshake', () => A.desk?.boons?.(), Boolean(A.desk)],
       ['Creation', 'fa-wand-magic-sparkles', () => A.create?.(actor), game.user.isGM || (typeof a2cBlank === 'function' && a2cBlank(actor))], // eslint-disable-line no-undef
       ['How to play', 'fa-book', () => A.guide?.open?.(), true]
     ].filter((t) => t[3])
@@ -10636,7 +10684,7 @@ async function a2yDowntime (actorLike = null) {
     content: `<div class="a2y-dialog"><p class="a2y-hint">Normally 2 actions between stories; ${used} used so far (PG p.112). The Storyteller resets the count with /v6 downtime reset.</p>
       ${A2Y_DOWNTIME.map((d, i) => `<label class="a2y-pick"><input type="radio" name="action" value="${d.id}" ${i === 0 ? 'checked' : ''}> <span><strong>${d.label}</strong><br><small>${d.text}</small></span></label>`).join('')}
       <fieldset><legend>Resources (for the four Resource actions)</legend>
-        <div class="form-group"><label>Resource</label><select name="res"><option value="">a new one</option>${resOpts}</select><input type="text" name="newName" placeholder="Name of the new Resource"></div>
+        <div class="form-group"><label>Resource</label><select name="res"><option value="">a new one</option>${resOpts}${typeof a2dCoterieOptions === 'function' ? a2dCoterieOptions() : ''}</select><input type="text" name="newName" placeholder="Name of the new Resource"></div>
         <div class="form-group"><label>Dots</label><input type="number" name="dots" value="1" min="1" max="4"><label>Move them to</label><select name="to"><option value="">–</option>${resOpts}</select></div>
       </fieldset>
       <div class="form-group"><label>What you do</label><input type="text" name="note" placeholder="Two weeks leaning on the dockers' union"></div></div>`,
@@ -10649,7 +10697,14 @@ async function a2yDowntime (actorLike = null) {
   const dotsOf = (i) => a2Int(i?.system?.dots?.value)
   let line = def.text
   try {
-    if (def.res === 'gain') {
+    if (def.res === 'gain' && String(res.res).startsWith('c:')) {
+      // a dot for a Resource the coterie shares (PG p.113; alpha2-desk)
+      const shared = typeof a2dCoterieAcquire === 'function' ? await a2dCoterieAcquire(actor, String(res.res).slice(2), res.newName) : null // eslint-disable-line no-undef
+      if (!shared) return null
+      line = shared
+    } else if (def.res && String(res.res).startsWith('c:')) {
+      ui.notifications.warn('Only Acquire Resources works on a shared coterie Resource; the Storyteller changes the others on the coterie page.'); return null
+    } else if (def.res === 'gain') {
       if (item) { if (dotsOf(item) >= 5) { ui.notifications.warn(`${item.name} is already at 5 dots.`); return null } await item.update({ 'system.dots.value': dotsOf(item) + 1 }); line = `${item.name} rises to ${dotsOf(item)} dots.` } else { const made = await actor.createEmbeddedDocuments('Item', [{ name: res.newName || 'New Resource', type: 'resource', img: 'icons/svg/coins.svg', system: { description: '', dots: { value: 1, max: 5 }, resourceType: 'physicalAssets' } }]); line = `New Resource: ${made[0].name}, 1 dot.` }
     } else if (def.res === 'move') {
       const to = actor.items.get(res.to)
@@ -11324,7 +11379,7 @@ globalThis.a2TableBoot ??= a2TableBoot
 // Made in the world the first time the Storyteller loads this version, and rewritten when
 // the module's guide changes. /v6 guide opens it. Setting (world): guide (on).
 
-const A2G_VERSION = 1
+const A2G_VERSION = 2
 const A2G_PLAYER = `
 <p>Everything here is done for you by the V6 Automation module. You never need to count dice or look up a modifier: open the right thing and it does the sums.</p>
 <h2>Rolling</h2>
@@ -11356,6 +11411,10 @@ const A2G_PLAYER = `
 <li><strong>When you are attacked:</strong> the attacker's card shows <strong>Dodge</strong> and <strong>Parry</strong> buttons for you. Click one. Defending costs nothing.</li>
 <li><strong>Use a reaction</strong> on your turn card offers Blood Surge and your reaction powers, and ticks off a dot.</li>
 <li>States such as <em>on the ground</em>, <em>held</em>, <em>in cover</em> or <em>burning</em> show as icons on your token and change your dice by themselves.</li>
+<li><strong>Weapons:</strong> Melee, Shoot, Throw, Called shot, Stake and Decapitate ask which weapon you use. Your own equipment is listed first; otherwise pick light, medium or heavy. Its damage is filled in for you.</li>
+<li><strong>Distance:</strong> the distance between your token and your target is read off the map. Shooting at someone right next to you takes 1 die away, shooting one band beyond your weapon's range takes 2, and beyond that there is no shot. A melee attack needs you next to the target. The roll window shows the line; you can set the distance by hand in the weapon question.</li>
+<li><strong>Called shots</strong> ask which limb you aim at. On a hit the margin decides how badly it is hurt, and the injury is noted on the target. <code>/limbs</code> (or <em>Limbs</em> on your sheet's Actions tab) shows your own injuries and mends them for Vitae and Willpower.</li>
+<li>When Health, Vitae or Willpower change, the number floats over the token for a moment.</li>
 </ul>
 <h2>Your sheet</h2>
 <ul>
@@ -11363,6 +11422,10 @@ const A2G_PLAYER = `
 <li>Click the Health, Vitae, Willpower and Humanity boxes to change them by hand.</li>
 <li>Using a power pays its Vitae and Willpower for you and keeps track of how long it lasts.</li>
 <li>In journals, the name of a power, merit or flaw is a link: click it to read the item, or drag it onto your sheet once the Storyteller agrees.</li>
+<li>The <strong>Actions</strong> tab has a row of tools. <strong>Powers</strong> lists every power you have with its cost, greys out what you can't pay for right now, and rolls, uses or ends a power with one click.</li>
+<li><strong>Humanity</strong> marks a violation with its reason and lets you <em>Justify</em>: once a night, 1 Willpower and a Self-Control test against your rank. Each success erases a slash; a failure costs you 2 dice on everything until the next night.</li>
+<li><strong>Day</strong> has the tests for staying awake after sunrise and for waking when something disturbs you. <strong>Torpor</strong> shows how long a torpor lasts at your Humanity and the ways out of it.</li>
+<li><strong>Boons</strong> shows who owes whom a favour. The Storyteller keeps it.</li>
 </ul>
 <h2>Chat commands</h2>
 <table>
@@ -11377,6 +11440,11 @@ const A2G_PLAYER = `
 <tr><td><code>/bonds</code></td><td>Your Blood Bonds.</td></tr>
 <tr><td><code>/downtime</code></td><td>Take a downtime action between stories.</td></tr>
 <tr><td><code>/coterie</code></td><td>The coterie page: domain, haven, shared Resources.</td></tr>
+<tr><td><code>/powers</code></td><td>All your powers with cost and state.</td></tr>
+<tr><td><code>/humanity</code></td><td>Violations and Justify.</td></tr>
+<tr><td><code>/v6 day</code>, <code>/torpor</code></td><td>The daylight tests; torpor and the ways out.</td></tr>
+<tr><td><code>/limbs</code></td><td>Hurt limbs and mending them.</td></tr>
+<tr><td><code>/boons</code></td><td>The ledger of favours owed.</td></tr>
 <tr><td><code>/v6 xp</code></td><td>Spend XP.</td></tr>
 <tr><td><code>/v6 help</code></td><td>This list, in chat.</td></tr>
 </tbody>
@@ -11397,6 +11465,9 @@ const A2G_ST = `
 <tr><td>Masquerade Tracker</td><td><code>/masquerade</code></td><td>The 0 to 10 track with its levels; breaches raise it, downtime can lower it.</td></tr>
 <tr><td>Award XP</td><td><code>/v6 award</code></td><td>The end-of-session questions for every character.</td></tr>
 <tr><td>Recap</td><td><code>/recap</code></td><td>Writes a journal page from the chat log since the last recap.</td></tr>
+<tr><td>Automation log</td><td><code>/v6 log</code></td><td>Every change to Health, Vitae, Willpower and Humanity since you loaded the world, with an Undo button on each. The scroll tool in the token controls opens it.</td></tr>
+<tr><td>Sunrise clock</td><td><code>/v6 sunrise 3</code></td><td>Posts "3 hours until sunrise" with an <em>An hour passes</em> button; sheets show the countdown. <code>/v6 sunrise off</code> stops it; New Night resets it.</td></tr>
+<tr><td>Boons</td><td><code>/boons</code></td><td>The ledger of favours owed: add, mark repaid, remove. Players read it; entries can be kept secret. A house rule: the playtest has no prestation rules, so it only keeps the books.</td></tr>
 </tbody>
 </table>
 <h2>Asking for rolls</h2>
@@ -11414,6 +11485,9 @@ const A2G_ST = `
 <li>For your own characters, select the token and use the <strong>fist tool</strong> or <code>/act</code>. A player whose character you attack gets Dodge and Parry buttons; if that player is offline, the defence is rolled for them.</li>
 <li><strong>States</strong> (<code>/states</code> or the token HUD): surprised, on the ground, held, tied up, staked, torpor, burning, in sunlight, awake by day, cover, hurt limb. Fire and sunlight deal their damage at the start of the turn.</li>
 <li>A mortal at 0 Health is marked defeated. A decapitation is announced but the token is left for you to remove.</li>
+<li><strong>Weapons and distance:</strong> attack actions ask for the weapon and read the distance off the map. As the Storyteller you may roll an attack that is out of reach or out of range; players are stopped. Ammunition isn't counted, as in the rules; a painful failure with a firearm gets a "may jam" line.</li>
+<li><strong>Called shots</strong> put the injury on the target by the margin: 1 is −1 die, 2 and 3 are a mangled limb at −2 and −3, 4 disables it, 5 destroys it. The worst result on a limb stays. <code>/limbs</code> on a token edits them.</li>
+<li><strong>Groups</strong> (<code>/group</code>): select two or more of your tokens. The best of them rolls and the others assist for +1 die each, at most +3.</li>
 </ul>
 <h2>Characters and NPCs</h2>
 <ul>
@@ -11426,7 +11500,19 @@ const A2G_ST = `
 <ul>
 <li><code>/bonds</code> on a selected token: log a drink, set a stage, drop a bond. Feed attacks on a vampire log the drink themselves.</li>
 <li><code>/vaulderie</code>: bind the selected vampires in a vinculum. It ends their Blood Bonds and blocks new ones.</li>
-<li><code>/v6 downtime reset</code>: start a new downtime, so everyone has their two actions again.</li>
+<li><code>/v6 downtime reset</code>: start a new downtime, so everyone has their two actions again. Acquire Resources can now also add a dot to a shared coterie Resource.</li>
+<li><code>/ghouls</code>: who serves whom and when each ghoul last drank. A drink costs the domitor 1 Vitae and keeps the bond. The playtest prints no feeding interval, so the reminder on the New Night card (30 nights by default) is a house rule and does nothing else.</li>
+<li><code>/diablerie</code>: select the diablerist, target the victim. The requirements are checked (helpless, at 0 Vitae), both sides of every test are rolled, and the result is applied: Willpower, generation, XP, the black veins, or the lost soul.</li>
+</ul>
+<h2>Humanity, day and torpor</h2>
+<ul>
+<li><code>/humanity</code> on a token: mark a violation with its reason, or press <strong>Warn the player</strong> first, as the Storyteller Packet asks. <strong>Precept kept</strong> erases a slash; <strong>Raise rank</strong> costs the character 20 XP and needs a clean tracker.</li>
+<li><code>/v6 day</code>: the flat Resolve test to stay awake each hour and the flat Wits test when a sleeper is disturbed. The <em>Awake by day</em> state does the penalty.</li>
+<li><code>/torpor</code>: enter voluntary torpor, or test one of the ways out. New Night takes the upkeep Vitae.</li>
+</ul>
+<h2>Powers that need your call</h2>
+<ul>
+<li>A power the module can't settle with numbers says "Not automated" on its card. For you, that card has a <strong>Storyteller's call</strong> fold-out: what is left to decide, what the roll gave, the power's own text, and <strong>Tell the table</strong> to post your ruling.</li>
 </ul>
 <h2>When the module is wrong</h2>
 <ul>
@@ -11900,6 +11986,1509 @@ async function a2ActsBoot () {
 }
 globalThis.a2ActsBoot ??= a2ActsBoot
 
+// ---- fights: weapons, distance, called-shot injuries, groups (PG p.55, p.108, p.116-117, p.138) ----
+// Weapon     the attack actions (melee, shoot, throw, called shot, stake, decapitate) ask which
+//            weapon is used: the character's own equipment, or a plain light, medium or heavy
+//            one. Its damage is then filled in for the damage step; nothing is typed.
+// Distance   the distance between the two tokens is read off the scene and turned into the
+//            rules' bands (Close, Short, Medium, Long, Far Away). Shooting at point-blank range
+//            takes −1 die, one band beyond the weapon's range −2, further is no shot; a melee
+//            attack needs Close. The roll window shows the line. Ammunition isn't counted (the
+//            rules don't): a painful failure with a firearm gets a "may jam" note.
+// Injuries   a called shot names the limb. On a win the margin sets the injury (−1, mangled −2
+//            or −3, disabled, destroyed); the worst result on a limb counts. Injuries are kept
+//            on the character, lower its dice through the Hurt limb state, and are mended from
+//            the Limbs window for the printed Vitae and Willpower.
+// Groups     several selected Storyteller characters act as one: the best of them rolls, the
+//            others assist (+1 die each, at most 3, PG p.110).
+// Settings (world): weaponPick (on), rangeBands (on).
+// Data: flags.world.a2.limbs [{ limb, level, night }]; the move record carries weapon, limb, band.
+
+const A2F_NAMES = ['Close', 'Short', 'Medium', 'Long', 'Far Away']
+const A2F_LIMITS = { m: [2, 15, 50, 100], ft: [5, 45, 150, 300] } // PG p.108
+const A2F_MOVE_MODE = { melee: 'melee', called: 'melee', stake: 'melee', behead: 'melee', shoot: 'ranged', calledR: 'ranged', throw: 'thrown' }
+const A2F_LIMBS = ['arm', 'hand', 'leg', 'foot', 'eye', 'wing or tail']
+const A2F_INJURY = {
+  1: { name: 'hurt', text: '−1 die on tests that use it, until it is mended' },
+  2: { name: 'mangled', text: 'mangled: −2 dice on tests that use it, until it is mended' },
+  3: { name: 'mangled', text: 'mangled: −3 dice on tests that use it, until it is mended' },
+  4: { name: 'disabled', text: 'mangled and disabled: tests that rely on it fail until it is mended' },
+  5: { name: 'destroyed', text: 'destroyed: this kills most mortals and cripples most supernatural creatures' }
+}
+
+// ---- pure rules ----
+// Scene units → 'm' or 'ft'. A scene without units is read by its grid step (5 = feet).
+function a2fUnits (units, gridDistance = 0) {
+  const u = String(units ?? '').trim().toLowerCase().replace(/\.$/, '')
+  if (['m', 'meter', 'metre', 'meters', 'metres'].includes(u)) return 'm'
+  if (['ft', 'feet', 'foot', "'"].includes(u)) return 'ft'
+  return Number(gridDistance) >= 3 ? 'ft' : 'm'
+}
+// Distance → band index 0-4 (PG p.108). Next to each other, diagonals included, is always Close.
+function a2fBand (distance, units = 'm', gridDistance = 0) {
+  const d = Number(distance)
+  if (!Number.isFinite(d) || d < 0) return null
+  const lim = [...(A2F_LIMITS[units] ?? A2F_LIMITS.m)]
+  lim[0] = Math.max(lim[0], Number(gridDistance) > 0 ? Number(gridDistance) * 1.45 : 0)
+  const i = lim.findIndex((x) => d <= x + 1e-6)
+  return i < 0 ? 4 : i
+}
+// The system's distance words → band index; null for none, self and unknown.
+function a2fBandKey (key) {
+  const k = String(key ?? '').toLowerCase().replace(/[^a-z]/g, '')
+  return { touch: 0, close: 0, short: 1, medium: 2, long: 3, far: 4, faraway: 4 }[k] ?? null
+}
+// What the distance does to an attack (PG p.116). band, range: indices. → { dice, note, blocked }
+function a2fRangeMod ({ band = null, range = null, melee = false } = {}) {
+  const out = { dice: 0, note: '', blocked: false }
+  if (band === null || band === undefined) return out
+  const b = a2Clamp(a2Int(band), 0, 4)
+  if (melee) {
+    if (b > 0) { out.blocked = true; out.note = `Out of reach: the target is at ${A2F_NAMES[b]} distance, and a melee attack needs Close (PG p.116).` }
+    return out
+  }
+  if (b === 0) { out.dice = -1; out.note = 'Point-blank, target within Close: −1 die (PG p.116).'; return out }
+  if (range === null || range === undefined) return out
+  const r = a2Clamp(a2Int(range), 0, 4)
+  if (b === r + 1) { out.dice = -2; out.note = `${A2F_NAMES[b]} distance, one band beyond the weapon's range (${A2F_NAMES[r]}): −2 dice (PG p.116).` } else if (b > r + 1) { out.blocked = true; out.note = `Out of range: ${A2F_NAMES[b]} distance is two or more bands beyond the weapon's range (${A2F_NAMES[r]}). No shot (PG p.116).` }
+  return out
+}
+// A weapon from plain item data. → { label, damage, baneful, mode, range, wood, edged } or null
+function a2fWeaponProfile ({ name = '', damage = null, skills = [], distance = null, baneful = false } = {}) {
+  if (damage === null || damage === undefined || !Number.isFinite(Number(damage))) return null
+  const dmg = Math.max(0, a2Int(damage))
+  const sk = [...(skills ?? [])].map((s) => String(s).split('.').pop())
+  const mode = sk.includes('shooting') ? 'ranged' : sk.includes('athletics') && !sk.includes('fighting') ? 'thrown' : 'melee'
+  let range = a2fBandKey(distance)
+  if (mode === 'melee') range = 0
+  else if (mode === 'thrown') range = range && range > 0 ? range : 1 // thrown: Short (PG p.55)
+  else if (!range) range = dmg <= 2 ? 2 : dmg === 3 ? 3 : 4 // light Medium, medium Long, heavy Far Away
+  const n = String(name ?? '')
+  return { label: n, damage: dmg, baneful: Boolean(baneful), mode, range, wood: /stake|wooden|snakewood/i.test(n), edged: /sword|blade|sabre|saber|\baxe|machete|kukri|scimitar|khopesh|cleaver|katana|gladius|zweih|rapier|claymore|halberd|scythe/i.test(n) }
+}
+// The plain weapons of PG p.55 for one way of attacking.
+function a2fGeneric (mode) {
+  if (mode === 'ranged') {
+    return [
+      { id: 'g-light', label: 'Light firearm (small pistol)', damage: 2, mode, range: 2 },
+      { id: 'g-medium', label: 'Medium firearm (heavy pistol)', damage: 3, mode, range: 3 },
+      { id: 'g-heavy', label: 'Heavy firearm (automatic rifle)', damage: 4, mode, range: 4 },
+      { id: 'g-shotgun', label: 'Shotgun (heavy, Short range)', damage: 4, mode, range: 1 }
+    ]
+  }
+  if (mode === 'thrown') {
+    return [
+      { id: 'g-light', label: 'Light thrown weapon (knife)', damage: 2, mode, range: 1 },
+      { id: 'g-medium', label: 'Medium thrown weapon (hatchet, brick)', damage: 3, mode, range: 1 }
+    ]
+  }
+  return [
+    { id: 'g-light', label: 'Light weapon (knife)', damage: 2, mode: 'melee', range: 0 },
+    { id: 'g-medium', label: 'Medium weapon (bat, crowbar)', damage: 3, mode: 'melee', range: 0 },
+    { id: 'g-heavy', label: 'Heavy weapon (two-handed axe, sledgehammer)', damage: 4, mode: 'melee', range: 0 }
+  ]
+}
+// Injury level for a called shot's margin (PG p.117): 1-5, 0 for none.
+function a2fInjuryLevel (margin) { return a2Clamp(a2Int(margin), 0, 5) }
+// Called shots on the same limb don't stack: the worst result stays (PG p.117). Pure.
+function a2fInjuryMerge (limbs = [], limb = 'limb', margin = 1, night = 1) {
+  const key = String(limb ?? 'limb').trim().toLowerCase() || 'limb'
+  const level = a2fInjuryLevel(margin)
+  const list = (Array.isArray(limbs) ? limbs : []).filter((l) => l && l.limb).map((l) => ({ limb: String(l.limb), level: a2Clamp(a2Int(l.level, 1), 1, 5), night: a2Int(l.night, 1) }))
+  if (!level) return { limbs: list, level: 0, changed: false }
+  const cur = list.find((l) => l.limb === key)
+  if (cur && cur.level >= level) return { limbs: list, level: cur.level, changed: false }
+  if (cur) { cur.level = level; cur.night = a2Int(night, 1) } else list.push({ limb: key, level, night: a2Int(night, 1) })
+  return { limbs: list, level, changed: true }
+}
+function a2fWorstLimb (limbs = []) { return (Array.isArray(limbs) ? limbs : []).reduce((m, l) => Math.max(m, a2Clamp(a2Int(l?.level), 0, 5)), 0) }
+// What mending a limb costs (PG p.138). level 1-5; small: ear, finger, toe; kept: the lost part is at hand.
+// → { vitae: [min, max], willpower, rest, note }
+function a2fMendCost (level = 2, { small = false, kept = false } = {}) {
+  const lv = a2Clamp(a2Int(level, 2), 1, 5)
+  if (lv === 1) return { vitae: [1, 1], willpower: 0, rest: 'none', note: 'A light injury: mended like a point of Health (ruling; the rules name no price).' }
+  if (lv < 5) return small ? { vitae: [1, 1], willpower: 0, rest: 'scene', note: 'Mangled, small part: 1 Vitae and a full scene of rest (PG p.138).' } : { vitae: [2, 3], willpower: 1, rest: 'scene', note: 'Mangled hand, arm or leg: 2 or 3 Vitae, 1 Willpower and a full scene of rest (PG p.138).' }
+  const base = small ? { vitae: [2, 2], willpower: 1 } : { vitae: [3, 5], willpower: 2 }
+  const cut = kept ? 1 : 0
+  return { vitae: [Math.max(0, base.vitae[0] - cut), Math.max(0, base.vitae[1] - cut)], willpower: Math.max(0, base.willpower - cut), rest: 'day', note: `Lost ${small ? 'small part' : 'hand, arm or leg'}: ${small ? '2 Vitae and 1 Willpower' : '3 to 5 Vitae and 2 Willpower'}${kept ? ', less 1 of each with the part at hand' : ''}, and a full day of rest (PG p.138).` }
+}
+// A group acting as one: the others assist, +1 die each, at most 3 (PG p.110). Pure.
+function a2fGroupBonus (members) { return a2Clamp(a2Int(members) - 1, 0, 3) }
+
+// ---- reading the scene ----
+const a2fState = { hooked: false }
+function a2fOn (key) { return a2Enabled() && a2eGet(key, true) !== false }
+function a2fToken (actor) {
+  if (!actor) return null
+  try {
+    if (actor.token?.object) return actor.token.object // a token's own actor
+    const list = actor.getActiveTokens?.() ?? []
+    return list.find((t) => t.controlled) ?? list[0] ?? null
+  } catch (e) { return null }
+}
+function a2fTargetToken (actor) {
+  for (const t of game.user?.targets ?? []) if (t.actor && t.actor.uuid === actor?.uuid) return t
+  return a2fToken(actor)
+}
+// → { distance, units, band, text } between two actors' tokens on the viewed scene, or null
+function a2fBetween (a, b) {
+  try {
+    const ta = a2fToken(a)
+    const tb = a2fTargetToken(b)
+    if (!ta || !tb || ta === tb || !globalThis.canvas?.grid?.measurePath) return null
+    const ca = ta.center
+    const cb = tb.center
+    let d = Number(canvas.grid.measurePath([{ x: ca.x, y: ca.y }, { x: cb.x, y: cb.y }]).distance)
+    if (!Number.isFinite(d)) return null
+    const dz = Math.abs(Number(ta.document?.elevation ?? 0) - Number(tb.document?.elevation ?? 0))
+    if (dz) d = Math.hypot(d, dz)
+    const step = Number(canvas.scene?.grid?.distance ?? canvas.grid?.distance ?? 0)
+    const units = a2fUnits(canvas.scene?.grid?.units ?? canvas.grid?.units, step)
+    const band = a2fBand(d, units, step)
+    const shown = Math.round(d * 10) / 10
+    return { distance: shown, units, band, text: `${A2F_NAMES[band]} (${shown} ${units})` }
+  } catch (e) { return null }
+}
+function a2fWeaponData (item, strength = 0) {
+  const d = item?.system?.activation?.damage
+  if (item?.type !== 'equipment' || !d?.dealsDamage) return null
+  let base = null
+  let baneful = false
+  try { const p = a2xParseDamage(d.formula, { strength }); base = p.base; baneful = Boolean(p.baneful) } catch (e) { /* unread formula */ }
+  if (base === null || base === undefined) { const f = item.flags?.world?.a2?.damage; base = f !== undefined && f !== null && Number.isFinite(Number(f)) ? a2Int(f) : null }
+  const w = a2fWeaponProfile({ name: item.name, damage: base, skills: [...(item.system?.test?.skills ?? [])], distance: item.system?.activation?.distance, baneful })
+  return w ? { ...w, id: item.id, uuid: item.uuid } : null
+}
+
+// ---- the weapon question, before an attack action rolls ----
+// → null (not asked), false (cancelled), or { weapon, limb, band }
+async function a2fPrepare (actor, move, target) {
+  const mode = A2F_MOVE_MODE[move?.id]
+  if (!mode || !a2fOn('weaponPick')) return null
+  const str = a2vEff(actor, 'strength')
+  const called = move.id === 'called' || move.id === 'calledR'
+  const own = (actor.items ?? []).map((i) => a2fWeaponData(i, str)).filter((w) => w && w.mode === mode)
+  let list = [...own.sort((x, y) => y.damage - x.damage), ...a2fGeneric(mode)]
+  if (move.id === 'stake') list = [...list.filter((w) => w.wood), { id: 'g-stake', label: 'Wooden stake (light)', damage: 2, mode: 'melee', range: 0, wood: true }, ...list.filter((w) => !w.wood)]
+  if (move.id === 'behead') list = [...list.filter((w) => w.edged && w.damage >= 3), ...list.filter((w) => !(w.edged && w.damage >= 3))]
+  if (move.id === 'called') list.push({ id: 'g-unarmed', label: 'Unarmed: ½ Strength', damage: a2Half(str), mode: 'melee', range: 0, body: true })
+  const dist = target ? a2fBetween(actor, target) : null
+  const limbOpts = A2F_LIMBS.map((l) => `<option value="${l}">${a2Cap(l)}</option>`).join('')
+  const note = move.id === 'stake' ? '<p class="hint">Staking needs sharpened wood, and a margin of 3 or more (PG p.117).</p>' : move.id === 'behead' ? '<p class="hint">Decapitation needs a medium or heavy edged weapon, and a margin of 4 or more (PG p.117).</p>' : ''
+  const content = `<div class="a2f-dialog">
+    <p><strong>${a2Esc(actor.name)}</strong>${target ? ` → <strong>${a2Esc(target.name)}</strong>` : ''}</p>
+    <div class="form-group"><label>Weapon</label><select name="weapon">${list.map((w, i) => `<option value="${i}">${a2Esc(w.label)}: damage ${w.damage}${w.baneful ? ' baneful' : ''}${mode !== 'melee' ? `, ${A2F_NAMES[w.range]} range` : ''}</option>`).join('')}</select></div>
+    <label class="a2f-row"><input type="checkbox" name="improvised"> Improvised, or not made for this: damage −1 (PG p.55)</label>
+    ${called ? `<div class="form-group"><label>Aim at</label><select name="limb">${limbOpts}</select><input type="text" name="limbOther" placeholder="or name the part (left arm, sword hand…)"></div>` : ''}
+    <div class="form-group"><label>Distance</label><select name="band"><option value="">${dist ? `as on the map: ${a2Esc(dist.text)}` : 'not measured (no tokens on the scene)'}</option>${A2F_NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join('')}</select></div>
+    ${note}<p class="hint" data-a2f="sum"></p></div>`
+  const read = (form) => {
+    const f = form.elements
+    const w = list[a2Int(f.weapon.value)] ?? list[0]
+    const improvised = Boolean(f.improvised?.checked)
+    const band = f.band.value === '' ? (dist?.band ?? null) : a2Int(f.band.value)
+    const limb = called ? (String(f.limbOther?.value ?? '').trim() || f.limb.value) : null
+    const weapon = { label: w.label, damage: Math.max(0, w.damage - (improvised ? 1 : 0)), baneful: Boolean(w.baneful), mode: w.mode, range: w.range, body: Boolean(w.body), improvised, uuid: w.uuid ?? null }
+    return { weapon, limb, band, picked: f.band.value !== '', range: a2fRangeMod({ band, range: w.range, melee: mode === 'melee' }) }
+  }
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: move.label },
+    position: { width: 520 },
+    content,
+    ok: { label: 'Roll', icon: 'fa-solid fa-dice-d10', callback: (ev, button) => read(button.form) },
+    render: (ev, dialog) => {
+      const el = dialog?.element
+      const form = el?.querySelector('form')
+      if (!form) return
+      const refresh = () => {
+        const r = read(form)
+        const parts = [`Damage ${r.weapon.damage}${called ? ', no margin added' : ' + margin'}.`]
+        if (move.modifier) parts.push(`${move.label}: ${move.modifier > 0 ? '+' : '−'}${Math.abs(move.modifier)} dice.`)
+        if (r.range.note) parts.push(r.range.note)
+        const out = el.querySelector('[data-a2f="sum"]')
+        if (out) out.textContent = parts.join(' ')
+      }
+      form.addEventListener('change', refresh)
+      form.addEventListener('input', refresh)
+      refresh()
+    },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return false
+  if (res.range.blocked) {
+    if (!game.user.isGM) { ui.notifications.warn(res.range.note); return false }
+    ui.notifications.warn(`${res.range.note} Rolling anyway, as the Storyteller.`)
+  }
+  return { weapon: res.weapon, limb: res.limb, band: res.picked || !dist ? res.band : null }
+}
+
+// Called while the roll window builds its pool (alpha2-core). → { dice, notes } or null
+function a2fMods (actor, t, item) {
+  try {
+    if (!a2fOn('rangeBands') || !actor) return null
+    if (item && item.type !== 'equipment') return null // a power has its own reach
+    const key = (p) => String(p).split('.').pop()
+    const attributes = (t?.attributes ?? []).map(key)
+    const skills = (t?.skills ?? []).map(key)
+    const hint = (typeof a2uFresh === 'function' && a2uFresh(actor)) || {}
+    if (hint.defence) return null
+    const move = a2oState.moves.get(actor.uuid) ?? null
+    const w = move?.weapon ?? (item ? a2fWeaponData(item, a2vEff(actor, 'strength')) : null)
+    const mode = w ? w.mode : skills.includes('shooting') ? 'ranged' : (skills.includes('fighting') && attributes.includes('strength')) ? 'melee' : null
+    if (!mode) return null
+    const foe = (hint.against ? a2FromUuid(hint.against) : null) ?? a2vTarget(actor)
+    if (!foe) return null
+    const band = move && move.band !== null && move.band !== undefined ? a2Int(move.band) : (a2fBetween(actor, foe)?.band ?? null)
+    if (band === null) return null
+    const res = a2fRangeMod({ band, range: w ? w.range : null, melee: mode === 'melee' })
+    return res.note ? { dice: res.dice, notes: [res.note] } : null
+  } catch (e) { console.error('V6 Automation | range', e); return null }
+}
+
+// ---- injuries ----
+function a2fLimbs (actor) { const l = actor?.flags?.world?.a2?.limbs; return Array.isArray(l) ? l.filter((x) => x && x.limb) : [] }
+function a2fNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
+// Called from the damage step on the target's side. → { level, text } or null
+async function a2fInjure (actor, limb, margin) {
+  if (!actor || actor.type !== 'vampire' || a2Int(margin) < 1) return null
+  const res = a2fInjuryMerge(a2fLimbs(actor), limb, margin, a2fNight())
+  const info = A2F_INJURY[res.level]
+  const key = String(limb ?? 'limb').trim().toLowerCase() || 'limb'
+  if (!res.changed) return { level: res.level, text: `Called shot at the ${key}: it already has a worse or equal injury (${info?.name ?? 'hurt'}); the worst result applies (PG p.117).` }
+  await actor.update({ 'flags.world.a2.limbs': res.limbs })
+  try { await a2zSet(actor, 'limb', true, { level: a2fWorstLimb(res.limbs) }) } catch (e) { console.error('V6 Automation | limb state', e) }
+  const extra = res.level === 2 ? ' The Storyteller may add an effect: it drops what it holds, or can\'t move next turn.' : res.level === 3 ? ' The Storyteller may add an effect or impair an Attribute.' : ''
+  return { level: res.level, text: `Called shot, margin ${a2Int(margin)}: the ${key} is ${info.text} (PG p.117).${extra}` }
+}
+// The Limbs window: what is hurt, and mending it for the printed price.
+async function a2fLimbsOpen (actorLike = null) {
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character)
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
+  const limbs = a2fLimbs(actor)
+  const vamp = Boolean(a2Rules(actor)?.vitae)
+  const rows = limbs.map((l, i) => {
+    const c = a2fMendCost(l.level)
+    return `<tr><td><strong>${a2Esc(a2Cap(l.limb))}</strong><br><small>${a2Esc(A2F_INJURY[l.level]?.text ?? '')}</small></td>
+      <td class="c"><label title="An ear, a finger, a toe"><input type="checkbox" name="small.${i}"> small</label>${l.level === 5 ? `<br><label title="The lost part is at hand: 1 Vitae and 1 Willpower less"><input type="checkbox" name="kept.${i}"> have it</label>` : ''}</td>
+      <td class="c">${c.vitae[0] === c.vitae[1] ? '' : `<input type="number" name="vitae.${i}" value="${c.vitae[0]}" min="${Math.max(0, c.vitae[0] - 1)}" max="${c.vitae[1]}" style="width:3.5em" title="The Storyteller sets the price in this range">`}</td>
+      <td class="c"><button type="button" data-a2f-mend="${i}"${vamp ? '' : ' disabled'}><i class="fa-solid fa-droplet"></i> Mend</button> <button type="button" data-a2f-drop="${i}" title="Remove it without a cost (healed otherwise, or entered by mistake)"><i class="fa-solid fa-xmark"></i></button></td></tr>`
+  }).join('')
+  let action = null
+  const data = await foundry.applications.api.DialogV2.wait({
+    window: { title: `Limbs: ${actor.name}` },
+    position: { width: 600 },
+    content: `<div class="a2f-dialog"><p class="hint">Vitae ${a2Int(actor.system?.health?.value)} · Willpower ${a2Int(actor.system?.willpower?.value)}. Mending needs a heart, and the head on the body (PG p.138).</p>
+      ${limbs.length ? `<table class="a2f-table"><tr><th>Limb</th><th class="c">Size</th><th class="c">Vitae</th><th></th></tr>${rows}</table>` : '<p><em>No limb is hurt.</em></p>'}
+      <fieldset><legend>Add an injury by hand</legend><div class="form-group"><input type="text" name="newLimb" placeholder="left arm"><select name="newLevel">${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}: ${A2F_INJURY[n].name}</option>`).join('')}</select><button type="button" data-a2f-add="1"><i class="fa-solid fa-plus"></i> Add</button></div></fieldset></div>`,
+    buttons: [{ action: 'close', label: 'Close' }],
+    rejectClose: false,
+    render: (ev, dialog) => {
+      const el = dialog?.element
+      const form = el?.querySelector('form')
+      if (!form) return
+      const pick = (kind, i) => { const f = form.elements; action = { kind, i, small: Boolean(f[`small.${i}`]?.checked), kept: Boolean(f[`kept.${i}`]?.checked), vitae: f[`vitae.${i}`] ? a2Int(f[`vitae.${i}`].value) : null, newLimb: String(f.newLimb?.value ?? '').trim(), newLevel: a2Int(f.newLevel?.value, 1) }; dialog.close() }
+      el.querySelectorAll('[data-a2f-mend]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); pick('mend', a2Int(b.dataset.a2fMend)) }))
+      el.querySelectorAll('[data-a2f-drop]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); pick('drop', a2Int(b.dataset.a2fDrop)) }))
+      el.querySelector('[data-a2f-add]')?.addEventListener('click', (e) => { e.preventDefault(); pick('add', -1) })
+    }
+  }).catch(() => null)
+  if (!action) return data
+  if (action.kind === 'add') {
+    if (!action.newLimb) { ui.notifications.warn('Name the limb first.'); return a2fLimbsOpen(actor) }
+    const res = a2fInjuryMerge(limbs, action.newLimb, action.newLevel, a2fNight())
+    await actor.update({ 'flags.world.a2.limbs': res.limbs })
+    await a2zSet(actor, 'limb', true, { level: a2fWorstLimb(res.limbs) })
+    return a2fLimbsOpen(actor)
+  }
+  const l = limbs[action.i]
+  if (!l) return null
+  const lines = []
+  if (action.kind === 'mend') {
+    const c = a2fMendCost(l.level, { small: action.small, kept: action.kept })
+    const vit = action.vitae === null ? c.vitae[0] : a2Clamp(action.vitae, c.vitae[0], c.vitae[1])
+    const haveV = a2Int(actor.system?.health?.value)
+    const haveW = a2Int(actor.system?.willpower?.value)
+    if (haveV < vit || haveW < c.willpower) { ui.notifications.warn(`${actor.name} needs ${vit} Vitae${c.willpower ? ` and ${c.willpower} Willpower` : ''} to mend the ${l.limb} (has ${haveV} and ${haveW}).`); return a2fLimbsOpen(actor) }
+    const upd = {}
+    if (vit) upd['system.health.value'] = haveV - vit
+    if (c.willpower) upd['system.willpower.value'] = haveW - c.willpower
+    if (Object.keys(upd).length) await actor.update(upd)
+    lines.push(`${a2Cap(l.limb)} mended: ${vit} Vitae${c.willpower ? `, ${c.willpower} Willpower` : ''}${c.rest === 'scene' ? ', and a full scene of rest without conflict' : c.rest === 'day' ? ', and a full day of rest' : ''}.`, c.note)
+  } else lines.push(`${a2Cap(l.limb)}: injury removed.`)
+  const left = limbs.filter((x, i) => i !== action.i)
+  await actor.update({ 'flags.world.a2.limbs': left })
+  const worst = a2fWorstLimb(left)
+  await a2zSet(actor, 'limb', worst > 0, { level: worst || 1 })
+  await a2xPostNote(actor, `${actor.name}: limbs`, lines, { whisper: true })
+  return left.length ? a2fLimbsOpen(actor) : null
+}
+
+// ---- a group acting as one ----
+async function a2fGroup () {
+  if (!game.user.isGM) { ui.notifications.warn('That one is for the Storyteller.'); return null }
+  const tokens = (globalThis.canvas?.tokens?.controlled ?? []).filter((t) => t.actor)
+  if (tokens.length < 2) { ui.notifications.warn('Select the tokens of the group first (two or more), and target who they act against.'); return null }
+  const pool = (a) => { try { return a.type === 'npc' ? a2Int(a2NpcBestLevel(a, ['strength']).value) : a2vEff(a, 'strength') + a2Int(a.system?.skills?.fighting?.effective ?? a.system?.skills?.fighting?.value) } catch (e) { return 0 } }
+  const sorted = [...tokens].sort((x, y) => pool(y.actor) - pool(x.actor))
+  const bonus = a2fGroupBonus(tokens.length)
+  const moves = [['unarmed', 'Unarmed attack'], ['melee', 'Melee weapon'], ['shoot', 'Shoot'], ['grab', 'Grab'], ['', 'Something else: only give the dice']]
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: 'Group action' },
+    content: `<div class="a2f-dialog"><p>${tokens.length} act as one: the leader rolls, the others assist for <strong>+${bonus} ${bonus === 1 ? 'die' : 'dice'}</strong> (+1 each, at most 3, PG p.110).</p>
+      <div class="form-group"><label>Leader</label><select name="lead">${sorted.map((t) => `<option value="${t.id}">${a2Esc(t.name)} (${pool(t.actor)})</option>`).join('')}</select></div>
+      <div class="form-group"><label>Action</label><select name="move">${moves.map(([id, l]) => `<option value="${id}">${l}</option>`).join('')}</select></div>
+      <p class="hint">A hit on the group falls on one of its members: a minion has 1 Health and drops (ST p.43).</p></div>`,
+    ok: { label: 'Go', callback: (ev, button) => ({ lead: button.form.elements.lead.value, move: button.form.elements.move.value }) },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return null
+  const lead = tokens.find((t) => t.id === res.lead) ?? sorted[0]
+  if (bonus) await a2zAddEdge(lead.actor, { label: `Group of ${tokens.length}: ${tokens.length - 1} assisting`, dice: bonus, when: 'own-test', from: lead.actor.uuid, combatantId: null })
+  await a2vSay(`<p><strong>${a2Esc(lead.name)}</strong> leads a group of ${tokens.length}: +${bonus} ${bonus === 1 ? 'die' : 'dice'} on its next test (PG p.110).</p>`, lead.actor)
+  try { lead.control({ releaseOthers: true }) } catch (e) { /* keep the selection */ }
+  if (res.move) return a2vRun(lead.actor, res.move)
+  return null
+}
+
+// ---- chat ----
+function a2fRenderChat (message, html) {
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  if (!root || root.querySelector('.a2f-note')) return
+  const r = typeof a2oRoll === 'function' ? a2oRoll(message) : null
+  if (!r) return
+  const def = message.flags?.world?.a2def
+  const w = def?.move?.weapon ?? null
+  const lines = []
+  if (w) lines.push(`${w.label}: damage ${w.damage}${w.improvised ? ' (improvised)' : ''}${def.move.limb ? `, aimed at the ${def.move.limb}` : ''}.`)
+  let firearm = w ? w.mode === 'ranged' : false
+  if (!w) { try { const it = a2FromUuid(r.roll.options?.a2?.itemUuid); firearm = it?.type === 'equipment' && [...(it.system?.test?.skills ?? [])].some((s) => String(s).split('.').pop() === 'shooting') } catch (e) { /* not an item roll */ } }
+  if (firearm) { try { const { v } = a2xVerdict(message, r.roll); if (v.painful) lines.push('Painful failure with a firearm: the Storyteller may rule a jam (PG p.116).') } catch (e) { /* no verdict */ } }
+  if (!lines.length) return
+  const box = document.createElement('div')
+  box.className = 'a2f-note'
+  box.innerHTML = lines.map((l) => `<div>${a2Esc(l)}</div>`).join('')
+  ;(root.querySelector('.a2-result') ?? root.querySelector('.message-content') ?? root).append(box)
+}
+
+function a2fInjectStyles () {
+  if (document.getElementById('a2f-styles')) return
+  const st = document.createElement('style')
+  st.id = 'a2f-styles'
+  st.textContent = `
+.a2f-dialog .form-group { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+.a2f-dialog .form-group > label { flex: 0 0 90px; }
+.a2f-dialog .form-group select, .a2f-dialog .form-group input[type="text"] { flex: 1; }
+.a2f-dialog .a2f-row { display: block; margin: 4px 0; }
+.a2f-dialog .hint { font-size: 12px; opacity: 0.85; margin: 4px 0; }
+.a2f-table { width: 100%; border-collapse: collapse; }
+.a2f-table td, .a2f-table th { padding: 3px 5px; border-bottom: 1px solid rgba(200,170,110,0.2); text-align: left; }
+.a2f-table .c { text-align: center; }
+.a2f-note { font-size: 12px; opacity: 0.9; margin-top: 4px; padding-top: 4px; border-top: 1px dashed rgba(200,170,110,0.35); }
+`
+  document.head.append(st)
+}
+
+async function a2FightBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.fight?.booted) return true
+  a2eReg('weaponPick', { name: 'Attacks ask for the weapon', hint: 'Melee, Shoot, Throw, Called shot, Stake and Decapitate ask which weapon is used (the character\'s equipment, or a plain light, medium or heavy one) and fill in its damage.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('rangeBands', { name: 'Distance between tokens sets the range modifiers', hint: 'Point-blank −1 die, one band beyond the weapon\'s range −2, further no shot; melee needs Close (PG p.108, p.116). Off: use the modifier field by hand.', scope: 'world', config: true, type: Boolean, default: true })
+  a2fInjectStyles()
+  if (!a2fState.hooked) {
+    a2fState.hooked = true
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { a2fRenderChat(message, html) } catch (e) { console.error('V6 Automation | fight card', e) } })
+  }
+  api.fight = { booted: true, between: a2fBetween, limbs: a2fLimbsOpen, injure: a2fInjure, group: a2fGroup, weapon: a2fWeaponData, rules: { units: a2fUnits, band: a2fBand, bandKey: a2fBandKey, rangeMod: a2fRangeMod, weaponProfile: a2fWeaponProfile, generic: a2fGeneric, injuryLevel: a2fInjuryLevel, injuryMerge: a2fInjuryMerge, worstLimb: a2fWorstLimb, mendCost: a2fMendCost, groupBonus: a2fGroupBonus } }
+  console.log('V6 Automation | weapons, distance and injuries loaded')
+  return true
+}
+globalThis.a2FightBoot ??= a2FightBoot
+
+// ---- Humanity, the day, torpor, diablerie, ghouls (PG p.65-66, p.125-128, p.140-141, p.147) ----
+// Humanity   one window per character: mark a violation with its reason (the fixed costs are
+//            filled in), warn the player first (ST p.15), Justify (once a night, 1 Willpower,
+//            Self-Control against the rank; each success erases a slash, a failure is −2 until
+//            the next night), erase a slash for following a precept, raise the rank for 20 XP.
+// Day        staying awake (flat Resolve against 2 + generation modifier, each hour), waking
+//            when disturbed (flat Wits, same Difficulty); the Awake by day state does the −2 ×
+//            generation modifier. A sunrise clock counts the hours down for the table.
+// Torpor     how long it lasts by Humanity rank, and the three ways out: fed (Stamina + Resolve
+//            against 2 + generation modifier), the Unconscious Hunter (Resolve + Awareness
+//            against 3), rising from voluntary torpor (1 Willpower, then the same test). Upkeep
+//            Vitae is taken at New Night.
+// Diablerie  the Storyteller runs it: the requirements are checked, the run of contested tests
+//            is rolled for both sides, and the gains or the lost soul are applied.
+// Ghouls     who serves whom and when they last drank; a reminder at New Night. The rules print
+//            no interval: the monthly drink is a house rule, and it only reminds.
+// Settings (world): humanityFlow (on), ghoulInterval (30 nights; 0 = no reminder), sunrise (the clock).
+// Data: flags.world.a2.justifyNight, .dayHours, .torpor, .soul, .diablerie, .domitor, .ghoulFed.
+
+const A2N_VIOLATIONS = [
+  { id: 'feed7', label: 'Fed on a human below 7 Vitae', n: 1, page: 'PG p.144' },
+  { id: 'drain', label: 'Killed a human by draining', n: 2, page: 'PG p.144' },
+  { id: 'diablerie', label: 'Attempted diablerie', n: 1, page: 'PG p.66' },
+  { id: 'beast', label: 'Bestial failure: fed the Beast', n: 1, page: 'PG p.103' },
+  { id: 'monstrous', label: 'Acted monstrously, or let the Beast decide', n: 1, page: 'PG p.128' },
+  { id: 'allies', label: 'Did not stop allies from acting like monsters', n: 1, page: 'PG p.128' },
+  { id: 'boundaries', label: "Violated a mortal's boundaries or well-being for gain or amusement", n: 1, page: 'PG p.128' },
+  { id: 'food', label: 'Treated mortals as inferior, or as food', n: 1, page: 'PG p.128' },
+  { id: 'cruelty', label: 'Avoidable cruelty', n: 1, page: 'PG p.128' },
+  { id: 'remorse', label: 'Remorse, forced by True Faith', n: 1, page: 'ST p.29' },
+  { id: 'path', label: "Broke a precept of the character's Path", n: 1, page: 'PG p.129' },
+  { id: 'other', label: 'Something else', n: 1, page: 'PG p.127' }
+]
+const A2N_SPAN = { 'one day': 1, 'one week': 7, 'one month': 30, 'one year': 365, 'one decade': 3650, 'one century': 36500 }
+const A2N_UPKEEP = { duskborn: 30, neonate: 30, ancilla: 180, elder: 365, methuselah: 36500 } // nights per Vitae in torpor (PG p.140)
+
+// ---- pure rules ----
+// May this character Justify now? (PG p.127) → { ok, why }
+function a2nJustifyCheck ({ rank = 6, violations = 0, willpower = 0, last = null, night = 1 } = {}) {
+  if (a2Int(rank) < 1) return { ok: false, why: 'A wight has nothing left to justify (rank 0).' }
+  if (a2Int(violations) < 1) return { ok: false, why: 'There is no violation to erase.' }
+  if (last !== null && last !== undefined && a2Int(last) === a2Int(night)) return { ok: false, why: 'Justify can be tried once per night (PG p.127).' }
+  if (a2Int(willpower) < 1) return { ok: false, why: 'Justify costs 1 Willpower (PG p.127).' }
+  return { ok: true, why: '' }
+}
+// What the Self-Control test does. → { erase, penalty }
+function a2nJustifyOutcome ({ win = false, successes = 0, violations = 0 } = {}) {
+  if (!win) return { erase: 0, penalty: true }
+  return { erase: Math.max(0, Math.min(a2Int(successes), a2Int(violations))), penalty: false }
+}
+// Difficulty of the flat tests of the day and of rising (PG p.141, p.147).
+function a2nWakeDifficulty (genMod) { return 2 + Math.max(0, a2Int(genMod)) }
+// Torpor length in nights for a rank (PG p.126). bands: the Path's own, if it has them.
+function a2nTorporNights (rank, bands = null, extended = false) {
+  const b = a2RankBand(rank, bands ?? undefined)
+  if (!b) return null
+  return A2N_SPAN[String(extended ? b.torporExtended : b.torpor).trim().toLowerCase()] ?? null
+}
+// Where a torpor stands. → { elapsed, hunter, voluntary }
+function a2nTorporState ({ since = 1, night = 1, length = 30 } = {}) {
+  const elapsed = Math.max(0, a2Int(night) - a2Int(since))
+  const len = Math.max(1, a2Int(length, 30))
+  return { elapsed, hunter: elapsed >= len, voluntary: elapsed * 2 >= len }
+}
+// Is a point of upkeep Vitae due on this night? (PG p.140)
+function a2nUpkeepDue ({ since = 1, night = 1, tier = 'neonate' } = {}) {
+  const gap = a2Int(night) - a2Int(since)
+  const every = A2N_UPKEEP[tier] ?? 30
+  return gap > 0 && gap % every === 0
+}
+// Can the act begin? (PG p.65-66) → [problems]
+function a2nDiablerieCheck ({ actorCreature = 'vampire', victimCreature = 'vampire', victimVitae = 0, victimHelpless = false, sameActor = false } = {}) {
+  const out = []
+  if (sameActor) out.push('The diablerist and the victim are the same character.')
+  if (actorCreature !== 'vampire') out.push('The diablerist must be a Duskborn or a vampire.')
+  if (victimCreature !== 'vampire') out.push('The victim must be a Duskborn or a vampire.')
+  if (a2Int(victimVitae) > 0) out.push(`The victim still has ${a2Int(victimVitae)} Vitae: it must be drained to 0 first.`)
+  if (!victimHelpless) out.push('The victim must be immobilized, paralyzed or in torpor (tied up, staked or in torpor).')
+  return out
+}
+// What a completed diablerie gives (PG p.66). Generations as numbers (13, 9…).
+function a2nDiablerieGains ({ myGen = 13, victimGen = 13 } = {}) {
+  const mine = a2Int(myGen, 13)
+  const theirs = a2Int(victimGen, 13)
+  const gM = a2GenModifier(mine)
+  const gV = a2GenModifier(theirs)
+  const lower = theirs < mine ? (gV - gM > 1 ? gV - gM : 1) : 0
+  const newGen = Math.max(1, mine - lower)
+  return { willpower: gV, xp: 10 * gV, years: gV, lower, newGen, becomesVampire: mine >= 14 && newGen <= 13, tests: gV }
+}
+// House rule: a ghoul that has gone the interval without Vitae is due a reminder.
+function a2nGhoulDue ({ fed = null, night = 1, interval = 30 } = {}) {
+  const every = a2Int(interval, 30)
+  if (every <= 0) return { due: false, since: null }
+  if (fed === null || fed === undefined) return { due: true, since: null }
+  const since = a2Int(night) - a2Int(fed)
+  return { due: since >= every, since }
+}
+
+// ---- helpers ----
+const a2nState = { hooked: false }
+function a2nOn () { return a2Enabled() && a2eGet('humanityFlow', true) !== false }
+function a2nNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
+function a2nPick (actorLike) { return actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null) }
+function a2nVal (actor, kind, key) { const v = actor?.system?.[kind]?.[key]; return a2Int(v?.effective ?? v?.value) }
+function a2nTier (actor) { try { return a2cTierKey(a2Creature(actor), actor.system?.vampire?.generation?.value) } catch (e) { return 'neonate' } } // eslint-disable-line no-undef
+function a2nOwners (actor) { return game.users.filter((u) => u.isGM || actor?.testUserPermission?.(u, 'OWNER')).map((u) => u.id) }
+// One test without the roll window: the pool is built here and rolled at once.
+//  attributes, skills: keys; extra: dice on top; difficulty or opponent (their successes).
+//  → { roll, v, message } or null
+async function a2nRoll (actor, { label = 'Test', attributes = [], skills = [], extra = 0, difficulty = 0, opponent = null, hunger = true, notes = [], skipDay = false } = {}) {
+  if (!actor) return null
+  const defs = a2xAttrDefs()
+  const paths = attributes.map((k) => defs[k]?.path ?? `system.attributes.${k}`)
+  const spaths = skills.map((k) => `system.skills.${k}`)
+  const lines = [...notes]
+  let pool
+  let attr
+  if (actor.type === 'npc') {
+    const best = a2NpcBestLevel(actor, attributes)
+    pool = a2Int(best?.value) + a2Int(extra)
+    attr = a2Half(best?.value)
+    lines.push(`${best?.label ?? 'Level'} ${a2Int(best?.value)} rolled as the pool (ST p.42).`)
+  } else {
+    pool = attributes.reduce((t, k) => t + a2nVal(actor, 'attributes', k), 0) + skills.reduce((t, k) => t + a2nVal(actor, 'skills', k), 0) + a2Int(extra)
+    attr = Math.max(0, ...attributes.map((k) => a2nVal(actor, 'attributes', k)))
+    const imp = a2xImpairmentPenalty(actor, paths)
+    if (imp) { pool -= imp; lines.push(`Impaired: −${imp} dice (PG p.105).`) }
+    let sm = null
+    try { sm = typeof a2zMods === 'function' ? a2zMods(actor, { attributes: paths, skills: spaths, disciplines: [] }) : null } catch (e) { sm = null }
+    if (sm) {
+      let dice = sm.dice
+      let ns = sm.notes
+      if (skipDay && typeof a2zHas === 'function' && a2zHas(actor, 'day')) { dice += 2 * Math.max(1, a2ActorGenMod(actor)); ns = ns.filter((n) => !/^Awake by day/.test(n)) }
+      pool += dice
+      lines.push(...ns)
+    }
+  }
+  pool = Math.max(0, pool)
+  const hungerDice = hunger === false ? 0 : a2ActorHunger(actor)
+  const opp = opponent === null || opponent === undefined ? null : Math.max(0, a2Int(opponent))
+  const context = {
+    attributes: paths, skills: spaths, disciplines: [], action: null, category: null,
+    quickeningSpent: 0, baseDicePool: pool, dicePool: pool, difficulty: opp === null ? Math.max(0, a2Int(difficulty)) : 0, testText: label,
+    a2: { v: 2, hunger: hungerDice, hungerAvailable: a2ActorHunger(actor), takeHalf: false, contested: opp !== null, opponent: opp, cap: null, frenzy: false, attr, notes: lines, oppose: null, vsMessage: null, itemUuid: null, creature: a2Creature(actor), npc: Boolean(a2NpcInfo(actor)), trueFaith: 0 }
+  }
+  const Test = a2xState.Test ?? (await import(a2SystemUrl('core/scripts/wod6e-test.js'))).WOD6eTest
+  const roll = await Test.executeTest({ actor, context, flavor: label, createMessage: false })
+  let messageMode
+  for (const k of ['messageMode', 'rollMode']) {
+    try { if (game.settings.settings.has(`core.${k}`)) { messageMode = game.settings.get('core', k); break } } catch (e) { /* not in this version */ }
+  }
+  const message = await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor: label }, messageMode ? { messageMode } : {})
+  return { roll, v: roll.a2Verdict ?? a2RollVerdict(roll), message }
+}
+async function a2nCard (actor, title, lines, { whisper = true } = {}) {
+  const data = { speaker: actor ? ChatMessage.getSpeaker({ actor }) : { alias: 'Storyteller' }, content: `<div class="wod6e chat-card a2-note a2n-note"><h4 class="chat-card-name">${a2Esc(title)}</h4><ul>${lines.filter(Boolean).map((l) => `<li>${a2Esc(l)}</li>`).join('')}</ul></div>` }
+  if (whisper) data.whisper = actor ? a2nOwners(actor) : game.users.filter((u) => u.isGM).map((u) => u.id)
+  return ChatMessage.create(data)
+}
+
+// ---- Humanity ----
+async function a2nViolate (actor, n, reason = '') {
+  const before = a2ActorHumanity(actor)
+  const res = await a2Violate(actor, Math.max(1, a2Int(n, 1)))
+  const path = a2PathInfo(actor)
+  const lines = [`${reason || 'Violation'}: ${a2Plural(Math.max(1, a2Int(n, 1)), 'slash', 'slashes')}.`]
+  if (res.lost) lines.push(`A slash fell on a filled box: rank ${before.rank} → ${res.rank}, and every slash is erased (PG p.127).`)
+  else lines.push(`${path.name} ${res.rank}: ${res.violations} of ${10 - res.rank} ${10 - res.rank === 1 ? 'slash' : 'slashes'} marked. One more than that and the rank drops.`)
+  if (res.rank === 0) lines.push('Rank 0: the character becomes a wight (PG p.126).')
+  await a2nCard(actor, `${actor.name}: ${path.name}`, lines)
+  return res
+}
+async function a2nJustify (actor) {
+  const hum = a2ActorHumanity(actor)
+  const night = a2nNight()
+  const wp = a2Int(actor.system?.willpower?.value)
+  const chk = a2nJustifyCheck({ rank: hum.rank, violations: hum.violations, willpower: wp, last: actor.flags?.world?.a2?.justifyNight ?? null, night })
+  if (!chk.ok) { ui.notifications.warn(`${actor.name}: ${chk.why}`); return null }
+  await actor.update({ 'system.willpower.value': wp - 1, 'flags.world.a2.justifyNight': night })
+  const r = await a2nRoll(actor, { label: `Justify · Self-Control (Composure ${a2nVal(actor, 'attributes', 'composure')} + Resolve ${a2nVal(actor, 'attributes', 'resolve')}) vs Difficulty ${hum.rank}`, attributes: ['composure', 'resolve'], difficulty: hum.rank, notes: ['Justify: 1 Willpower spent. Each success erases a slash; a failure is −2 dice on every test until the next night (PG p.127).'] })
+  if (!r) return null
+  const out = a2nJustifyOutcome({ win: r.v.win === true, successes: r.v.successes, violations: hum.violations })
+  const path = a2PathInfo(actor)
+  if (out.erase) await a2WriteHumanity(actor, a2HumanityErase(a2ActorHumanity(actor), out.erase))
+  if (out.penalty) { try { await a2zSet(actor, 'justify', true) } catch (e) { console.error('V6 Automation | justify state', e) } }
+  await a2nCard(actor, `${actor.name}: Justify`, [out.penalty ? 'The excuses ring hollow: nothing is erased, and every test takes −2 dice until the next night (PG p.127).' : `${a2Plural(out.erase, 'slash', 'slashes')} erased: ${path.name} ${hum.rank}, ${hum.violations - out.erase} left.`, 'If the roll is changed afterwards (a Willpower reroll), set the slashes by hand on the sheet.'])
+  return out
+}
+async function a2nRaise (actor) {
+  const hum = a2ActorHumanity(actor)
+  if (hum.violations > 0) { ui.notifications.warn(`${actor.name} can't raise the rank while it has violations; such an act may erase one instead (PG p.127).`); return null }
+  if (hum.rank >= 10) { ui.notifications.info(`${actor.name} is at rank 10 already.`); return null }
+  const x = a2tXp(actor)
+  if (x.available < 20) { ui.notifications.warn(`${actor.name} has ${x.available} XP; a rank costs 20 (PG p.127).`); return null }
+  x.spent += 20
+  x.log.push({ at: new Date().toISOString(), type: 'spend', kind: 'humanity', what: `${a2PathInfo(actor).name} rank ${hum.rank + 1}`, xp: 20, by: game.user?.name ?? '' })
+  await actor.update({ 'flags.world.a2.xp': a2tXpSave(x) })
+  await a2WriteHumanity(actor, a2HumanitySetRank(hum, hum.rank + 1))
+  await a2nCard(actor, `${actor.name}: ${a2PathInfo(actor).name}`, [`Rank ${hum.rank} → ${hum.rank + 1} for 20 XP, earned by keeping to the precepts at real risk (PG p.127).`])
+  return hum.rank + 1
+}
+async function a2nHumanity (actorLike = null) {
+  const actor = a2nPick(actorLike)
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (!a2Rules(actor)?.humanity) { ui.notifications.warn(`${actor.name} has no Humanity or Path (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const hum = a2ActorHumanity(actor)
+  const path = a2PathInfo(actor)
+  const gm = game.user.isGM
+  const room = 10 - hum.rank - hum.violations
+  const justified = a2Int(actor.flags?.world?.a2?.justifyNight, -1) === a2nNight()
+  const band = a2RankBand(hum.rank, path.bands)
+  const res = await foundry.applications.api.DialogV2.wait({
+    window: { title: `${path.name}: ${actor.name}` },
+    position: { width: 560 },
+    content: `<div class="a2n-dialog"><p><strong>${a2Esc(path.name)} ${hum.rank}</strong> · ${a2Plural(hum.violations, 'violation', 'violations')} marked, room for ${Math.max(0, room)} more before the rank drops${band ? ` · rank modifier ${a2Signed(band.modifier)}` : ''}.</p>
+      <fieldset><legend>Mark a violation</legend>
+        <div class="form-group"><label>What happened</label><select name="reason">${A2N_VIOLATIONS.map((v) => `<option value="${v.id}" data-n="${v.n}">${a2Esc(v.label)} (${v.n}${['feed7', 'drain'].includes(v.id) ? '' : '+'})</option>`).join('')}</select></div>
+        <div class="form-group"><label>Slashes</label><select name="n"><option value="1">1</option><option value="2">2</option><option value="3">3: an act that can't be undone</option></select><input type="text" name="note" placeholder="a few words, for the card"></div>
+        <p class="hint">Feeding below 7 Vitae is 1 and killing by draining 2; everything else is 1 to 3 at the Storyteller's call, with 3 kept for what can't be undone (ST p.15). Entering a frenzy is no violation in itself; what is done in it may be.</p>
+      </fieldset>
+      <p class="hint">Justify: once per night, 1 Willpower, Self-Control against Difficulty ${hum.rank}${justified ? ' (already tried tonight)' : ''}. Following a precept with effort and risk may erase a slash, and may raise the rank for 20 XP once no slash is left (PG p.127).</p></div>`,
+    buttons: [
+      { action: 'mark', label: 'Mark it', icon: 'fa-solid fa-slash', default: true, callback: (ev, button) => ({ do: 'mark', ...a2nReadViolation(button.form) }) },
+      ...(gm ? [{ action: 'warn', label: 'Warn the player', icon: 'fa-solid fa-triangle-exclamation', callback: (ev, button) => ({ do: 'warn', ...a2nReadViolation(button.form) }) }] : []),
+      { action: 'justify', label: 'Justify', icon: 'fa-solid fa-scale-balanced', callback: () => ({ do: 'justify' }) },
+      ...(gm ? [{ action: 'precept', label: 'Precept kept: erase 1', icon: 'fa-solid fa-eraser', callback: () => ({ do: 'precept' }) }, { action: 'raise', label: 'Raise rank (20 XP)', icon: 'fa-solid fa-arrow-up', callback: () => ({ do: 'raise' }) }] : []),
+      { action: 'close', label: 'Close' }
+    ],
+    render: (ev, dialog) => {
+      const form = dialog?.element?.querySelector('form')
+      form?.elements?.reason?.addEventListener('change', (e) => { const n = e.target.selectedOptions?.[0]?.dataset?.n; if (n) form.elements.n.value = n })
+    },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res || typeof res !== 'object') return null
+  if (res.do === 'mark') return a2nViolate(actor, res.n, res.text)
+  if (res.do === 'warn') {
+    const after = a2HumanityViolate(hum, res.n)
+    await ChatMessage.create({ speaker: { alias: 'Storyteller' }, whisper: a2nOwners(actor), content: `<div class="wod6e chat-card a2-note a2n-note"><h4 class="chat-card-name">A warning for ${a2Esc(actor.name)}</h4><ul><li>${a2Esc(res.text)}: this would mark ${a2Plural(res.n, 'violation', 'violations')} on ${a2Esc(path.name)} (ST p.15).</li><li>${after.lost ? `The rank would drop to ${after.rank}.` : `It would stand at ${after.violations} of ${10 - hum.rank}.`}</li></ul></div>` })
+    return null
+  }
+  if (res.do === 'justify') return a2nJustify(actor)
+  if (res.do === 'precept') {
+    if (!hum.violations) { ui.notifications.info(`${actor.name} has no violation to erase.`); return null }
+    await a2WriteHumanity(actor, a2HumanityErase(hum, 1))
+    await a2nCard(actor, `${actor.name}: ${path.name}`, [`A precept kept with effort and risk: 1 slash erased, ${hum.violations - 1} left (PG p.127).`])
+    return null
+  }
+  if (res.do === 'raise') return a2nRaise(actor)
+  return null
+}
+function a2nReadViolation (form) {
+  const f = form.elements
+  const def = A2N_VIOLATIONS.find((v) => v.id === f.reason.value) ?? A2N_VIOLATIONS.at(-1)
+  const note = String(f.note.value ?? '').trim()
+  return { n: a2Clamp(a2Int(f.n.value, 1), 1, 3), text: `${def.label}${note ? ` (${note})` : ''}, ${def.page}` }
+}
+
+// ---- the day ----
+async function a2nDay (actorLike = null) {
+  const actor = a2nPick(actorLike)
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (a2Creature(actor) !== 'vampire') { ui.notifications.warn(`${actor.name} doesn't sleep by day (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const g = a2ActorGenMod(actor)
+  const diff = a2nWakeDifficulty(g)
+  const awake = a2zHas(actor, 'day')
+  const hours = a2Int(actor.flags?.world?.a2?.dayHours)
+  const pick = await foundry.applications.api.DialogV2.wait({
+    window: { title: `Daylight hours: ${actor.name}` },
+    position: { width: 520 },
+    content: `<div class="a2n-dialog"><p>${awake ? `<strong>Awake by day</strong>, ${a2Plural(hours, 'hour', 'hours')} so far: −${2 * g} dice on every test but the one to stay awake.` : 'In daysleep, or it is night.'}</p>
+      <ul class="a2n-list"><li><strong>Stay awake:</strong> a flat Resolve test against ${diff}, every hour. A failure: daysleep where it stands.</li>
+      <li><strong>Disturbed:</strong> a flat Wits test against ${diff}. A success keeps it awake for up to an hour.</li>
+      <li><strong>Hurt:</strong> damage wakes it at once, for as long as the danger lasts that scene.</li></ul><p class="hint">PG p.147.</p></div>`,
+    buttons: [
+      { action: 'stay', label: 'Stay awake', icon: 'fa-solid fa-eye', default: awake },
+      { action: 'wake', label: 'Disturbed', icon: 'fa-solid fa-bell', default: !awake },
+      { action: 'hurt', label: 'Woken by damage', icon: 'fa-solid fa-burst' },
+      { action: 'sleep', label: 'Daysleep', icon: 'fa-solid fa-bed' },
+      { action: 'close', label: 'Close' }
+    ],
+    rejectClose: false
+  }).catch(() => null)
+  if (!pick || pick === 'close') return null
+  if (pick === 'sleep') { await a2zSet(actor, 'day', false); await actor.update({ 'flags.world.a2.dayHours': 0 }); await a2nCard(actor, `${actor.name}: daysleep`, ['Asleep until nightfall.']); return null }
+  if (pick === 'hurt') { await a2zSet(actor, 'day', true); await a2nCard(actor, `${actor.name}: woken`, [`Woken by damage: awake while the danger lasts this scene, at −${2 * g} dice (PG p.147).`]); return null }
+  const stay = pick === 'stay'
+  const key = stay ? 'resolve' : 'wits'
+  const r = await a2nRoll(actor, { label: `${stay ? 'Stay awake' : 'Wake up'} · ${a2Cap(key)} ${a2nVal(actor, 'attributes', key)} vs Difficulty ${diff}`, attributes: [key], difficulty: diff, skipDay: true, notes: [`A flat ${a2Cap(key)} test against 2 + the generation modifier (PG p.147).`] })
+  if (!r) return null
+  const win = r.v.win === true
+  await a2zSet(actor, 'day', win)
+  await actor.update({ 'flags.world.a2.dayHours': win ? (stay ? hours + 1 : 0) : 0 })
+  await a2nCard(actor, `${actor.name}: ${stay ? 'staying awake' : 'disturbed in daysleep'}`, [win ? (stay ? `Awake for another hour (${hours + 1} so far), at −${2 * g} dice on everything else. Test again in an hour.` : `Awake for up to an hour, at −${2 * g} dice. Staying up longer takes the Resolve test.`) : (stay ? 'The sun wins: it falls into daysleep where it stands.' : 'It sleeps on.')])
+  return r
+}
+
+// ---- the sunrise clock ----
+function a2nSunrise () { const s = a2eGet('sunrise', null); return s && typeof s === 'object' && s.hours !== null && s.hours !== undefined ? Math.max(0, a2Int(s.hours)) : null }
+async function a2nSunriseSet (hours) {
+  if (!game.user.isGM) { ui.notifications.warn('The sunrise clock is the Storyteller\'s.'); return null }
+  const h = hours === null || hours === undefined || hours === '' ? null : Math.max(0, a2Int(hours))
+  await game.settings.set(a2eNs(), a2eKey('sunrise'), { hours: h })
+  if (h === null) return null
+  const lines = h > 0 ? [`${a2Plural(h, 'hour', 'hours')} until sunrise.`] : ['The sun is up. A vampire in the open is in sunlight: baneful damage at the start of each turn, and a fear frenzy test (PG p.139, p.146).', 'Staying awake takes a flat Resolve test against 2 + the generation modifier, every hour (PG p.147).']
+  return ChatMessage.create({ speaker: { alias: 'Storyteller' }, content: `<div class="wod6e chat-card a2-note a2n-note a2n-sunrise" data-a2n-sunrise="${h}"><h4 class="chat-card-name">${h > 0 ? 'Sunrise is coming' : 'Sunrise'}</h4><ul>${lines.map((l) => `<li>${a2Esc(l)}</li>`).join('')}</ul></div>`, flags: { world: { a2n: { kind: 'sunrise', hours: h } } } })
+}
+
+// ---- torpor ----
+async function a2nTorpor (actorLike = null) {
+  const actor = a2nPick(actorLike)
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (a2Creature(actor) !== 'vampire') { ui.notifications.warn(`${actor.name} can't fall into torpor (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const t = actor.flags?.world?.a2?.torpor ?? null
+  const hum = a2ActorHumanity(actor)
+  const path = a2PathInfo(actor)
+  const band = a2RankBand(hum.rank, path.bands)
+  const g = a2ActorGenMod(actor)
+  const diff = a2nWakeDifficulty(g)
+  const night = a2nNight()
+  const length = a2nTorporNights(hum.rank, path.bands) ?? 30
+  const st = t ? a2nTorporState({ since: t.since ?? night, night, length }) : null
+  const vitae = a2Int(actor.system?.health?.value)
+  const mod = a2Int(band?.modifier)
+  const staked = a2zHas(actor, 'staked')
+  const pick = await foundry.applications.api.DialogV2.wait({
+    window: { title: `Torpor: ${actor.name}` },
+    position: { width: 560 },
+    content: `<div class="a2n-dialog"><p>${t ? `<strong>In torpor</strong> (${a2Esc(t.reason ?? 'manual')}) for ${a2Plural(st.elapsed, 'night', 'nights')}.` : 'Not in torpor.'} ${a2Esc(path.name)} ${hum.rank}: torpor lasts ${a2Esc(String(band?.torpor ?? 'one month').toLowerCase())} (extended: ${a2Esc(String(band?.torporExtended ?? 'one year').toLowerCase())}); rank modifier ${a2Signed(mod)} on tests to wake. Vitae ${vitae}.</p>
+      <ul class="a2n-list"><li><strong>Fed at least 1 Vitae:</strong> Stamina + Resolve against ${diff}.</li>
+      <li><strong>Unconscious Hunter:</strong> once the length has passed${st ? (st.hunter ? ' (it has)' : ` (${a2Plural(Math.max(0, length - st.elapsed), 'night', 'nights')} to go)`) : ''}, prey within Close: Resolve + Awareness against 3. On a win it wakes to feed and risks a hunger frenzy; without 1 Vitae by the end of the scene it sinks back.</li>
+      <li><strong>Voluntary torpor:</strong> after half the length${st ? (st.voluntary ? ' (passed)' : ' (not yet)') : ''}, at the start of a night: 1 Willpower, then Stamina + Resolve against ${diff}; a win costs 1 Vitae to rise.</li>
+      <li><strong>Staked:</strong> pulling the stake ends it, unless something else holds it down (0 Vitae).</li></ul><p class="hint">PG p.126, p.140-141. Upkeep Vitae is taken at New Night.</p></div>`,
+    buttons: [
+      ...(t ? [{ action: 'fed', label: 'Fed: test to rise', icon: 'fa-solid fa-droplet', default: true }, { action: 'hunter', label: 'Unconscious Hunter', icon: 'fa-solid fa-paw' }, { action: 'will', label: 'Rise by will', icon: 'fa-solid fa-person-rays' }] : [{ action: 'enter', label: 'Enter voluntary torpor', icon: 'fa-solid fa-bed', default: true }]),
+      ...(staked ? [{ action: 'stake', label: 'Pull the stake', icon: 'fa-solid fa-location-pin' }] : []),
+      { action: 'close', label: 'Close' }
+    ],
+    rejectClose: false
+  }).catch(() => null)
+  if (!pick || pick === 'close') return null
+  const rise = async (lines) => { const upd = {}; a2Unset(upd, 'flags.world.a2.torpor'); await actor.update(upd); try { await a2zSet(actor, 'torpor', false) } catch (e) { /* state already off */ } await a2nCard(actor, `${actor.name} rises from torpor`, lines) }
+  const wakeNotes = [`Waking from torpor: ${path.name} rank modifier ${a2Signed(mod)} (PG p.126).`]
+  if (pick === 'enter') {
+    await actor.update({ 'flags.world.a2.torpor': { reason: 'voluntary', since: night } })
+    await a2nCard(actor, `${actor.name}: voluntary torpor`, [`It may try to rise by will after half the length (${a2Plural(Math.ceil(length / 2), 'night', 'nights')}): 1 Willpower and Stamina + Resolve against ${diff} (PG p.141).`])
+    return null
+  }
+  if (pick === 'stake') {
+    await a2zSet(actor, 'staked', false)
+    if (vitae <= 0) { await a2nCard(actor, `${actor.name}: the stake is out`, ['With 0 Vitae it stays in torpor until it is fed (PG p.140).']); return null }
+    const other = t && !['manual', 'staked', 'stake'].includes(String(t.reason ?? 'manual'))
+    if (other) { await a2nCard(actor, `${actor.name}: the stake is out`, [`It is still held in torpor (${t.reason}).`]); return null }
+    await rise(['The stake is out: it rises (PG p.140).'])
+    return null
+  }
+  if (pick === 'fed') {
+    if (vitae < 1) { ui.notifications.warn(`${actor.name} has no Vitae: feed it at least 1 first.`); return null }
+    const r = await a2nRoll(actor, { label: `Rise from torpor · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: wakeNotes })
+    if (r?.v.win === true) await rise(['Fed and woken (PG p.140).'])
+    else if (r) await a2nCard(actor, `${actor.name} stays in torpor`, ['It doesn\'t wake. Feeding it again allows another test.'])
+    return r
+  }
+  if (pick === 'hunter') {
+    if (st && !st.hunter && !game.user.isGM) { ui.notifications.warn(`The Unconscious Hunter stirs only once the torpor has run its length (${a2Plural(length - st.elapsed, 'night', 'nights')} to go).`); return null }
+    const r = await a2nRoll(actor, { label: 'Unconscious Hunter · Resolve + Awareness vs Difficulty 3', attributes: ['resolve'], skills: ['awareness'], extra: mod, difficulty: 3, notes: wakeNotes })
+    if (r?.v.win === true) await a2nCard(actor, `${actor.name}: the Unconscious Hunter`, ['It wakes to feed and at once risks a hunger frenzy (Difficulty = its Hunger dice; the Storyteller may lower it for familiar prey). Without 1 Vitae by the end of the scene it sinks back into torpor (PG p.141).', 'Storyteller: untick Torpor once it has fed, or leave it.'])
+    else if (r) await a2nCard(actor, `${actor.name} doesn't stir`, ['The prey passes unnoticed.'])
+    return r
+  }
+  if (pick === 'will') {
+    if (st && !st.voluntary && !game.user.isGM) { ui.notifications.warn('Rising by will is possible only after half the torpor\'s length has passed (PG p.141).'); return null }
+    const wp = a2Int(actor.system?.willpower?.value)
+    if (wp < 1) { ui.notifications.warn(`${actor.name} has no Willpower to spend.`); return null }
+    await actor.update({ 'system.willpower.value': wp - 1 })
+    const r = await a2nRoll(actor, { label: `Rise by will · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: ['1 Willpower spent (PG p.141).', ...wakeNotes] })
+    if (r?.v.win === true) {
+      if (vitae < 1) { await a2nCard(actor, `${actor.name} can't rise`, ['The will is there, but it has no Vitae to pay for rising (PG p.141).']); return r }
+      await actor.update({ 'system.health.value': vitae - 1 })
+      await rise(['It rises by its own will: 1 Vitae paid (PG p.141).'])
+    } else if (r) await a2nCard(actor, `${actor.name} stays in torpor`, ['It can try again at the start of the next night.'])
+    return r
+  }
+  return null
+}
+
+// ---- diablerie (the Storyteller runs it) ----
+async function a2nDiablerie (actorLike = null, victimLike = null) {
+  if (!game.user.isGM) { ui.notifications.warn('Diablerie is run by the Storyteller: select the diablerist, target the victim.'); return null }
+  const actor = a2nPick(actorLike)
+  const victim = victimLike?.documentName === 'Actor' ? victimLike : (actor ? a2vTarget(actor) : null)
+  if (!actor || !victim) { ui.notifications.warn('Select the diablerist\'s token and target the victim (T).'); return null }
+  const helpless = ['tied', 'staked', 'torpor'].some((id) => a2zHas(victim, id)) || Boolean(victim.flags?.world?.a2?.torpor)
+  const vVitae = a2Rules(victim)?.vitae ? a2Int(victim.system?.health?.value) : 0
+  const problems = a2nDiablerieCheck({ actorCreature: a2Creature(actor), victimCreature: victim.type === 'npc' ? 'vampire' : a2Creature(victim), victimVitae: vVitae, victimHelpless: helpless, sameActor: actor.uuid === victim.uuid })
+  const myGen = a2Int(actor.system?.vampire?.generation?.value, 13)
+  const theirGen = a2Int(victim.system?.vampire?.generation?.value, 13)
+  const path = a2PathInfo(actor)
+  const str = a2nVal(actor, 'attributes', 'strength')
+  const rsv = a2nVal(actor, 'attributes', 'resolve')
+  const setup = await foundry.applications.api.DialogV2.prompt({
+    window: { title: `Diablerie: ${actor.name} on ${victim.name}` },
+    position: { width: 560 },
+    content: `<div class="a2n-dialog">${problems.length ? `<p><strong>Not yet possible by the rules:</strong></p><ul class="a2n-list">${problems.map((p) => `<li>${a2Esc(p)}</li>`).join('')}</ul><p class="hint">Going on overrides this.</p>` : '<p>The victim is helpless and drained: the act can begin. It takes a scene (PG p.65).</p>'}
+      <div class="form-group"><label>Roll with</label><select name="attr"><option value="strength"${str >= rsv ? ' selected' : ''}>Strength (${str})</option><option value="resolve"${rsv > str ? ' selected' : ''}>Resolve (${rsv})</option></select></div>
+      <div class="form-group"><label>Victim's generation</label><input type="number" name="gen" value="${theirGen}" min="1" max="16"></div>
+      <div class="form-group"><label>Violations for trying</label><select name="viol"><option value="0"${path.kind === 'path' ? ' selected' : ''}>0: its Path doesn't mind</option><option value="1"${path.kind === 'path' ? '' : ' selected'}>1</option><option value="2">2</option><option value="3">3</option></select></div>
+      <p class="hint">A run of contested tests, one per point of the victim's generation modifier: (Strength or Resolve) + your generation modifier against its Resolve + its modifier. Ties go to the victim. One failure and the soul is lost; the victim meets Final Death either way. On Humanity, trying always marks at least 1 violation (PG p.66).</p></div>`,
+    ok: { label: problems.length ? 'Go on anyway' : 'Begin', icon: 'fa-solid fa-skull', callback: (ev, button) => ({ attr: button.form.elements.attr.value, gen: a2Clamp(a2Int(button.form.elements.gen.value, 13), 1, 16), viol: a2Int(button.form.elements.viol.value) }) },
+    rejectClose: false
+  }).catch(() => null)
+  if (!setup) return null
+  const gains = a2nDiablerieGains({ myGen, victimGen: setup.gen })
+  const gM = a2GenModifier(myGen)
+  const gV = gains.tests
+  if (setup.viol > 0 && a2Rules(actor)?.humanity) await a2nViolate(actor, setup.viol, 'Attempted diablerie, PG p.66')
+  let won = true
+  let soul = false
+  let bargained = false
+  let rerolled = false
+  for (let i = 1; i <= gV && won; i++) {
+    const vr = await a2nRoll(victim, { label: `${victim.name} clings to its soul (${i} of ${gV}) · Resolve + generation modifier`, attributes: ['resolve'], extra: gV, hunger: false })
+    const opp = a2Int(vr?.v?.successes)
+    const r = await a2nRoll(actor, { label: `Diablerie ${i} of ${gV} · ${a2Cap(setup.attr)} + generation modifier vs ${victim.name}`, attributes: [setup.attr], extra: gM, opponent: opp, notes: ['Ties go to the victim (PG p.66).'] })
+    if (!r) { won = false; break }
+    let v = r.v
+    while (v.win !== true) {
+      if (v.painful) { soul = true; won = false; break }
+      const wp = a2Int(actor.system?.willpower?.value)
+      const choice = await foundry.applications.api.DialogV2.wait({
+        window: { title: `Diablerie ${i} of ${gV}: not won` },
+        content: `<div class="a2n-dialog"><p>${a2Esc(actor.name)} ${a2Int(v.successes)}, ${a2Esc(victim.name)} ${opp}${a2Int(v.successes) === opp ? ' (a tie goes to the victim)' : ''}.</p><p class="hint">A Beast's Bargain is allowed here only by letting the victim's soul hide in the diablerist, once (PG p.66).</p></div>`,
+        buttons: [
+          ...(!rerolled && wp >= 1 ? [{ action: 'reroll', label: 'Reroll (1 Willpower)', icon: 'fa-solid fa-rotate' }] : []),
+          ...(!bargained ? [{ action: 'bargain', label: "Beast's Bargain: the soul hides", icon: 'fa-solid fa-ghost' }] : []),
+          { action: 'accept', label: 'The soul is lost', icon: 'fa-solid fa-xmark', default: true }
+        ],
+        rejectClose: false
+      }).catch(() => null)
+      if (choice === 'reroll') {
+        rerolled = true
+        try { await a2xRerollWillpower(r.message) } catch (e) { console.error('V6 Automation | diablerie reroll', e) }
+        const m = game.messages.get(r.message.id)
+        const idx = a2xFirstA2Roll(m)
+        v = idx >= 0 ? a2xVerdict(m, m.rolls[idx]).v : v
+        continue
+      }
+      if (choice === 'bargain') { bargained = true; soul = true; break }
+      won = false
+      break
+    }
+  }
+  const dead = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
+  try { if (!victim.statuses?.has?.(dead)) await victim.toggleStatusEffect(dead, { active: true, overlay: true }) } catch (e) { console.error('V6 Automation | diablerie victim', e) }
+  const night = a2nNight()
+  const upd = {}
+  if (soul) upd['flags.world.a2.soul'] = { name: victim.name, count: 0, night }
+  const lines = []
+  if (!won) {
+    lines.push(`${victim.name} meets Final Death. Its soul slips away and is lost: ${actor.name} gains nothing (PG p.66).`)
+    if (soul) lines.push(`A painful failure: the soul of ${victim.name} hides within ${actor.name}. At its next frenzy the soul takes control for the rest of that night; after three such nights without a purging ritual it rules for good (PG p.66).`)
+    if (Object.keys(upd).length) await actor.update(upd)
+    await a2nCard(actor, `Diablerie fails: ${actor.name}`, lines)
+    return { won: false, soul }
+  }
+  const discs = [...new Set((victim.items ?? []).filter((i) => i.type === 'discipline').map((i) => i.system?.disciplineType).filter(Boolean))]
+  let disc = null
+  if (discs.length) {
+    disc = await foundry.applications.api.DialogV2.prompt({
+      window: { title: 'Diablerie: a Discipline of the victim' },
+      content: `<div class="a2n-dialog"><p>One of ${a2Esc(victim.name)}'s Disciplines costs XP as a clan Discipline for ${a2Plural(gains.years, 'year', 'years')} (PG p.66).</p><div class="form-group"><label>Discipline</label><select name="disc">${discs.map((d) => `<option value="${a2Esc(d)}">${a2Esc(a2TraitLabel('Disciplines', d))}</option>`).join('')}</select></div></div>`,
+      ok: { label: 'Take it', callback: (ev, button) => button.form.elements.disc.value },
+      rejectClose: false
+    }).catch(() => null)
+  }
+  const wpMax = Math.max(0, a2Int(actor.system?.willpower?.max) - a2Int(actor.system?.willpower?.disabled))
+  const wpNow = a2Int(actor.system?.willpower?.value)
+  const wpNew = Math.min(wpMax || wpNow + gains.willpower, wpNow + gains.willpower)
+  if (wpNew !== wpNow) upd['system.willpower.value'] = wpNew
+  if (gains.lower) upd['system.vampire.generation.value'] = gains.newGen
+  const x = a2tXp(actor)
+  x.earned += gains.xp
+  x.log.push({ at: new Date().toISOString(), type: 'award', session: a2Int(a2tClock().session, 1), xp: gains.xp, diablerie: gains.xp, why: `Diablerie of ${victim.name}`, by: game.user?.name ?? '' })
+  upd['flags.world.a2.xp'] = a2tXpSave(x)
+  upd['flags.world.a2.diablerie'] = { victim: victim.name, night, years: gains.years, until: night + 365 * gains.years, discipline: disc }
+  await actor.update(upd)
+  lines.push(`${victim.name} meets Final Death; ${actor.name} consumes its soul (PG p.66).`)
+  lines.push(`Willpower ${wpNow} → ${wpNew} (+${gains.willpower}).`)
+  lines.push(gains.lower ? `Generation ${myGen} → ${gains.newGen}.${gains.becomesVampire ? ' A Duskborn no longer: it becomes a full vampire (see Chapter 2).' : ''} A new generation modifier changes the Vitae total and Vampiric Endurance.` : 'The victim was of no lower generation: the generation stays.')
+  lines.push(`${gains.xp} XP, beyond the session cap.`)
+  if (disc) lines.push(`${a2TraitLabel('Disciplines', disc)} costs XP as a clan Discipline for ${a2Plural(gains.years, 'year', 'years')}.`)
+  lines.push(`Black veins: for ${a2Plural(gains.years, 'year', 'years')} the remnants of the soul show to spirit senses (Sense the Unseen, Bestial Instinct).`)
+  if (soul) lines.push(`The price of the Bargain: the soul of ${victim.name} hides within ${actor.name}, and takes control at its next frenzy (PG p.66).`)
+  await a2nCard(actor, `Diablerie: ${actor.name}`, lines)
+  return { won: true, soul, gains }
+}
+// A hidden soul takes over at the next frenzy, for the rest of that night (PG p.66).
+async function a2nSoulStirs (actor) {
+  const soul = actor?.flags?.world?.a2?.soul
+  if (!soul?.name) return
+  const night = a2nNight()
+  if (a2Int(soul.last, -1) === night) return
+  const count = a2Int(soul.count) + 1
+  await actor.update({ 'flags.world.a2.soul': { ...soul, count, last: night } })
+  await a2nCard(actor, `${actor.name}: the soul within`, [count >= 3 ? `The soul of ${soul.name} takes control for the third time, and for good: ${actor.name} becomes the Storyteller's character (PG p.66).` : `Frenzy: the soul of ${soul.name} takes control of ${actor.name} for the rest of the night (${count} of 3). Only a ritual made for this case can purge it (PG p.66).`])
+}
+
+// ---- ghouls ----
+function a2nGhoulList () { return [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a2Creature(a) === 'ghoul').sort((a, b) => a.name.localeCompare(b.name)) }
+function a2nDomitor (ghoul) {
+  const d = ghoul?.flags?.world?.a2?.domitor
+  if (d?.uuid || d?.name) return d
+  const b = (Array.isArray(ghoul?.flags?.world?.a2?.bonds) ? ghoul.flags.world.a2.bonds : []).filter((x) => a2Int(x?.stage) > 0).sort((x, y) => a2Int(y.stage) - a2Int(x.stage))[0]
+  return b ? { uuid: b.uuid ?? null, name: b.name } : null
+}
+async function a2nGhouls () {
+  if (!game.user.isGM) { ui.notifications.warn('The ghoul list is the Storyteller\'s.'); return null }
+  const ghouls = a2nGhoulList()
+  const night = a2nNight()
+  const interval = a2Int(a2eGet('ghoulInterval', 30), 30)
+  const masters = [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a2Creature(a) === 'vampire' && (a.hasPlayerOwner || ghouls.some((g) => a2nDomitor(g)?.uuid === a.uuid))).sort((a, b) => a.name.localeCompare(b.name))
+  const rows = ghouls.map((g, i) => {
+    const d = a2nDomitor(g)
+    const due = a2nGhoulDue({ fed: g.flags?.world?.a2?.ghoulFed ?? null, night, interval })
+    return `<tr><td><strong>${a2Esc(g.name)}</strong><br><small>Vitae ${a2Int(g.system?.health?.value)}/5</small></td>
+      <td><select name="dom.${i}"><option value="">${d && !d.uuid ? a2Esc(d.name) : 'nobody'}</option>${masters.map((m) => `<option value="${m.uuid}"${d?.uuid === m.uuid ? ' selected' : ''}>${a2Esc(m.name)} (Vitae ${a2Int(m.system?.health?.value)})</option>`).join('')}</select></td>
+      <td class="c${due.due ? ' a2n-due' : ''}">${due.since === null ? 'never' : a2Plural(due.since, 'night', 'nights')}</td>
+      <td class="c"><button type="button" data-a2n-feed="${i}"><i class="fa-solid fa-droplet"></i> 1 Vitae</button></td></tr>`
+  }).join('')
+  let action = null
+  await foundry.applications.api.DialogV2.wait({
+    window: { title: 'Ghouls', resizable: true },
+    position: { width: 620 },
+    content: `<div class="a2n-dialog"><p class="hint">Night ${night}. A drink gives the ghoul at least a stage 1 Blood Bond (PG p.136) and 1 Vitae, and costs the domitor 1. The rules print no feeding interval: the reminder after ${interval} nights is a house rule and changes nothing by itself.</p>
+      ${ghouls.length ? `<table class="a2n-table"><tr><th>Ghoul</th><th>Domitor</th><th class="c">Last drink</th><th></th></tr>${rows}</table>` : '<p><em>No ghoul characters in the world. Make one with the NPC maker (/npc) or set a character\'s creature to ghoul.</em></p>'}</div>`,
+    buttons: [{ action: 'close', label: 'Close' }],
+    rejectClose: false,
+    render: (ev, dialog) => {
+      const el = dialog?.element
+      el?.querySelectorAll('[data-a2n-feed]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); const i = a2Int(b.dataset.a2nFeed); action = { i, dom: el.querySelector(`[name="dom.${i}"]`)?.value ?? '' }; dialog.close() }))
+    }
+  }).catch(() => null)
+  if (!action) return null
+  const ghoul = ghouls[action.i]
+  const master = action.dom ? a2FromUuid(action.dom) : null
+  const known = a2nDomitor(ghoul)
+  if (!master && !known?.name) { ui.notifications.warn(`Pick who feeds ${ghoul.name}.`); return a2nGhouls() }
+  if (master) {
+    const have = a2Int(master.system?.health?.value)
+    if (have < 1) { ui.notifications.warn(`${master.name} has no Vitae to give.`); return a2nGhouls() }
+    await master.update({ 'system.health.value': have - 1 })
+  }
+  await ghoul.update({ 'system.health.value': Math.min(5, a2Int(ghoul.system?.health?.value) + 1), 'flags.world.a2.ghoulFed': night, 'flags.world.a2.domitor': master ? { uuid: master.uuid, name: master.name } : known })
+  try { if (typeof a2yDrink === 'function') await a2yDrink(ghoul, master ?? known.name, { quiet: true }) } catch (e) { console.error('V6 Automation | ghoul bond', e) } // eslint-disable-line no-undef
+  await a2nCard(null, 'Ghouls', [`${ghoul.name} drinks from ${master?.name ?? known.name}: 1 Vitae${master ? ` (${master.name} −1)` : ''}, the bond holds.`])
+  return a2nGhouls()
+}
+
+// ---- hooks ----
+async function a2nOnNewNight (ev) {
+  if (!a2xIsGM()) return
+  const night = a2Int(ev?.night, a2nNight())
+  const lines = []
+  for (const actor of ev?.actors ?? []) {
+    try {
+      const upd = {}
+      if (a2Int(actor.flags?.world?.a2?.dayHours) > 0) upd['flags.world.a2.dayHours'] = 0
+      const t = actor.flags?.world?.a2?.torpor
+      if (t && a2Creature(actor) === 'vampire' && a2nUpkeepDue({ since: t.since ?? night, night, tier: a2nTier(actor) })) {
+        const cur = a2Int(actor.system?.health?.value)
+        if (cur > 0) { upd['system.health.value'] = cur - 1; lines.push(`${actor.name}: torpor upkeep, Vitae ${cur} → ${cur - 1}${cur - 1 === 0 ? '. Out of Vitae: it can\'t rise by itself' : ''} (PG p.140).`) }
+      }
+      if (Object.keys(upd).length) await actor.update(upd)
+    } catch (e) { console.error('V6 Automation | night', actor?.name, e) }
+  }
+  const interval = a2Int(a2eGet('ghoulInterval', 30), 30)
+  if (interval > 0) {
+    for (const g of a2nGhoulList()) {
+      const due = a2nGhoulDue({ fed: g.flags?.world?.a2?.ghoulFed ?? null, night, interval })
+      if (due.due && due.since !== null) lines.push(`${g.name} has gone ${a2Plural(due.since, 'night', 'nights')} without Vitae (house rule: a drink every ${interval} nights). /v6 ghouls.`)
+    }
+  }
+  try { if (a2nSunrise() !== null) await game.settings.set(a2eNs(), a2eKey('sunrise'), { hours: null }) } catch (e) { /* no clock */ }
+  if (lines.length) await a2nCard(null, `Night ${night}: torpor and ghouls`, lines)
+}
+function a2nRenderChat (message, html) {
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  const f = message.flags?.world?.a2n
+  if (!root || f?.kind !== 'sunrise' || !game.user.isGM || root.querySelector('.a2n-actions')) return
+  const cur = a2nSunrise()
+  if (cur === null || cur !== a2Int(f.hours) || cur <= 0) return
+  const box = document.createElement('div')
+  box.className = 'a2n-actions'
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.innerHTML = '<i class="fa-solid fa-hourglass-half"></i> An hour passes'
+  b.addEventListener('click', (ev) => { ev.preventDefault(); b.disabled = true; a2nSunriseSet(cur - 1) })
+  box.append(b)
+  ;(root.querySelector('.a2n-sunrise') ?? root).append(box)
+}
+// Chat commands this file answers (alpha2-moves passes them on). → true if handled
+function a2nCommand (cmd, arg, actor) {
+  switch (cmd) {
+    case 'humanity': a2nHumanity(actor); return true
+    case 'day': a2nDay(actor); return true
+    case 'torpor': a2nTorpor(actor); return true
+    case 'diablerie': a2nDiablerie(actor); return true
+    case 'ghouls': a2nGhouls(); return true
+    case 'sunrise': {
+      const a = String(arg ?? '').trim().toLowerCase()
+      if (a === '') { const h = a2nSunrise(); ui.notifications.info(h === null ? 'The sunrise clock is off. /v6 sunrise 3 starts it at 3 hours.' : `${a2Plural(h, 'hour', 'hours')} until sunrise.`) } else a2nSunriseSet(a === 'off' ? null : a2Int(a))
+      return true
+    }
+  }
+  return false
+}
+
+function a2nInjectStyles () {
+  if (document.getElementById('a2n-styles')) return
+  const st = document.createElement('style')
+  st.id = 'a2n-styles'
+  st.textContent = `
+.a2n-dialog .form-group { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+.a2n-dialog .form-group > label { flex: 0 0 130px; }
+.a2n-dialog .form-group select, .a2n-dialog .form-group input[type="text"] { flex: 1; }
+.a2n-dialog .hint { font-size: 12px; opacity: 0.85; margin: 4px 0; }
+.a2n-dialog .a2n-list { margin: 4px 0 4px 1.1em; padding: 0; }
+.a2n-dialog .a2n-list li { margin: 3px 0; }
+.a2n-table { width: 100%; border-collapse: collapse; }
+.a2n-table td, .a2n-table th { padding: 3px 5px; border-bottom: 1px solid rgba(200,170,110,0.2); text-align: left; }
+.a2n-table .c { text-align: center; }
+.a2n-table .a2n-due { color: var(--v6-blood-hi, #d0303c); font-weight: 700; }
+.a2n-actions { margin-top: 6px; }
+`
+  document.head.append(st)
+}
+
+async function a2NightBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.night?.booted) return true
+  a2eReg('humanityFlow', { name: 'Humanity, day and torpor windows', hint: 'The Humanity window (violations, Justify, raising the rank), the daylight tests, the ways out of torpor, diablerie and the ghoul list.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('ghoulInterval', { name: 'Ghouls: nights between drinks (house rule)', hint: 'The playtest prints no feeding interval for ghouls. After this many nights without Vitae the New Night card reminds the Storyteller; nothing else happens. 0 switches the reminder off.', scope: 'world', config: true, type: Number, default: 30 })
+  a2eReg('sunrise', { scope: 'world', config: false, type: Object, default: { hours: null } })
+  a2nInjectStyles()
+  if (!a2nState.hooked) {
+    a2nState.hooked = true
+    Hooks.on('v6a2NewNight', (ev) => { a2nOnNewNight(ev).catch((e) => console.error('V6 Automation | night', e)) })
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { a2nRenderChat(message, html) } catch (e) { console.error('V6 Automation | sunrise card', e) } })
+    Hooks.on('updateActor', (actor, changes) => {
+      try {
+        if (!a2xIsGM() || !a2nOn()) return
+        const fz = changes?.flags?.world?.a2?.frenzy
+        if (fz && typeof fz === 'object' && fz.type && actor.flags?.world?.a2?.soul) a2nSoulStirs(actor).catch((e) => console.error('V6 Automation | soul', e))
+      } catch (e) { console.error('V6 Automation | night hook', e) }
+    })
+  }
+  api.night = { booted: true, humanity: a2nHumanity, violate: a2nViolate, justify: a2nJustify, raise: a2nRaise, day: a2nDay, torpor: a2nTorpor, diablerie: a2nDiablerie, ghouls: a2nGhouls, sunrise: a2nSunrise, setSunrise: a2nSunriseSet, roll: a2nRoll, command: a2nCommand, rules: { justifyCheck: a2nJustifyCheck, justifyOutcome: a2nJustifyOutcome, wakeDifficulty: a2nWakeDifficulty, torporNights: a2nTorporNights, torporState: a2nTorporState, upkeepDue: a2nUpkeepDue, diablerieCheck: a2nDiablerieCheck, diablerieGains: a2nDiablerieGains, ghoulDue: a2nGhoulDue, violations: A2N_VIOLATIONS } }
+  console.log('V6 Automation | Humanity, day, torpor and diablerie loaded')
+  return true
+}
+globalThis.a2NightBoot ??= a2NightBoot
+
+// ---- the desk: powers at a glance, Storyteller calls, boons, a log with undo ----
+// Powers     one window per character with every Discipline power: what it costs, whether
+//            the character can pay it now, whether it is running, and buttons to roll it,
+//            use it without a roll, or end it.
+// Calls      a power the module can't resolve by numbers (it shows "Not automated") gets a
+//            fold-out for the Storyteller on its card: what is left to decide, what the roll
+//            gave, the power's own text, and a button that tells the table the ruling.
+// Coterie    downtime's Acquire Resources can add a dot to a shared coterie Resource; a
+//            player's request is carried out by the Storyteller's client.
+// Boons      a ledger of favours owed (house rule: the playtest has no prestation rules, so
+//            it only keeps the books). Everyone reads it, the Storyteller writes it.
+// Log        the Storyteller's client notes every change to Health, Vitae, Willpower and
+//            Humanity, whoever made it, and can take any of them back.
+// Numbers    such a change floats over the token for a moment (Health for everyone, the
+//            rest for the character's owners).
+// Settings (world): stCalls, autoLog, floatText (all on); boons (the ledger).
+
+const A2D_BOON_SIZES = { trivial: 'Trivial', minor: 'Minor', major: 'Major', life: 'Life' }
+const A2D_KEYS = [
+  { key: 'health', label: 'Health', all: true },
+  { key: 'baneful', label: 'baneful', all: true },
+  { key: 'vitae', label: 'Vitae' },
+  { key: 'willpower', label: 'Willpower' },
+  { key: 'rank', label: 'Humanity rank' },
+  { key: 'violations', label: 'violations' }
+]
+const A2D_ACT = { action: 'Action', minorAction: 'Minor', minor: 'Minor', reaction: 'Reaction', free: 'Free', passive: 'Passive', downtime: 'Downtime', none: '' }
+
+// ---- pure rules ----
+// What changed between two snapshots. → [{ key, label, from, to, all }]
+function a2dDiff (before = {}, after = {}) {
+  const out = []
+  for (const k of A2D_KEYS) {
+    const a = before?.[k.key]
+    const b = after?.[k.key]
+    if (a === null || a === undefined || b === null || b === undefined) continue
+    if (a2Int(a) !== a2Int(b)) out.push({ key: k.key, label: k.label, from: a2Int(a), to: a2Int(b), all: Boolean(k.all) })
+  }
+  return out
+}
+// One line for a change: "Health 7 → 4".
+function a2dLine (changes = []) { return changes.map((c) => `${a2Cap(c.label)} ${c.from} → ${c.to}`).join(', ') }
+// The text that floats over a token for one change.
+function a2dFloatText (c) {
+  const d = a2Int(c.to) - a2Int(c.from)
+  if (!d) return ''
+  if (c.key === 'baneful') return d > 0 ? `${d} baneful` : `${-d} baneful mended`
+  if (c.key === 'rank') return d > 0 ? `Rank +${d}` : `Rank −${-d}`
+  if (c.key === 'violations') return d > 0 ? `${a2Plural(d, 'violation', 'violations')}` : `${a2Plural(-d, 'slash', 'slashes')} erased`
+  return `${d > 0 ? '+' : '−'}${Math.abs(d)} ${a2Cap(c.label)}`
+}
+// The ledger. Pure. → new list
+function a2dBoonAdd (list = [], b = {}, night = 1) {
+  const by = String(b.by ?? '').trim()
+  const to = String(b.to ?? '').trim()
+  if (!by || !to) return null
+  const size = A2D_BOON_SIZES[b.size] ? b.size : 'minor'
+  return [...(Array.isArray(list) ? list : []), { id: String(b.id ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`), by, to, size, note: String(b.note ?? '').trim().slice(0, 200), night: a2Int(night, 1), secret: Boolean(b.secret), settled: null }]
+}
+function a2dBoonSettle (list = [], id, night = 1, on = true) { return (Array.isArray(list) ? list : []).map((b) => (b.id === id ? { ...b, settled: on ? a2Int(night, 1) : null } : b)) }
+function a2dBoonVisible (list = [], gm = false) { return (Array.isArray(list) ? list : []).filter((b) => b && (gm || !b.secret)) }
+// A shared Resource gains a dot, or a new one starts at 1 (PG p.113). Pure. → { resources, line } or null
+function a2dCoteriePlus (resources = [], { index = null, name = '', kind = 'socialAssets' } = {}) {
+  const list = (Array.isArray(resources) ? resources : []).map((r) => ({ ...r }))
+  const i = index === null || index === undefined || index === '' ? -1 : a2Int(index, -1)
+  if (i >= 0 && list[i]) {
+    if (a2Int(list[i].dots) >= 5) return null
+    list[i].dots = a2Int(list[i].dots) + 1
+    return { resources: list, line: `The coterie's ${list[i].name} rises to ${list[i].dots} ${list[i].dots === 1 ? 'dot' : 'dots'}.` }
+  }
+  const n = String(name ?? '').trim()
+  if (!n) return null
+  list.push({ name: n, type: ['physicalAssets', 'socialAssets', 'wealth'].includes(kind) ? kind : 'socialAssets', dots: 1 })
+  return { resources: list, line: `A new shared Resource for the coterie: ${n}, 1 dot.` }
+}
+// Is this power card one the module left to the Storyteller?
+function a2dNeedsCall (c = {}) { return Boolean(c.why) && !(c.self?.length) && !(c.fxTarget?.length) && !(c.fxSelfWin?.length) && !(c.manual?.length) }
+
+// ---- helpers ----
+const a2dState = { hooked: false, snap: new Map(), log: [], seq: 0, logApp: null }
+function a2dOn (key) { return a2Enabled() && a2eGet(key, true) !== false }
+function a2dPick (actorLike) { return actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null) }
+function a2dNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
+function a2dStrip (html, max = 900) { const t = String(html ?? '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim(); return t.length > max ? `${t.slice(0, max).replace(/\s+\S*$/, '')}…` : t }
+function a2dRelay (op, data = {}) {
+  const ch = game.modules?.get?.('v6-automation')?.active ? A2X_SOCKETS[0] : A2X_SOCKETS[1]
+  game.socket?.emit?.(ch, { a2d: 1, op, user: game.user.id, data })
+  return true
+}
+
+// ---- the powers window ----
+async function a2dPowers (actorLike = null) {
+  const actor = a2dPick(actorLike)
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const powers = (actor.items ?? []).filter((i) => i.type === 'discipline').sort((a, b) => String(a.system?.disciplineType ?? '').localeCompare(String(b.system?.disciplineType ?? '')) || a2Int(a.system?.level) - a2Int(b.system?.level) || a.name.localeCompare(b.name))
+  if (!powers.length) { ui.notifications.info(`${actor.name} has no Discipline powers.`); return null }
+  const rules = a2Rules(actor)
+  const have = { health: a2Int(actor.system?.health?.value), willpower: a2Int(actor.system?.willpower?.value) }
+  const frenzy = typeof a2xFrenzyState === 'function' ? a2xFrenzyState(actor) : null
+  const rows = []
+  let last = null
+  for (const [i, p] of powers.entries()) {
+    const disc = p.system?.disciplineType ?? ''
+    if (disc !== last) { rows.push(`<tr class="a2d-head"><th colspan="5">${a2Esc(a2TraitLabel('Disciplines', disc))} ${'●'.repeat(a2Clamp(a2Int(actor.system?.disciplines?.[disc]?.value), 0, 10))}</th></tr>`); last = disc }
+    const costs = a2xItemCosts(p.system, p.flags)
+    const short = actor.type === 'npc' ? [] : a2xCostShortfall(costs, have, { vitae: rules ? rules.vitae : true })
+    const cost = [costs.health ? `${costs.health} Vitae` : '', costs.willpower ? `${costs.willpower} Willpower` : ''].filter(Boolean).join(', ') || 'free'
+    const active = typeof a2pFindActiveFor === 'function' ? a2pFindActiveFor(p) : null
+    const blocked = Boolean(frenzy && ['mental', 'social'].includes(p.system?.attribute))
+    const t = p.system?.test ?? {}
+    const hasTest = [...(t.attributes ?? [])].length + [...(t.skills ?? [])].length + [...(t.disciplines ?? [])].length > 0
+    const act = A2D_ACT[p.system?.activation?.activationType] ?? a2Cap(String(p.system?.activation?.activationType ?? ''))
+    const why = blocked ? 'no Mental or Social powers in a frenzy' : short.length ? short.map((s) => `needs ${s.need} ${s.label}, has ${s.have}`).join('; ') : ''
+    rows.push(`<tr class="${why ? 'a2d-no' : ''}${active ? ' a2d-on' : ''}" data-act="${a2Esc(String(p.system?.activation?.activationType ?? ''))}">
+      <td><a data-a2d-open="${i}" title="Open the power">${a2Esc(p.name)}</a> <small>${'●'.repeat(a2Clamp(a2Int(p.system?.level), 0, 10))}</small>${active ? `<br><small class="a2d-live">running: ${a2Esc(a2pDurationText(active.ap))}</small>` : ''}${why ? `<br><small class="a2d-why">${a2Esc(why)}</small>` : ''}</td>
+      <td class="c">${a2Esc(act)}</td><td class="c">${a2Esc(cost)}</td>
+      <td class="c">${hasTest ? `<button type="button" data-a2d-roll="${i}" title="Roll its test; the cost is paid with the roll"><i class="fa-solid fa-dice-d10"></i></button>` : ''}<button type="button" data-a2d-use="${i}" title="Use it without a roll (pays the cost)"><i class="fa-solid fa-bolt"></i></button>${active ? `<button type="button" data-a2d-end="${i}" title="End it"><i class="fa-solid fa-power-off"></i></button>` : ''}</td></tr>`)
+  }
+  let action = null
+  await foundry.applications.api.DialogV2.wait({
+    window: { title: `Powers: ${actor.name}`, resizable: true },
+    position: { width: 620 },
+    content: `<div class="a2d-dialog"><p class="hint">Vitae ${have.health} · Willpower ${have.willpower}${frenzy ? ` · in a ${a2Esc(frenzy.type)} frenzy` : ''}. Greyed: it can't be paid for right now.
+      <select name="filter"><option value="">all</option><option value="action">actions</option><option value="minorAction">minor actions</option><option value="reaction">reactions</option></select></p>
+      <div class="a2d-scroll"><table class="a2d-table"><tr><th>Power</th><th class="c">Takes</th><th class="c">Cost</th><th></th></tr>${rows.join('')}</table></div></div>`,
+    buttons: [{ action: 'close', label: 'Close' }],
+    rejectClose: false,
+    render: (ev, dialog) => {
+      const el = dialog?.element
+      if (!el) return
+      const go = (kind, i) => { action = { kind, i }; dialog.close() }
+      el.querySelectorAll('[data-a2d-roll]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); go('roll', a2Int(b.dataset.a2dRoll)) }))
+      el.querySelectorAll('[data-a2d-use]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); go('use', a2Int(b.dataset.a2dUse)) }))
+      el.querySelectorAll('[data-a2d-end]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); go('end', a2Int(b.dataset.a2dEnd)) }))
+      el.querySelectorAll('[data-a2d-open]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); powers[a2Int(b.dataset.a2dOpen)]?.sheet?.render(true) }))
+      el.querySelector('[name="filter"]')?.addEventListener('change', (e) => { const f = e.target.value; el.querySelectorAll('tr[data-act]').forEach((tr) => { tr.style.display = !f || tr.dataset.act === f ? '' : 'none' }) })
+    }
+  }).catch(() => null)
+  if (!action) return null
+  const item = powers[action.i]
+  if (!item) return null
+  if (action.kind === 'roll') return a2State.RollDialog?.open ? a2State.RollDialog.open({ actor, item }) : item.sheet?.render(true)
+  if (action.kind === 'use') return a2pActivateNoRoll(item)
+  if (action.kind === 'end') { const g = a2pFindActiveFor(item); if (g) await a2pEnd(g.id, { reason: 'ended by hand' }); return a2dPowers(actor) }
+  return null
+}
+
+// ---- Storyteller calls on power cards ----
+function a2dRenderCall (message, root) {
+  const c = message.flags?.world?.a2p
+  if (!c || !game.user.isGM || !a2dOn('stCalls') || !a2dNeedsCall(c)) return
+  const body = root.querySelector('.a2p-card .a2p-body')
+  if (!body || body.querySelector('.a2d-call')) return
+  const item = a2FromUuid(c.itemUuid)
+  let note = ''
+  try { const spec = item ? a2pFindSpec(item, a2pState.data ?? {}) : null; note = (spec?.fx ?? []).map((f) => f.note).filter(Boolean).join(' ') } catch (e) { /* no table */ }
+  const lines = [`Left to you: ${c.why}.`]
+  if (note) lines.push(`Guide: ${note}.`)
+  lines.push(c.noRoll ? 'Used without a roll.' : `The roll: ${a2Plural(a2Int(c.successes), 'success', 'successes')}${c.win === false ? ', a failure' : c.margin ? `, margin ${c.margin}` : ''}.`)
+  if (c.opposeText) lines.push(`It is resisted with ${c.opposeText}.`)
+  if (c.duration && c.duration !== 'instant') lines.push(`It lasts ${c.durationText || c.duration}; the module ends it then, or press End effect.`)
+  const text = item ? a2dStrip(item.system?.description) : ''
+  const box = document.createElement('details')
+  box.className = 'a2d-call'
+  box.innerHTML = `<summary><i class="fa-solid fa-gavel"></i> Storyteller's call</summary><ul>${lines.map((l) => `<li>${a2Esc(l)}</li>`).join('')}</ul>${text ? `<div class="a2d-text">${a2Esc(text)}</div>` : ''}<button type="button" class="a2d-rule"><i class="fa-solid fa-bullhorn"></i> Tell the table…</button>`
+  box.querySelector('.a2d-rule').addEventListener('click', async (ev) => {
+    ev.preventDefault(); ev.stopPropagation()
+    const ruling = await foundry.applications.api.DialogV2.prompt({ window: { title: `${c.power}: what happens` }, content: `<div class="a2d-dialog"><textarea name="ruling" rows="4" style="width:100%" placeholder="The rats pour out of the drains: about half the swarm answers."></textarea></div>`, ok: { label: 'Post', callback: (e, button) => String(button.form.elements.ruling.value ?? '').trim() }, rejectClose: false }).catch(() => null)
+    if (ruling) await ChatMessage.create({ speaker: { alias: 'Storyteller' }, content: `<div class="a2v-result"><p><strong>${a2Esc(c.power)}</strong> (${a2Esc(c.casterName ?? '')}): ${a2Esc(ruling)}</p></div>` })
+  })
+  body.append(box)
+}
+
+// ---- the coterie's shared Resources in downtime ----
+// Options for the downtime window. → html
+function a2dCoterieOptions () {
+  try {
+    const c = a2wCoterie()
+    return `<optgroup label="Shared with the coterie">${c.resources.map((r, i) => `<option value="c:${i}">${a2Esc(r.name)} (${a2Int(r.dots)}, shared)</option>`).join('')}<option value="c:new">a new shared one</option></optgroup>`
+  } catch (e) { return '' }
+}
+// → the card line, or null when it can't be done
+async function a2dCoterieAcquire (actor, ref, name) {
+  const c = a2wCoterie()
+  const index = ref === 'new' ? null : a2Int(ref, -1)
+  const res = a2dCoteriePlus(c.resources, { index, name })
+  if (!res) { ui.notifications.warn(index === null ? 'Name the new shared Resource.' : 'That shared Resource is at 5 dots already.'); return null }
+  if (game.user.isGM) { await game.settings.set(a2eNs(), a2eKey('coterie'), { ...c, resources: res.resources }); return res.line }
+  if (!game.users?.activeGM) { ui.notifications.warn('A shared Resource is kept by the Storyteller: it needs the Storyteller online.'); return null }
+  a2dRelay('coterie', { index, name, actor: actor?.name ?? '' })
+  return `${res.line} (Entered by the Storyteller's client.)`
+}
+
+// ---- boons ----
+function a2dBoons () { const b = a2eGet('boons', null); return Array.isArray(b?.list) ? b.list : [] }
+async function a2dBoonsSave (list) { return game.settings.set(a2eNs(), a2eKey('boons'), { list }) }
+async function a2dBoonsOpen () {
+  const gm = game.user.isGM
+  const list = a2dBoonVisible(a2dBoons(), gm).sort((a, b) => (a.settled === null ? 0 : 1) - (b.settled === null ? 0 : 1) || a2Int(b.night) - a2Int(a.night))
+  const names = [...new Set([...(game.actors ?? [])].filter((a) => a.type === 'vampire' && (gm || a.isOwner || a.hasPlayerOwner)).map((a) => a.name))].sort()
+  const rows = list.map((b) => `<tr class="${b.settled !== null ? 'a2d-done' : ''}"><td>${a2Esc(b.by)}</td><td>${a2Esc(b.to)}</td><td class="c">${a2Esc(A2D_BOON_SIZES[b.size] ?? b.size)}</td><td>${a2Esc(b.note)}${b.secret ? ' <small>(secret)</small>' : ''}</td><td class="c">${a2Int(b.night)}</td><td class="c">${b.settled !== null ? `night ${a2Int(b.settled)}` : 'open'}</td>${gm ? `<td class="c"><button type="button" data-a2d-settle="${a2Esc(b.id)}" title="${b.settled !== null ? 'Reopen' : 'Mark it repaid'}"><i class="fa-solid ${b.settled !== null ? 'fa-rotate-left' : 'fa-check'}"></i></button><button type="button" data-a2d-del="${a2Esc(b.id)}" title="Remove the entry"><i class="fa-solid fa-trash"></i></button></td>` : ''}</tr>`).join('')
+  let action = null
+  const res = await foundry.applications.api.DialogV2.wait({
+    window: { title: 'Boons', resizable: true },
+    position: { width: 720 },
+    content: `<div class="a2d-dialog"><p class="hint">Who owes whom. The playtest has no rules for prestation: this is a house-rule ledger and rolls nothing.${gm ? '' : ' The Storyteller keeps it.'}</p>
+      <div class="a2d-scroll">${list.length ? `<table class="a2d-table"><tr><th>Owes</th><th>To</th><th class="c">Size</th><th>For</th><th class="c">Night</th><th class="c">State</th>${gm ? '<th></th>' : ''}</tr>${rows}</table>` : '<p><em>Nobody owes anybody anything. Yet.</em></p>'}</div>
+      ${gm ? `<fieldset><legend>A new boon</legend><datalist id="a2d-names">${names.map((n) => `<option value="${a2Esc(n)}">`).join('')}</datalist>
+        <div class="form-group"><input type="text" name="by" list="a2d-names" placeholder="who owes"><input type="text" name="to" list="a2d-names" placeholder="to whom"><select name="size">${Object.entries(A2D_BOON_SIZES).map(([k, l]) => `<option value="${k}"${k === 'minor' ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="form-group"><input type="text" name="note" placeholder="for what"><label><input type="checkbox" name="secret"> only I see it</label></div></fieldset>` : ''}</div>`,
+    buttons: gm ? [{ action: 'add', label: 'Add', icon: 'fa-solid fa-plus', default: true, callback: (ev, button) => { const f = button.form.elements; return { do: 'add', by: f.by.value, to: f.to.value, size: f.size.value, note: f.note.value, secret: f.secret.checked } } }, { action: 'close', label: 'Close' }] : [{ action: 'close', label: 'Close' }],
+    rejectClose: false,
+    render: (ev, dialog) => {
+      const el = dialog?.element
+      el?.querySelectorAll('[data-a2d-settle]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); action = { do: 'settle', id: b.dataset.a2dSettle }; dialog.close() }))
+      el?.querySelectorAll('[data-a2d-del]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); action = { do: 'del', id: b.dataset.a2dDel }; dialog.close() }))
+    }
+  }).catch(() => null)
+  const act = action ?? (res && typeof res === 'object' ? res : null)
+  if (!gm || !act) return null
+  const all = a2dBoons()
+  if (act.do === 'add') {
+    const next = a2dBoonAdd(all, act, a2dNight())
+    if (!next) { ui.notifications.warn('Say who owes, and to whom.'); return a2dBoonsOpen() }
+    await a2dBoonsSave(next)
+    if (!act.secret) await ChatMessage.create({ speaker: { alias: 'Storyteller' }, content: `<div class="a2v-result"><p><strong>${a2Esc(act.by.trim())}</strong> owes <strong>${a2Esc(act.to.trim())}</strong> a ${a2Esc(String(A2D_BOON_SIZES[act.size] ?? 'minor').toLowerCase())} boon${act.note.trim() ? `: ${a2Esc(act.note.trim())}` : ''}.</p></div>` })
+  } else if (act.do === 'settle') {
+    const cur = all.find((b) => b.id === act.id)
+    if (cur) await a2dBoonsSave(a2dBoonSettle(all, act.id, a2dNight(), cur.settled === null))
+  } else if (act.do === 'del') await a2dBoonsSave(all.filter((b) => b.id !== act.id))
+  return a2dBoonsOpen()
+}
+
+// ---- the log, undo, and the numbers over tokens ----
+function a2dSnap (actor) {
+  try {
+    if (!actor || !['vampire', 'npc'].includes(actor.type)) return null
+    const rules = a2Rules(actor)
+    const s = actor.system ?? {}
+    if (actor.type === 'npc') return { health: a2Int(s.health?.value), baneful: null, vitae: null, willpower: s.willpower ? a2Int(s.willpower.value) : null, rank: null, violations: null }
+    const h = a2ActorHealth(actor)
+    const hum = rules?.humanity ? a2ActorHumanity(actor) : null
+    return { health: h.value, baneful: h.baneful, vitae: rules?.vitae ? a2Int(s.health?.value) : null, willpower: s.willpower ? a2Int(s.willpower.value) : null, rank: hum ? hum.rank : null, violations: hum ? hum.violations : null }
+  } catch (e) { return null }
+}
+function a2dSnapAll () {
+  for (const a of game.actors ?? []) { const s = a2dSnap(a); if (s) a2dState.snap.set(a.uuid, s) }
+  for (const t of globalThis.canvas?.tokens?.placeables ?? []) { if (t.actor && !a2dState.snap.has(t.actor.uuid)) { const s = a2dSnap(t.actor); if (s) a2dState.snap.set(t.actor.uuid, s) } }
+}
+function a2dFloat (actor, changes) {
+  try {
+    if (!a2dOn('floatText') || !globalThis.canvas?.interface?.createScrollingText) return
+    const tokens = (actor.getActiveTokens?.() ?? []).filter((t) => t.visible !== false)
+    if (!tokens.length) return
+    const A = CONST.TEXT_ANCHOR_POINTS ?? {}
+    let k = 0
+    for (const c of changes) {
+      if (!c.all && !actor.isOwner) continue
+      const text = a2dFloatText(c)
+      if (!text) continue
+      const good = c.key === 'baneful' || c.key === 'violations' ? c.to < c.from : c.to > c.from
+      const fill = c.key === 'baneful' ? (good ? 0x9fd08a : 0xff9a3c) : good ? 0x9fd08a : c.key === 'willpower' ? 0x8ab4ff : 0xff5a5a
+      const delay = 350 * k++
+      for (const t of tokens) setTimeout(() => { try { canvas.interface.createScrollingText(t.center, text, { anchor: A.TOP ?? 3, direction: good ? (A.TOP ?? 3) : (A.BOTTOM ?? 1), distance: (t.h ?? 100) * 0.9, fontSize: 30, fill, stroke: 0x000000, strokeThickness: 4, jitter: 0.25 }) } catch (e) { /* the scene changed */ } }, delay)
+    }
+  } catch (e) { console.error('V6 Automation | floating text', e) }
+}
+function a2dOnUpdateActor (actor, changes, options, userId) {
+  try {
+    if (!a2Enabled()) return
+    const after = a2dSnap(actor)
+    if (!after) return
+    const before = a2dState.snap.get(actor.uuid) ?? null
+    a2dState.snap.set(actor.uuid, after)
+    if (!before) return
+    const diff = a2dDiff(before, after)
+    if (!diff.length) return
+    a2dFloat(actor, diff)
+    if (!game.user.isGM || !a2dOn('autoLog')) return
+    a2dState.log.push({ id: ++a2dState.seq, at: Date.now(), uuid: actor.uuid, name: actor.name, user: game.users.get(userId)?.name ?? '', before, after, changes: diff, undone: false, undo: Boolean(options?.a2dUndo) })
+    if (a2dState.log.length > 150) a2dState.log.splice(0, a2dState.log.length - 150)
+    if (a2dState.logApp?.rendered) a2dLogRefresh()
+  } catch (e) { console.error('V6 Automation | log', e) }
+}
+async function a2dUndo (id) {
+  const e = a2dState.log.find((x) => x.id === id)
+  if (!e || e.undone) return false
+  const actor = a2FromUuid(e.uuid)
+  if (!actor) { ui.notifications.warn(`${e.name} is no longer there.`); return false }
+  const keys = new Set(e.changes.map((c) => c.key))
+  const upd = {}
+  if (actor.type === 'npc') {
+    if (keys.has('health')) upd['system.health.value'] = e.before.health
+  } else {
+    if (keys.has('health') || keys.has('baneful')) upd['flags.world.a2.health'] = { value: e.before.health, baneful: e.before.baneful ?? 0 }
+    if (keys.has('vitae')) upd['system.health.value'] = e.before.vitae
+  }
+  if (keys.has('willpower')) upd['system.willpower.value'] = e.before.willpower
+  if (Object.keys(upd).length) await actor.update(upd, { a2Damage: true, a2dUndo: true })
+  if (keys.has('rank') || keys.has('violations')) await a2WriteHumanity(actor, { rank: e.before.rank, violations: e.before.violations })
+  e.undone = true
+  ui.notifications.info(`Taken back: ${e.name}, ${a2dLine(e.changes)}.`)
+  if (a2dState.logApp?.rendered) a2dLogRefresh()
+  return true
+}
+function a2dLogHtml () {
+  const rows = [...a2dState.log].reverse().map((e) => `<tr class="${e.undone ? 'a2d-done' : ''}"><td class="c">${new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td><td><strong>${a2Esc(e.name)}</strong></td><td>${a2Esc(a2dLine(e.changes))}${e.undo ? ' <small>(an undo)</small>' : ''}</td><td>${a2Esc(e.user)}</td><td class="c">${e.undone ? 'taken back' : `<button type="button" data-a2d-undo="${e.id}" title="Put these values back as they were"><i class="fa-solid fa-rotate-left"></i> Undo</button>`}</td></tr>`).join('')
+  return `<div class="a2d-dialog"><p class="hint">Every change to Health, Vitae, Willpower and Humanity since you loaded the world, newest first. Undo puts those values back; anything else the same action did (a state, a chat card) stays.</p><div class="a2d-scroll a2d-log">${rows ? `<table class="a2d-table"><tr><th class="c">When</th><th>Who</th><th>What</th><th>By</th><th></th></tr>${rows}</table>` : '<p><em>Nothing has changed yet.</em></p>'}</div></div>`
+}
+function a2dLogRefresh () {
+  const el = a2dState.logApp?.element
+  const box = el?.querySelector('.a2d-dialog')
+  if (!box) return
+  const tmp = document.createElement('div')
+  tmp.innerHTML = a2dLogHtml()
+  box.replaceWith(tmp.firstElementChild)
+  a2dLogWire(el)
+}
+function a2dLogWire (el) { el?.querySelectorAll('[data-a2d-undo]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); b.disabled = true; a2dUndo(a2Int(b.dataset.a2dUndo)) })) }
+async function a2dLogOpen () {
+  if (!game.user.isGM) { ui.notifications.warn('The log is the Storyteller\'s.'); return null }
+  if (a2dState.logApp?.rendered) { a2dState.logApp.bringToFront?.(); return a2dState.logApp }
+  foundry.applications.api.DialogV2.wait({
+    window: { title: 'Automation log', resizable: true },
+    position: { width: 720 },
+    content: a2dLogHtml(),
+    buttons: [{ action: 'close', label: 'Close' }],
+    rejectClose: false,
+    render: (ev, dialog) => { a2dState.logApp = dialog; a2dLogWire(dialog?.element) }
+  }).catch(() => null).finally(() => { a2dState.logApp = null })
+  return true
+}
+
+// ---- wiring ----
+async function a2dOnSocket (msg) {
+  try {
+    if (!msg || msg.a2d !== 1 || !a2xIsGM()) return
+    const user = game.users.get(msg.user)
+    if (!user) return
+    if (msg.op === 'coterie') {
+      const c = a2wCoterie()
+      const res = a2dCoteriePlus(c.resources, { index: msg.data?.index, name: String(msg.data?.name ?? '').slice(0, 80) })
+      if (res) await game.settings.set(a2eNs(), a2eKey('coterie'), { ...c, resources: res.resources })
+    }
+  } catch (e) { console.error('V6 Automation | desk socket', e) }
+}
+// Chat commands this file answers (alpha2-moves passes them on). → true if handled
+function a2dCommand (cmd, arg, actor) {
+  switch (cmd) {
+    case 'powers': a2dPowers(actor); return true
+    case 'boons': a2dBoonsOpen(); return true
+    case 'log': a2dLogOpen(); return true
+    case 'limbs': if (typeof a2fLimbsOpen === 'function') a2fLimbsOpen(actor); return true // eslint-disable-line no-undef
+    case 'group': if (typeof a2fGroup === 'function') a2fGroup(); return true // eslint-disable-line no-undef
+  }
+  return false
+}
+function a2dInjectStyles () {
+  if (document.getElementById('a2d-styles')) return
+  const st = document.createElement('style')
+  st.id = 'a2d-styles'
+  st.textContent = `
+.a2d-dialog .hint { font-size: 12px; opacity: 0.85; margin: 4px 0; }
+.a2d-dialog .form-group { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+.a2d-dialog .form-group input[type="text"], .a2d-dialog .form-group select { flex: 1; }
+.a2d-scroll { max-height: 55vh; overflow-y: auto; }
+.a2d-table { width: 100%; border-collapse: collapse; }
+.a2d-table td, .a2d-table th { padding: 3px 5px; border-bottom: 1px solid rgba(200,170,110,0.2); text-align: left; vertical-align: top; }
+.a2d-table .c { text-align: center; white-space: nowrap; }
+.a2d-table tr.a2d-head th { color: var(--v6-gold, #c9a45c); text-transform: uppercase; letter-spacing: 1px; font-size: 12px; padding-top: 8px; }
+.a2d-table tr.a2d-no td:first-child a, .a2d-table tr.a2d-done td { opacity: 0.55; }
+.a2d-table tr.a2d-on td:first-child a { color: var(--v6-gold, #c9a45c); font-weight: 700; }
+.a2d-table .a2d-why { color: var(--v6-blood-hi, #d0303c); }
+.a2d-table .a2d-live { color: var(--v6-gold, #c9a45c); }
+.a2d-table button { width: auto; min-width: 28px; padding: 1px 6px; line-height: 22px; display: inline-block; margin: 0 1px; }
+.a2d-call { margin-top: 6px; padding: 4px 6px; border: 1px dashed rgba(200,170,110,0.45); border-radius: 4px; font-size: 12px; }
+.a2d-call summary { cursor: pointer; font-weight: 700; color: var(--v6-gold, #c9a45c); }
+.a2d-call ul { margin: 4px 0 4px 1.1em; padding: 0; }
+.a2d-call .a2d-text { max-height: 9em; overflow-y: auto; opacity: 0.85; margin: 4px 0; padding: 4px; background: rgba(0,0,0,0.18); border-radius: 3px; }
+`
+  document.head.append(st)
+}
+
+async function a2DeskBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.desk?.booted) return true
+  a2eReg('stCalls', { name: 'Storyteller\'s call on powers that aren\'t automated', hint: 'A power card that says "Not automated" gets a fold-out for the Storyteller: what is left to decide, the roll, the power\'s text, and a button to tell the table the ruling.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('autoLog', { name: 'Automation log with undo', hint: 'The Storyteller\'s client notes every change to Health, Vitae, Willpower and Humanity and can take it back (the scroll tool in the token controls, or /v6 log).', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('floatText', { name: 'Numbers over tokens', hint: 'A change to Health floats over the token for everyone; Vitae, Willpower and Humanity only for the character\'s owners.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('boons', { scope: 'world', config: false, type: Object, default: { list: [] } })
+  a2dInjectStyles()
+  if (!a2dState.hooked) {
+    a2dState.hooked = true
+    a2dSnapAll()
+    Hooks.on('updateActor', a2dOnUpdateActor)
+    Hooks.on('createActor', (actor) => { const s = a2dSnap(actor); if (s) a2dState.snap.set(actor.uuid, s) })
+    Hooks.on('canvasReady', () => { try { a2dSnapAll() } catch (e) { /* no canvas */ } })
+    Hooks.on('createToken', (doc) => { try { const a = doc.actor; if (a && !a2dState.snap.has(a.uuid)) { const s = a2dSnap(a); if (s) a2dState.snap.set(a.uuid, s) } } catch (e) { /* no actor */ } })
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { const root = html instanceof HTMLElement ? html : html?.[0]; if (root) a2dRenderCall(message, root) } catch (e) { console.error('V6 Automation | Storyteller call', e) } })
+    Hooks.on('getSceneControlButtons', (controls) => {
+      const tools = controls?.tokens?.tools
+      if (!tools || !a2Enabled()) return
+      tools['v6a2-boons'] = { name: 'v6a2-boons', title: 'Boons: who owes whom', icon: 'fa-solid fa-handshake', order: 107, button: true, onChange: () => a2dBoonsOpen() }
+      if (game.user?.isGM && a2eGet('autoLog', true) !== false) tools['v6a2-log'] = { name: 'v6a2-log', title: 'Automation log (with undo)', icon: 'fa-solid fa-scroll', order: 108, button: true, onChange: () => a2dLogOpen() }
+    })
+    for (const ch of A2X_SOCKETS) { try { game.socket?.on?.(ch, a2dOnSocket) } catch (e) { console.warn('V6 Automation | desk socket', ch, e) } }
+    try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
+  }
+  api.desk = { booted: true, powers: a2dPowers, boons: a2dBoonsOpen, log: a2dLogOpen, undo: a2dUndo, entries: () => a2dState.log.map((e) => ({ ...e })), command: a2dCommand, rules: { diff: a2dDiff, line: a2dLine, floatText: a2dFloatText, boonAdd: a2dBoonAdd, boonSettle: a2dBoonSettle, boonVisible: a2dBoonVisible, coteriePlus: a2dCoteriePlus, needsCall: a2dNeedsCall } }
+  console.log('V6 Automation | powers window, Storyteller calls, boons and the log loaded')
+  return true
+}
+globalThis.a2DeskBoot ??= a2DeskBoot
+
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)
 // Reads *.v6bundle.json files. The V6 Rules bundle goes into the world (players
@@ -11963,7 +13552,7 @@ function v6iTidyPage (content, name) {
 // The pages of one journal, tidied; a journal made only of per-Discipline pages is put in A to Z order.
 function v6iPages (pages) {
   const out = (pages ?? []).map((p) => {
-    if ((p.type ?? 'text') !== 'text' || typeof p.text?.content !== 'string') return p
+    if ((p.type ?? 'text') !== 'text' || typeof p.text?.content !== 'string') return { ...p, name: v6iUnescape(p.name).trim() }
     // names as Foundry shows them: no HTML codes, no stray spaces
     const name = v6iPageTitle(v6iUnescape(p.name).trim())
     return { ...p, name, text: { ...p.text, content: v6iTidyPage(v6iTidyPage(p.text.content, p.name), name) } }

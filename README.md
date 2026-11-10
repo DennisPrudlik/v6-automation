@@ -51,6 +51,18 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **On the character sheet:** the six lists of the Actions tab (General, Physical, Social, Exploration, Downtime, Humanity) are filled with the Alpha 2 actions as real items for every player character; click one to do it, Shift-click to post it to chat. Above them a "V6 tools" block holds the tools from the token controls (States, Feed, Blood Surge, Frenzy test, Spend XP, Blood Bonds, Downtime, Coterie, Creation, How to play) and what the module is tracking for that character.
 - **Tracked powers:** Blood Aegis counts its barrier down against ranged damage, Haruspex puts its free reroll on the roll cards, Pact with Ra switches sunlight off for the day and takes the Vitae at New Night.
 - **Coterie by drag and drop:** drop an item on the Coterie window to add it as a shared Resource, or on the Haven field to name the haven.
+- **Weapons and distance:** Melee, Shoot, Throw, Called shot, Stake and Decapitate ask which weapon is used (the character's equipment first, or a plain light, medium or heavy one) and fill in its damage. The distance between the two tokens is read off the scene and turned into the rules' bands: point-blank −1 die, one band beyond the weapon's range −2, further no shot, and melee needs Close. Ammunition isn't counted, as in the rules; a painful failure with a firearm gets a "may jam" line.
+- **Called-shot injuries:** a called shot names the limb, and on a win the margin sets the injury (−1, mangled −2 or −3, disabled, destroyed). The worst result on a limb stays. Injuries are kept on the character, lower its dice, and are mended from the Limbs window for the printed Vitae and Willpower.
+- **Groups:** several selected Storyteller characters act as one: the best of them rolls and the others assist.
+- **Humanity:** a window per character to mark a violation with its reason, warn the player first, Justify (once a night, 1 Willpower, Self-Control against the rank), erase a slash for a precept kept, and raise the rank for XP.
+- **Day and torpor:** the flat tests for staying awake and for waking when disturbed, a sunrise clock, torpor length by Humanity rank, the three ways out of torpor, and upkeep Vitae at New Night.
+- **Diablerie:** the Storyteller selects the diablerist and targets the victim; the requirements are checked, the run of contested tests is rolled for both sides, and the gains or the lost soul are applied.
+- **Ghouls:** who serves whom and when each last drank, with a reminder at New Night (a house rule: the playtest prints no interval).
+- **Powers window:** every power of a character with its cost, whether it can be paid for now and whether it is running; roll, use or end it with one click.
+- **Storyteller's call:** a power the module can't settle with numbers gets a fold-out on its card for the Storyteller: what is left to decide, what the roll gave, the power's text, and a button to tell the table the ruling.
+- **Boons:** a ledger of favours owed (a house rule, bookkeeping only).
+- **Automation log:** the Storyteller's client notes every change to Health, Vitae, Willpower and Humanity and can undo any of them. Such changes also float over the token for a moment.
+- **Shared Resources in downtime:** Acquire Resources can add a dot to a Resource the coterie shares.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.
