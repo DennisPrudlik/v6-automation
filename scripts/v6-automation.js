@@ -1201,6 +1201,10 @@ function a2RollForTarget (message, roll, target) {
   const o = roll.options.a2.oppose
   a2State.pendingVs.set(target.uuid, { messageId: message.id, successes: a2Int(roll.total), name: message.alias ?? 'opponent' })
   if (target.type === 'npc') a2State.pendingPreset.set(target.uuid, { level: a2NpcBestLevel(target, o.attributes).key })
+  if (typeof a2uHint === 'function') { // what the target resists, for its situational bonuses
+    const src = a2FromUuid(roll.options.a2.itemUuid)
+    a2uHint(target, { resist: src?.system?.disciplineType ? [src.system.disciplineType] : [], against: (typeof a2xSpeaker === 'function' ? a2xSpeaker(message)?.uuid : null) ?? null })
+  }
   a2State.RollDialog.open({ actor: target, test: { attributes: o.attributes, skills: o.skills, disciplines: o.disciplines } })
 }
 
@@ -1776,7 +1780,12 @@ async function a2Boot () {
       ['tools', globalThis.a2ToolsBoot ?? (typeof a2ToolsBoot === 'function' ? a2ToolsBoot : null)],
       ['bonuses', globalThis.a2BonusesBoot ?? (typeof a2BonusesBoot === 'function' ? a2BonusesBoot : null)],
       ['powers', globalThis.a2PowersBoot ?? (typeof a2PowersBoot === 'function' ? a2PowersBoot : null)],
-      ['journal styling', globalThis.a2StyleBoot ?? (typeof a2StyleBoot === 'function' ? a2StyleBoot : null)]]) {
+      ['journal styling', globalThis.a2StyleBoot ?? (typeof a2StyleBoot === 'function' ? a2StyleBoot : null)],
+      ['opposed tests', globalThis.a2OpposeBoot ?? (typeof a2OpposeBoot === 'function' ? a2OpposeBoot : null)],
+      ['self-ticking bonuses', globalThis.a2AutoBoot ?? (typeof a2AutoBoot === 'function' ? a2AutoBoot : null)],
+      ['journal links', globalThis.a2LinksBoot ?? (typeof a2LinksBoot === 'function' ? a2LinksBoot : null)],
+      ['combat flow', globalThis.a2CombatBoot ?? (typeof a2CombatBoot === 'function' ? a2CombatBoot : null)],
+      ['character creation', globalThis.a2CreateBoot ?? (typeof a2CreateBoot === 'function' ? a2CreateBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -2806,6 +2815,7 @@ function a2xFrenzyPoolFor (actor, modifier = 0) {
 }
 
 async function a2xRollFrenzy (actor, o) {
+  if (typeof a2uHint === 'function') a2uHint(actor, { frenzy: o.type }) // eslint-disable-line no-undef
   const info = A2X_FRENZY[o.type]
   const p = a2xFrenzyPoolFor(actor, o.modifier)
   const difficulty = Math.max(0, a2Int(o.difficulty))
@@ -4603,6 +4613,7 @@ async function a2tFeedTest (actor, start) {
     if (difficulty === 0) return auto('Difficulty 0: a basic win without a test (TR1)')
     test = { attributes: [pick[0]], skills: [pick[1]], difficulty }
   }
+  if (typeof a2uHint === 'function') a2uHint(actor, { hunt: true }) // eslint-disable-line no-undef
   const roll = await RD.open({ actor, test })
   if (!roll) return null
   const v = roll.a2Verdict ?? roll.result?.a2 ?? null
@@ -7435,15 +7446,21 @@ function a2sDecorate (root, pageName) {
 
 // Find the page articles inside a rendered journal window and dress them.
 function a2sScan (element, entry) {
-  if (!element || !a2sWanted(entry)) return
+  if (!element) return
+  const styled = a2sWanted(entry)
+  const linked = typeof a2lEnhance === 'function' // eslint-disable-line no-undef
+  if (!styled && !linked) return
   const pages = element.matches?.('[data-page-id]') ? [element] : [...(element.querySelectorAll?.('[data-page-id]') ?? [])]
   for (const art of pages) {
     const page = entry?.pages?.get?.(art.dataset.pageId)
     if (!page || (page.type && page.type !== 'text')) continue
     const body = art.querySelector('.journal-page-content') ?? art.querySelector('section') ?? art
     if (body.querySelector?.('prose-mirror, .editor.prosemirror, .editor-container')) continue // being edited
-    art.classList.add('v6-doc-page')
-    a2sDecorate(body, page.name)
+    if (styled) {
+      art.classList.add('v6-doc-page')
+      a2sDecorate(body, page.name)
+    }
+    if (linked) { try { a2lEnhance(body, entry, page) } catch (e) { console.error('V6 Automation | journal links', e) } } // eslint-disable-line no-undef
   }
 }
 
@@ -7454,7 +7471,7 @@ function a2sOnRender (app, element) {
     const el = element instanceof HTMLElement ? element : element?.[0] ?? app?.element
     if (!doc || !el) return
     if (doc.documentName === 'JournalEntryPage') {
-      if (!a2sWanted(doc.parent) || (doc.type && doc.type !== 'text')) return
+      if (doc.type && doc.type !== 'text') return
       const host = el.closest?.('[data-page-id]') ?? el
       if (!host.dataset.pageId) host.dataset.pageId = doc.id
       a2sScan(host, doc.parent)
@@ -7541,6 +7558,1546 @@ async function a2StyleBoot () {
   return true
 }
 globalThis.a2StyleBoot ??= a2StyleBoot
+
+// ---- self-running opposed tests (attacks) ----------------------------------------------
+// PG p.116, p.120: an attack is the attacker's test against the target's defence
+// test. Defending costs no action: Dodge is Dexterity + Athletics, Parry is
+// Dexterity + Fighting (melee only).
+//
+// When someone rolls an attack with a token targeted and no flat Difficulty:
+//  1. the attack card remembers its targets (flags.world.a2def);
+//  2. a target nobody but the Storyteller owns defends by itself, with its better pool;
+//  3. a player's character gets Dodge / Parry buttons on the attack card and a notice;
+//  4. the defence roll is linked to the attack, so the card shows win and margin and
+//     "Apply damage" already knows the target and the margin;
+//  5. with the "apply at once" setting the damage is applied without a click, when
+//     nothing about it needs choosing.
+// Powers with their own opposing pool keep their "Roll for target" flow.
+//
+// Settings (world): oppose (on), opposeNpcAuto (on), opposeDamage ('button' | 'auto').
+
+// ---- shared helpers for the extras (settings in the module's namespace) ----
+function a2eNs () { return typeof a2tNs === 'function' ? a2tNs() : 'wod6e' }
+function a2eKey (key) { return a2eNs() === 'wod6e' ? `v6A2${key[0].toUpperCase()}${key.slice(1)}` : key }
+function a2eReg (key, data) {
+  try {
+    const ns = a2eNs()
+    if (!game.settings.settings.has(`${ns}.${a2eKey(key)}`)) game.settings.register(ns, a2eKey(key), data)
+  } catch (e) { console.error('V6 Automation | setting', key, e) }
+}
+function a2eGet (key, fallback = null) {
+  try { return game.settings.get(a2eNs(), a2eKey(key)) } catch (e) { return fallback }
+}
+const a2eSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+// Open the system's roll dialog with a pool ready. test: { attributes, skills, disciplines, difficulty }.
+// auto = press Roll for the user (the dialog shows for a moment).
+async function a2eOpenRoll (actor, test, { auto = false, vs = null } = {}) {
+  const RD = typeof a2State !== 'undefined' ? a2State.RollDialog : null
+  if (!RD || !actor) { ui.notifications?.error('The roll dialog is not available.'); return null }
+  if (vs) a2State.pendingVs.set(actor.uuid, vs)
+  const before = new Set(foundry.applications.instances.keys())
+  const pending = RD.open({ actor, test })
+  if (auto) {
+    for (let i = 0; i < 30; i++) {
+      await a2eSleep(100)
+      const dlg = [...foundry.applications.instances.entries()].find(([id, app]) => !before.has(id) && app.rendered && app.element?.querySelector?.('button[data-action="roll"]'))
+      if (dlg) { dlg[1].element.querySelector('button[data-action="roll"]').click(); break }
+    }
+  }
+  return pending
+}
+
+// ---- pure rules ----
+// Which defences fit this attack, best pool first. pools: { dodge, parry }. Pure.
+function a2oDefences ({ melee = true, pools = {} } = {}) {
+  const out = [{ key: 'dodge', label: 'Dodge', test: { attributes: ['dexterity'], skills: ['athletics'] }, pool: a2Int(pools.dodge), text: 'Dexterity + Athletics' }]
+  if (melee) out.push({ key: 'parry', label: 'Parry', test: { attributes: ['dexterity'], skills: ['fighting'] }, pool: a2Int(pools.parry), text: 'Dexterity + Fighting' })
+  return out.sort((a, b) => b.pool - a.pool)
+}
+// Should this roll start a defence? Pure.
+function a2oWants ({ built = false, isDefence = false, frenzy = false, difficulty = 0, opponent = null, kind = null, hasOppose = false, targets = 0 } = {}) {
+  if (!built || isDefence || frenzy || hasOppose || !kind || targets < 1) return false
+  if (a2Int(difficulty) > 0 || (opponent !== null && opponent !== undefined)) return false // flat Difficulty, or already typed in
+  return true
+}
+
+function a2oPools (actor) {
+  const eff = (path) => a2Int(foundry.utils.getProperty(actor, `${path}.effective`) ?? foundry.utils.getProperty(actor, `${path}.value`))
+  const dex = eff('system.attributes.dexterity')
+  return { dodge: dex + eff('system.skills.athletics'), parry: dex + eff('system.skills.fighting') }
+}
+function a2oOn () { return a2Enabled() && a2eGet('oppose', true) !== false }
+function a2oRoll (message) {
+  const i = (message?.rolls ?? []).findIndex((r) => r?.options?.a2?.built)
+  return i < 0 ? null : { roll: message.rolls[i], index: i }
+}
+function a2oDefenceOf (attackId, actorUuid) {
+  return game.messages.contents.slice(-120).find((m) => m.rolls?.some((r) => r?.options?.a2?.vsMessage === attackId) && a2xSpeaker(m)?.uuid === actorUuid) ?? null
+}
+function a2oPlayerOwned (actor) {
+  return Boolean(actor?.hasPlayerOwner) && game.users.some((u) => u.active && !u.isGM && actor.testUserPermission(u, 'OWNER'))
+}
+
+// 1. The attacker's own client notes the targets on the card.
+async function a2oOnCreate (message, options, userId) {
+  try {
+    if (!a2oOn()) return
+    const r = a2oRoll(message)
+    if (!r) return
+    const a2 = r.roll.options.a2
+    if (userId === game.user.id && !message.flags?.world?.a2def) {
+      const attacker = a2xSpeaker(message)
+      const info = a2xAttackInfo(message, r.roll)
+      const targets = [...(game.user.targets ?? [])].map((t) => t.actor).filter((a) => a && a.uuid !== attacker?.uuid)
+      if (a2oWants({ built: true, isDefence: Boolean(a2.vsMessage), frenzy: Boolean(a2.frenzyTest), difficulty: r.roll.options.difficulty, opponent: a2.opponent, kind: info?.kind ?? null, hasOppose: Boolean(a2.oppose), targets: targets.length })) {
+        await message.update({ 'flags.world.a2def': { v: 1, melee: Boolean(info.melee), successes: a2Int(r.roll.total), attacker: attacker?.name ?? message.alias ?? 'Attacker', attackerUuid: attacker?.uuid ?? null, targets: targets.slice(0, 6).map((a) => ({ uuid: a.uuid, name: a.name })) } })
+      }
+    }
+    // 5. A defence roll arrived: apply the damage at once, if set so.
+    if (a2.vsMessage && a2xIsGM() && a2eGet('opposeDamage', 'button') === 'auto') await a2oAutoDamage(game.messages.get(a2.vsMessage), a2xSpeaker(message))
+  } catch (e) { console.error('V6 Automation | opposed test', e) }
+}
+
+// 2 and 3. Everyone sees the flag arrive: the GM rolls for its NPCs, players are told.
+const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve() }
+function a2oOnUpdate (message, change) {
+  try {
+    if (!a2oOn() || !change?.flags?.world?.a2def) return
+    const def = message.flags?.world?.a2def
+    if (!def || a2oState.seen.has(message.id)) return
+    a2oState.seen.add(message.id)
+    const gm = a2xIsGM()
+    for (const t of def.targets ?? []) {
+      const actor = a2FromUuid(t.uuid)
+      if (!actor) continue
+      if (gm && !a2oPlayerOwned(actor)) {
+        if (a2eGet('opposeNpcAuto', true) !== false) a2oState.queue = a2oState.queue.then(() => a2oDefend(message, actor, null, { auto: true })).catch((e) => console.error('V6 Automation | auto defence', e))
+      } else if (!game.user.isGM && actor.isOwner) {
+        ui.notifications?.info(`${def.attacker} attacks ${actor.name}: defend from the chat card (it costs no action, PG p.120).`)
+      }
+    }
+  } catch (e) { console.error('V6 Automation | opposed test', e) }
+}
+
+async function a2oDefend (message, actor, key = null, { auto = false } = {}) {
+  const def = message?.flags?.world?.a2def
+  const r = a2oRoll(message)
+  if (!def || !r || !actor?.isOwner) return null
+  if (a2oDefenceOf(message.id, actor.uuid)) { if (!auto) ui.notifications?.info(`${actor.name} has already defended against this attack.`); return null }
+  const list = a2oDefences({ melee: def.melee, pools: a2oPools(actor) })
+  const pick = list.find((d) => d.key === key) ?? list[0]
+  // the simple npc sheet has no Dexterity: it defends with its Physical level
+  if (actor.type === 'npc' && typeof a2NpcBestLevel === 'function') a2State.pendingPreset.set(actor.uuid, { level: a2NpcBestLevel(actor, pick.test.attributes).key })
+  if (typeof a2uHint === 'function') a2uHint(actor, { against: def.attackerUuid ?? null }) // eslint-disable-line no-undef
+  return a2eOpenRoll(actor, pick.test, { auto, vs: { messageId: message.id, successes: a2Int(r.roll.total), name: def.attacker } })
+}
+
+async function a2oAutoDamage (attack, defender) {
+  const r = a2oRoll(attack)
+  if (!attack?.flags?.world?.a2def || !r || !defender) return
+  if (a2xAct(attack, r.index).damage?.length) return // already applied
+  const { v } = a2xVerdict(attack, r.roll)
+  if (v.win !== true) return
+  const info = a2xAttackInfo(attack, r.roll)
+  if (!info || info.base === null || info.weapons.length || /^Enter /.test(info.baseNote ?? '')) return // a weapon to pick or a number to type: leave the button
+  const margin = Math.max(0, a2Int(v.margin))
+  const extra = info.riders.reduce((t, x) => t + a2Int(x.amount), 0) + a2Int(info.rage)
+  await a2xApplyDamage([defender], {
+    amount: (info.calc ? info.calc(margin) : info.base) + extra,
+    margin: info.calc ? 0 : (info.addMargin || info.riders.some((x) => x.own) ? margin : 0),
+    baneful: info.baneful,
+    ignoreEndurance: info.ignoreEndurance,
+    resource: info.resource === 'willpower' ? 'willpower' : 'health',
+    source: info.label,
+    attackerUuid: info.attacker?.uuid ?? null,
+    bodyAttack: info.kind === 'unarmed',
+    messageId: attack.id,
+    rollIndex: r.index
+  })
+}
+
+// 3 and 4. The attack card: who still has to defend, with buttons for their owners.
+function a2oRenderChat (message, html) {
+  const def = message.flags?.world?.a2def
+  if (!def || !a2oOn()) return
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  if (!root || root.querySelector('.a2o-defence')) return
+  const block = document.createElement('div')
+  block.className = 'a2o-defence'
+  for (const t of def.targets ?? []) {
+    const actor = a2FromUuid(t.uuid)
+    const done = a2oDefenceOf(message.id, t.uuid)
+    const row = document.createElement('div')
+    row.className = 'a2o-row'
+    const label = document.createElement('span')
+    label.textContent = done ? `${t.name} defended.` : `${t.name}: defence pending (PG p.120).`
+    row.append(label)
+    if (!done && actor?.isOwner) {
+      for (const d of a2oDefences({ melee: def.melee, pools: a2oPools(actor) })) {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.innerHTML = `<i class="fa-solid fa-shield-halved"></i> ${a2Esc(d.label)} (${d.pool})`
+        b.title = `${d.text}, against ${def.successes} successes`
+        b.addEventListener('click', (ev) => { ev.preventDefault(); a2oDefend(message, actor, d.key) })
+        row.append(b)
+      }
+    }
+    block.append(row)
+  }
+  const anchor = root.querySelector('.a2-result') ?? root.querySelector('.message-content') ?? root
+  anchor.append(block)
+}
+
+function a2oInjectStyles () {
+  document.getElementById('v6a-oppose-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-oppose-style'
+  style.textContent = `
+.a2o-defence { margin-top: 6px; padding-top: 6px; border-top: 1px dashed color-mix(in srgb, currentColor 30%, transparent); display: flex; flex-direction: column; gap: 4px; }
+.a2o-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.92em; }
+.a2o-row span { flex: 1 1 100%; }
+.a2o-row button { flex: 1 1 0; min-width: 6.5em; line-height: 1.6; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2OpposeBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.oppose?.booted) return true
+  a2eReg('oppose', { name: 'Attacks: defence prompts', hint: 'An attack on a targeted token asks the target to defend, and links the two rolls (PG p.116, p.120).', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('opposeNpcAuto', { name: 'Attacks: Storyteller characters defend by themselves', hint: 'A target no player owns rolls its better defence at once. Off: the Storyteller uses the buttons on the card.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('opposeDamage', { name: 'Attacks: damage after the defence', hint: '"Button" leaves Apply damage on the card. "At once" applies it when nothing needs choosing.', scope: 'world', config: true, type: String, choices: { button: 'Button on the card', auto: 'At once' }, default: 'button' })
+  a2oInjectStyles()
+  if (!a2oState.hooked) {
+    a2oState.hooked = true
+    Hooks.on('createChatMessage', a2oOnCreate)
+    Hooks.on('updateChatMessage', a2oOnUpdate)
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { a2oRenderChat(message, html) } catch (e) { console.error('V6 Automation | defence card', e) } })
+  }
+  api.oppose = { booted: true, defend: a2oDefend, openRoll: a2eOpenRoll, rules: { defences: a2oDefences, wants: a2oWants } }
+  console.log('V6 Automation | opposed tests loaded')
+  return true
+}
+globalThis.a2OpposeBoot ??= a2OpposeBoot
+
+// ---- bonuses that tick themselves --------------------------------------------------
+// Situational bonuses (merits, flaws, clan traits, loresheets, gear) are toggles in the
+// roll dialog. Most depend on the story ("when your sire is watching") and stay yours to
+// tick. The ones whose condition the table can see are ticked when the dialog opens:
+//   - "vs frenzy", "vs fear frenzy": a frenzy test of that kind (Frenzy test tool)
+//   - "resist Dominate/Presence": the defence roll against a power of that Discipline
+//   - "vs vampires", "intimidate mortals", "Social with Hecata": the targeted token
+//   - "in combat" / "outside conflict": whether a fight is running with you in it
+//   - "hunt …": the test made from the Feed tool
+// A ticked toggle shows why ("auto: target is a mortal") and can be unticked. A bonus
+// with a further condition in brackets is only marked "may apply", never ticked.
+// Once you change any toggle yourself, your choice stands for that roll.
+//
+// Setting (client): autoBonuses (on).
+
+const A2U_DISC = ['animalism', 'auspex', 'blood sorcery', 'celerity', 'corruption', 'dominate', 'fortitude', 'necromancy', 'obfuscate', 'oblivion', 'potence', 'presence', 'tellurgy', 'vicissitude']
+const A2U_CREATURE_WORDS = [
+  [/\b(?:mortals?|humans?|kine)\b/, 'mortal'],
+  [/\b(?:vampires?|kindred|cainites?|licks?)\b/, 'vampire'],
+  [/\bghouls?\b/, 'ghoul'],
+  [/\b(?:animals?|beasts)\b/, 'animal']
+]
+const A2U_CLANS = ['banu haqim', 'brujah', 'gangrel', 'hecata', 'lasombra', 'malkavian', 'ministry', 'nosferatu', 'ravnos', 'salubri', 'toreador', 'tremere', 'tzimisce', 'ventrue', 'caitiff', 'thin-blood', 'duskborn']
+// Words that introduce who the bonus is about.
+const A2U_VERSUS = '(?:vs\\.?|versus|against|with|to sway|sway|intimidate|intimidating|charm|charming|seduce|deceive|deceiving|fool|command|dealing with|hunting|feeding (?:on|from)|by nearby|among)'
+
+// Words that mean "there is more to it than the table can see".
+const A2U_SOFT = /\b(?:who|whom|whose|while|when|if|after|unless|except|your|you|their|its|his|her|first|next|new|own|aboard|declared|called|once per|per two|three nights|this story)\b/
+// One clause of a bonus text. Pure. → { triggers, soft }
+function a2uClause (text) {
+  const triggers = []
+  let soft = A2U_SOFT.test(text) || /\([^)]{3,}\)/.test(text)
+  // frenzy tests
+  const fz = text.match(/(?:vs\.?|versus|against|resist\w*|self-control[^,;]*?)\s+(?:a |an |the |any )?(?:(fear|hunger|rage|clan)\s+)?frenzy/)
+  if (fz) triggers.push({ kind: 'frenzy', sub: fz[1] ?? null, fire: /frenzy from fire|fear of fire/.test(text) })
+  // resisting a Discipline
+  const rs = text.match(new RegExp(`resist\\w*\\s+((?:${A2U_DISC.join('|')})(?:\\s*(?:/|,|or|and)\\s*(?:${A2U_DISC.join('|')}))*)`))
+  if (rs) {
+    triggers.push({ kind: 'resist', disciplines: A2U_DISC.filter((d) => rs[1].includes(d)).map((d) => d.replace(/ (\w)/, (m, c) => c.toUpperCase())) })
+    if (/\b(?:of|from)\s+\w+/.test(text.slice(rs.index + rs[0].length))) soft = true // "…of younger blood"
+  }
+  // who it is about
+  const vs = text.match(new RegExp(`\\b${A2U_VERSUS}\\s+(?:the |a |an |other |nearby |fellow )?([a-z' ,/-]{3,60})`))
+  if (vs) {
+    const who = vs[1]
+    const types = A2U_CREATURE_WORDS.filter(([re]) => re.test(who)).map(([, t]) => t)
+    const clans = A2U_CLANS.filter((c) => new RegExp(`\\b${c}\\b`).test(who))
+    if (types.length) triggers.push({ kind: 'creature', types })
+    if (clans.length) triggers.push({ kind: 'clan', clans, any: types.length > 0 })
+    if (types.length || clans.length) {
+      // anything besides the creatures themselves is a further condition
+      let rest = who
+      for (const [re] of A2U_CREATURE_WORDS) rest = rest.replace(new RegExp(re.source, 'g'), ' ')
+      for (const c of A2U_CLANS) rest = rest.replace(new RegExp(`\\b${c}\\b`, 'g'), ' ')
+      if (/[a-z]{3,}/.test(rest.replace(/\b(?:and|or|the|other)\b/g, ' '))) soft = true
+    }
+  }
+  // fights: only a bare "+1 Composure in combat" is plain enough to tick
+  if (/\boutside (?:of )?(?:combat|conflict|a fight)\b/.test(text)) triggers.push({ kind: 'combat', on: false })
+  else {
+    const cb = text.match(/^(.*?)\b(?:in|during) (?:combat|a fight|conflict|a conflict|battle)\b/)
+    if (cb) { triggers.push({ kind: 'combat', on: true }); if (cb[1].replace(/[+−-]\s?\d+|gen\. mod\./g, ' ').trim().split(/\s+/).filter(Boolean).length > 1) soft = true }
+  }
+  // the hunt
+  if (/\bhunt(?:ing)?\b/.test(text) && !/blood hunt|wild hunt/.test(text)) triggers.push({ kind: 'hunt' })
+  return { triggers, soft }
+}
+// What a toggle's name says about when it applies. Pure.
+//  → { alts: [{ triggers, soft }], triggers (all of them), soft } ; the alternatives are
+//  the ";"-separated cases of one bonus: any one of them is enough.
+function a2uTriggers (name) {
+  let text = String(name ?? '').replace(/\(active\)/gi, ' ').replace(/\([−-]\d+\)/g, ' ').replace(/\s·\s(?:auto|may apply):.*$/i, '')
+  // "Label (+2 resist Presence)" and "(rank modifier: …)": the bracket is the bonus itself
+  text = text.replace(/\(([^()]*(?:[+−-]\s?\d|gen\. mod\.|dots|rank modifier)[^()]*)\)\s*$/, ': $1')
+  // a specialty in brackets, "Persuasion (Intimidation)", is no condition
+  text = text.replace(/\((?:[A-Z][a-z]+(?: [A-Z][a-z]+)?)\)/g, ' ')
+  // the bonus text is what follows the item's label
+  const cut = text.indexOf(':')
+  const bonus = (cut >= 0 ? text.slice(cut + 1) : text).toLowerCase()
+  const alts = bonus.split(';').map((c) => a2uClause(c.trim())).filter((c) => c.triggers.length)
+  // a Path's rank modifier covers a whole way of acting: point it out, never tick it
+  if (/rank modifier/.test(bonus)) for (const c of alts) c.soft = true
+  return { alts, triggers: alts.flatMap((c) => c.triggers), soft: alts.length > 0 && alts.every((c) => c.soft) }
+}
+
+// Does the roll's situation meet the triggers? All of them must hold. Pure.
+// ctx: { frenzy: type|null, resist: [discipline keys], target: { creature, clan }|null, inCombat, hunt }
+//  → { state: 'tick' | 'maybe' | 'no', reason }
+function a2uDecide (parsed, ctx = {}) {
+  const order = { tick: 2, maybe: 1, no: 0 }
+  let best = { state: 'no', reason: '' }
+  for (const alt of parsed?.alts ?? []) {
+    const d = a2uDecideOne(alt, ctx)
+    if (order[d.state] > order[best.state]) best = d
+  }
+  return best
+}
+function a2uDecideOne ({ triggers = [], soft = false } = {}, ctx = {}) {
+  if (!triggers.length) return { state: 'no', reason: '' }
+  const reasons = []
+  let targetOk = null
+  for (const t of triggers) {
+    if (t.kind === 'frenzy') {
+      if (!ctx.frenzy) return { state: 'no', reason: '' }
+      if (t.sub && t.sub !== ctx.frenzy) return { state: 'no', reason: '' }
+      reasons.push(`${ctx.frenzy} frenzy test`)
+      if (t.fire) soft = true
+    } else if (t.kind === 'resist') {
+      const hit = (ctx.resist ?? []).find((d) => t.disciplines.includes(d))
+      if (!hit) return { state: 'no', reason: '' }
+      reasons.push(`resisting ${hit[0].toUpperCase()}${hit.slice(1).replace(/([A-Z])/g, ' $1')}`)
+    } else if (t.kind === 'creature') {
+      // "Hecata, their ghouls": the creature list and the clan list are either-or
+      const hit = Boolean(ctx.target?.creature) && t.types.includes(ctx.target.creature)
+      targetOk = targetOk || hit
+      if (hit) reasons.push(`target is ${/^[aeiou]/.test(ctx.target.creature) ? 'an' : 'a'} ${ctx.target.creature}`)
+    } else if (t.kind === 'clan') {
+      const clan = String(ctx.target?.clan ?? '').toLowerCase()
+      const hit = Boolean(clan) && t.clans.some((c) => clan.includes(c))
+      targetOk = targetOk || hit
+      if (hit) reasons.push(`target is ${ctx.target.clan}`)
+    } else if (t.kind === 'combat') {
+      if (Boolean(ctx.inCombat) !== t.on) return { state: 'no', reason: '' }
+      reasons.push(t.on ? 'in a fight' : 'no fight running')
+    } else if (t.kind === 'hunt') {
+      if (!ctx.hunt) return { state: 'no', reason: '' }
+      reasons.push('hunting')
+    }
+  }
+  if (targetOk === false) return { state: 'no', reason: '' }
+  // "outside conflict" alone says too little to tick a bonus by itself.
+  const onlyCalm = triggers.every((t) => t.kind === 'combat' && t.on === false)
+  return { state: soft || onlyCalm ? 'maybe' : 'tick', reason: reasons.join(', ') }
+}
+
+const a2uState = { hints: new Map(), patched: false }
+function a2uOn () { return a2Enabled() && a2eGet('autoBonuses', true) !== false }
+// Other parts tell us what the next roll of this actor is about (kept two minutes).
+function a2uHint (actor, hint) {
+  if (!actor?.uuid) return
+  a2uState.hints.set(actor.uuid, { ...hint, at: Date.now() })
+}
+function a2uContext (actor) {
+  const h = a2uState.hints.get(actor.uuid)
+  const hint = h && Date.now() - h.at < 120000 ? h : {}
+  const ctx = { frenzy: hint.frenzy ?? null, resist: hint.resist ?? [], hunt: Boolean(hint.hunt), target: null, inCombat: false }
+  try {
+    const t = [...(game.user?.targets ?? [])].map((x) => x.actor).find((a) => a && a.uuid !== actor.uuid) ?? (hint.against ? a2FromUuid(hint.against) : null)
+    if (t) {
+      const c = a2Creature(t)
+      ctx.target = { creature: c === 'npc' ? 'mortal' : c, clan: t.items?.find?.((i) => i.type === 'clan')?.name ?? t.system?.vampire?.clan?.name ?? '' }
+    }
+    const combat = game.combat
+    ctx.inCombat = Boolean(combat?.started && combat.combatants?.some?.((c) => c.actor?.uuid === actor.uuid || c.actorId === actor.id))
+  } catch (e) { /* keep what we have */ }
+  return ctx
+}
+function a2uPatch () {
+  const RD = a2State.RollDialog
+  if (!RD || a2uState.patched || typeof RD._prepareConditionEffects !== 'function') return false
+  a2uState.patched = true
+  const prep = RD._prepareConditionEffects
+  RD._prepareConditionEffects = function (actor, test, data) {
+    const list = prep.call(this, actor, test, data)
+    try {
+      if (!a2uOn() || !actor) return list
+      const chosen = Array.isArray(data?.conditionEffectIds) // the user has touched the toggles
+      const ctx = a2uContext(actor)
+      const ours = new Map((actor.preparedEffects?.effects ?? []).map((e) => [e.effectId, e.sourceId]))
+      for (const e of list) {
+        if (e.normallyApplies) continue
+        if (!actor.items.get(ours.get(e.id))?.getFlag?.('world', 'v6auto')) continue
+        const d = a2uDecide(a2uTriggers(e.name), ctx)
+        if (d.state === 'no') continue
+        if (d.state === 'tick' && !chosen) e.enabled = true
+        e.name = `${e.name} · ${d.state === 'tick' ? 'auto' : 'may apply'}: ${d.reason}`
+      }
+    } catch (err) { console.error('V6 Automation | auto bonuses', err) }
+    return list
+  }
+  return true
+}
+
+async function a2AutoBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.auto?.booted) return true
+  a2eReg('autoBonuses', { name: 'Tick bonuses that plainly apply', hint: 'Situational bonuses whose condition the table can see (a frenzy test, the kind of target, resisting a Discipline, a running fight, a hunt) are ticked when the roll dialog opens. You can untick them.', scope: 'client', config: true, type: Boolean, default: true })
+  for (let i = 0; i < 40 && !a2uPatch(); i++) await a2eSleep(250)
+  api.auto = { booted: true, hint: a2uHint, context: a2uContext, rules: { triggers: a2uTriggers, decide: a2uDecide } }
+  console.log('V6 Automation | self-ticking bonuses loaded')
+  return true
+}
+globalThis.a2AutoBoot ??= a2AutoBoot
+
+// ---- clickable journals and roll requests ---------------------------------------------
+// In journal pages the V6 importer made:
+//  - a test written out, "Wits + Awareness" or "Strength + Athletics, Difficulty 3",
+//    becomes a chip. Click: the roll dialog opens for your character with that pool
+//    and Difficulty. Shift-click (Storyteller): ask players for that roll instead.
+//  - the name of a character from the same book becomes a link to its sheet. If the
+//    character is still in the book compendium, the Storyteller's click imports it first.
+// Roll requests: the Storyteller picks a pool, a Difficulty and who rolls; each of them
+// gets a button on a chat card, and the card collects the results.
+//
+// Settings: journalLinks (client, on). Data: flags.world.a2req on the request card,
+// flags.world.a2reqOf on an answering roll.
+
+const A2L_ATTRS = ['strength', 'dexterity', 'stamina', 'charisma', 'manipulation', 'composure', 'intelligence', 'wits', 'resolve']
+const A2L_SKILLS = ['athletics', 'awareness', 'craft', 'expression', 'fighting', 'investigation', 'knowledge', 'medicine', 'persuasion', 'shooting', 'sabotage', 'subterfuge', 'survival']
+const A2L_DISCS = { animalism: 'animalism', auspex: 'auspex', 'blood sorcery': 'bloodSorcery', celerity: 'celerity', corruption: 'corruption', dominate: 'dominate', fortitude: 'fortitude', necromancy: 'necromancy', obfuscate: 'obfuscate', oblivion: 'oblivion', potence: 'potence', presence: 'presence', tellurgy: 'tellurgy', vicissitude: 'vicissitude' }
+const A2L_SECOND = [...A2L_ATTRS, ...A2L_SKILLS, ...Object.keys(A2L_DISCS)].sort((a, b) => b.length - a.length)
+// "Wits + Awareness", optionally followed closely by a Difficulty.
+const A2L_TEST = new RegExp(`\\b(${A2L_ATTRS.join('|')})\\s*\\+\\s*(${A2L_SECOND.join('|')})\\b(?:\\s*\\([A-Za-z ,'-]{2,24}\\))?((?:\\s*,|\\s+at|\\s+against|\\s+vs\\.?|\\s*\\(|\\s*:)?\\s*Difficulty\\s+(\\d{1,2})\\)?)?`, 'gi')
+
+// Every test mentioned in a text. Pure.
+//  → [{ index, length, text, test: { attributes, skills, disciplines, difficulty }, label }]
+function a2lFindTests (text) {
+  const out = []
+  const s = String(text ?? '')
+  A2L_TEST.lastIndex = 0
+  let m
+  while ((m = A2L_TEST.exec(s))) {
+    const first = m[1].toLowerCase()
+    const second = m[2].toLowerCase()
+    const test = { attributes: [first], skills: [], disciplines: [] }
+    if (A2L_ATTRS.includes(second)) test.attributes.push(second)
+    else if (A2L_SKILLS.includes(second)) test.skills.push(second)
+    else test.disciplines.push(A2L_DISCS[second])
+    if (m[4] !== undefined) test.difficulty = Math.max(0, parseInt(m[4], 10))
+    const cap = (w) => w.replace(/\b[a-z]/g, (c) => c.toUpperCase())
+    out.push({ index: m.index, length: m[0].length, text: m[0], test, label: `${cap(first)} + ${cap(second)}${test.difficulty !== undefined ? `, Difficulty ${test.difficulty}` : ''}` })
+  }
+  return out
+}
+
+// Names worth linking: long enough not to hit ordinary words. Pure.
+function a2lLinkable (name) {
+  const n = String(name ?? '').trim()
+  if (n.length < 4) return false
+  if (/^(?:the|a|an)\s/i.test(n) && n.split(/\s+/).length < 3) return false
+  return /^[A-ZÀ-Þ"“'(]/.test(n)
+}
+function a2lNameRegex (names) {
+  const list = [...new Set(names.filter(a2lLinkable))].sort((a, b) => b.length - a.length).slice(0, 400)
+  if (!list.length) return null
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?<![\\p{L}\\p{N}])(${list.map(esc).join('|')})(?![\\p{L}\\p{N}])`, 'gu')
+}
+
+const a2lState = { hooked: false, index: null, loading: null, pendingReq: new Map() }
+function a2lOn () { return a2eGet('journalLinks', true) !== false }
+
+// Which book does a journal belong to, and who is in that book?
+//  index: { byEntry: Map(entryId → bookKey), books: Map(bookKey → { names: Map(name → { pack, adventure, id }), regex }) }
+async function a2lLoadIndex () {
+  if (a2lState.index) return a2lState.index
+  if (a2lState.loading) return a2lState.loading
+  a2lState.loading = (async () => {
+    const index = { byEntry: new Map(), books: new Map() }
+    try {
+      for (const pack of game.packs ?? []) {
+        if (pack.documentName !== 'Adventure' || !/v6-conversion/.test(pack.collection)) continue
+        for (const adv of await pack.getDocuments()) {
+          const names = new Map()
+          for (const a of adv.actors ?? []) names.set(a.name, { pack: pack.collection, adventure: adv.id, id: a.id })
+          for (const j of adv.journal ?? []) index.byEntry.set(j.id, adv.id)
+          index.books.set(adv.id, { names, regex: a2lNameRegex([...names.keys()]) })
+        }
+      }
+    } catch (e) { console.error('V6 Automation | journal links index', e) }
+    a2lState.index = index
+    return index
+  })()
+  return a2lState.loading
+}
+
+// Walk the text nodes under root, outside links, buttons and headings.
+function a2lTextNodes (root) {
+  const out = []
+  const skip = /^(?:A|BUTTON|H1|H2|H3|H4|H5|H6|SCRIPT|STYLE|CODE|PRE|TEXTAREA|SELECT)$/
+  const walk = (node) => {
+    for (const c of [...node.childNodes]) {
+      if (c.nodeType === 3) { if (c.nodeValue && c.nodeValue.trim().length > 3) out.push(c) } else if (c.nodeType === 1 && !skip.test(c.tagName) && !c.classList?.contains('v6-roll') && !c.classList?.contains('v6-actor')) walk(c)
+    }
+  }
+  walk(root)
+  return out
+}
+// Replace matches inside one text node with elements. finds: [{ index, length, make(textNode's doc) }]
+function a2lSplice (node, finds) {
+  if (!finds.length) return
+  const doc = node.ownerDocument
+  const text = node.nodeValue
+  const frag = doc.createDocumentFragment()
+  let at = 0
+  for (const f of finds.sort((a, b) => a.index - b.index)) {
+    if (f.index < at) continue
+    if (f.index > at) frag.appendChild(doc.createTextNode(text.slice(at, f.index)))
+    frag.appendChild(f.make(doc, text.slice(f.index, f.index + f.length)))
+    at = f.index + f.length
+  }
+  if (at < text.length) frag.appendChild(doc.createTextNode(text.slice(at)))
+  node.parentNode.replaceChild(frag, node)
+}
+
+function a2lEnhance (root, entry, page) {
+  if (!root || !a2lOn() || !(entry?.flags?.world?.v6key || entry?.flags?.world?.alpha1Key || entry?.pack)) return
+  if (root.dataset.v6Rolls !== '1') {
+    root.dataset.v6Rolls = '1'
+    for (const node of a2lTextNodes(root)) {
+      a2lSplice(node, a2lFindTests(node.nodeValue).map((t) => ({
+        index: t.index,
+        length: t.length,
+        make: (doc, shown) => {
+          const a = doc.createElement('a')
+          a.className = 'v6-roll'
+          a.dataset.v6Test = JSON.stringify(t.test)
+          a.dataset.v6Label = t.label
+          a.title = `Roll ${t.label} for your character. Shift-click: ask the players for it.`
+          a.innerHTML = '<i class="fa-solid fa-dice-d10"></i>'
+          a.appendChild(doc.createTextNode(shown))
+          return a
+        }
+      })))
+    }
+  }
+  if (root.dataset.v6Names === '1') return
+  const link = (index) => {
+    if (root.dataset.v6Names === '1' || !root.isConnected) return
+    const book = index.books.get(index.byEntry.get(entry.id))
+    if (!book?.regex) return
+    root.dataset.v6Names = '1'
+    const seen = new Set()
+    let made = 0
+    for (const node of a2lTextNodes(root)) {
+      if (made >= 60) break
+      const finds = []
+      book.regex.lastIndex = 0
+      let m
+      while ((m = book.regex.exec(node.nodeValue))) {
+        const name = m[1]
+        if (seen.has(name)) continue // first mention on the page only
+        seen.add(name)
+        const ref = book.names.get(name)
+        finds.push({ index: m.index, length: m[0].length, make: (doc, shown) => { const a = doc.createElement('a'); a.className = 'v6-actor content-link'; a.dataset.v6Actor = name; a.dataset.v6Ref = JSON.stringify(ref); a.title = `Open ${name}'s sheet`; a.innerHTML = '<i class="fa-solid fa-user"></i>'; a.appendChild(doc.createTextNode(shown)); return a } })
+        made++
+      }
+      a2lSplice(node, finds)
+    }
+  }
+  if (a2lState.index) link(a2lState.index)
+  else a2lLoadIndex().then(link).catch(() => {})
+}
+
+// Who rolls when a chip is clicked: the selected token, your character, or your only character.
+function a2lMyActor () {
+  const tok = globalThis.canvas?.tokens?.controlled?.[0]?.actor
+  if (tok?.isOwner) return tok
+  if (game.user.character) return game.user.character
+  if (game.user.isGM) return null
+  const mine = game.actors.filter((a) => a.type === 'vampire' && a.isOwner)
+  return mine.length === 1 ? mine[0] : null
+}
+async function a2lRollTest (test, { actor = null, label = '', request = null } = {}) {
+  actor ??= a2lMyActor()
+  if (!actor) { ui.notifications.warn(game.user.isGM ? 'Select the token that rolls first. Shift-click asks the players instead.' : 'Select your token first, or have the Storyteller assign your character.'); return null }
+  if (request) a2lState.pendingReq.set(actor.uuid, { id: request, at: Date.now() })
+  const t = { attributes: test.attributes ?? [], skills: test.skills ?? [], disciplines: test.disciplines ?? [] }
+  if (test.difficulty !== undefined && test.difficulty !== null) t.difficulty = a2Int(test.difficulty)
+  return a2eOpenRoll(actor, t)
+}
+async function a2lOpenActor (name, ref) {
+  let actor = game.actors.getName(name)
+  if (!actor && ref?.pack) {
+    if (!game.user.isGM) { ui.notifications.info(`${name} isn't in the world yet. Ask the Storyteller to open it once.`); return null }
+    const adv = await game.packs.get(ref.pack)?.getDocument(ref.adventure)
+    const src = adv?.actors?.get(ref.id)
+    if (!src) { ui.notifications.warn(`${name} was not found in the book compendium.`); return null }
+    const data = src.toObject()
+    let folder = game.folders.find((f) => f.type === 'Actor' && f.name === 'Imported NPCs (V6)')
+    folder ??= await Folder.create({ name: 'Imported NPCs (V6)', type: 'Actor' })
+    data.folder = folder.id
+    actor = await Actor.create(data, { keepId: !game.actors.get(data._id) })
+    ui.notifications.info(`${name} was imported from the book compendium.`)
+  }
+  actor?.sheet?.render(true)
+  return actor ?? null
+}
+
+function a2lOnClick (ev) {
+  const roll = ev.target?.closest?.('a.v6-roll')
+  const who = roll ? null : ev.target?.closest?.('a.v6-actor')
+  if (!roll && !who) return
+  ev.preventDefault()
+  ev.stopPropagation()
+  try {
+    if (who) { a2lOpenActor(who.dataset.v6Actor, JSON.parse(who.dataset.v6Ref || 'null')); return }
+    const test = JSON.parse(roll.dataset.v6Test)
+    if (ev.shiftKey && game.user.isGM) a2lRequestDialog({ test, label: roll.dataset.v6Label })
+    else a2lRollTest(test, { label: roll.dataset.v6Label })
+  } catch (e) { console.error('V6 Automation | journal link', e) }
+}
+
+// ---- roll requests ----
+function a2lTestLabel (test) {
+  const name = (cfg, k) => (typeof a2TraitLabel === 'function' ? a2TraitLabel(cfg, k) : k)
+  const parts = [...(test.attributes ?? []).map((k) => name('Attributes', k)), ...(test.skills ?? []).map((k) => name('Skills', k)), ...(test.disciplines ?? []).map((k) => name('Disciplines', k))]
+  return parts.join(' + ') + (test.difficulty ? `, Difficulty ${test.difficulty}` : '')
+}
+function a2lCandidates () {
+  const out = new Map()
+  for (const a of game.actors) if (a.type === 'vampire' && a.hasPlayerOwner) out.set(a.uuid, { actor: a, on: true })
+  for (const t of globalThis.canvas?.tokens?.controlled ?? []) if (t.actor) out.set(t.actor.uuid, { actor: t.actor, on: true })
+  return [...out.values()]
+}
+async function a2lRequestDialog ({ test = null, label = '' } = {}) {
+  if (!game.user.isGM) { ui.notifications.warn('Only the Storyteller asks for rolls.'); return null }
+  const cands = a2lCandidates()
+  if (!cands.length) { ui.notifications.warn('No player characters yet, and no token selected, to ask for a roll.'); return null }
+  const opt = (list, cur, cfg, none) => (none ? `<option value="">${none}</option>` : '') + list.map((k) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${a2Esc(typeof a2TraitLabel === 'function' ? a2TraitLabel(cfg, k) : k)}</option>`).join('')
+  const second = test ? (test.skills?.[0] ? `s:${test.skills[0]}` : test.disciplines?.[0] ? `d:${test.disciplines[0]}` : test.attributes?.[1] ? `a:${test.attributes[1]}` : '') : 's:awareness'
+  const secondOpts = `<option value="">nothing</option><optgroup label="Skills">${A2L_SKILLS.map((k) => `<option value="s:${k}" ${second === `s:${k}` ? 'selected' : ''}>${a2Esc(a2TraitLabel('Skills', k))}</option>`).join('')}</optgroup><optgroup label="Attributes">${A2L_ATTRS.map((k) => `<option value="a:${k}" ${second === `a:${k}` ? 'selected' : ''}>${a2Esc(a2TraitLabel('Attributes', k))}</option>`).join('')}</optgroup><optgroup label="Disciplines">${Object.values(A2L_DISCS).map((k) => `<option value="d:${k}" ${second === `d:${k}` ? 'selected' : ''}>${a2Esc(a2TraitLabel('Disciplines', k))}</option>`).join('')}</optgroup>`
+  const content = `<div class="a2l-dialog">
+    <div class="form-group"><label>What for</label><input type="text" name="label" value="${a2Esc(label && !/\+/.test(label) ? label : '')}" placeholder="Notice the tail, hold your nerve…"></div>
+    <div class="form-group"><label>Pool</label><select name="attr">${opt(A2L_ATTRS, test?.attributes?.[0] ?? 'wits', 'Attributes')}</select><span>+</span><select name="second">${secondOpts}</select></div>
+    <div class="form-group"><label>Difficulty</label><input type="number" name="difficulty" value="${a2Int(test?.difficulty ?? 2)}" min="0" max="12" step="1"></div>
+    <fieldset><legend>Who rolls</legend>${cands.map((c, i) => `<label class="checkbox"><input type="checkbox" name="who${i}" ${c.on ? 'checked' : ''}> ${a2Esc(c.actor.name)}</label>`).join('')}</fieldset>
+    <label class="checkbox"><input type="checkbox" name="secret"> Only they and the Storyteller see the request</label>
+    <label class="checkbox"><input type="checkbox" name="hideDiff"> Don't show the Difficulty</label>
+  </div>`
+  const r = await foundry.applications.api.DialogV2.prompt({
+    window: { title: 'Ask for a roll' },
+    content,
+    ok: { label: 'Ask', icon: 'fa-solid fa-bullhorn', callback: (ev, button) => {
+      const f = button.form
+      const sec = f.elements.second.value
+      const t = { attributes: [f.elements.attr.value], skills: [], disciplines: [], difficulty: Math.max(0, a2Int(f.elements.difficulty.value)) }
+      if (sec.startsWith('s:')) t.skills.push(sec.slice(2)); else if (sec.startsWith('d:')) t.disciplines.push(sec.slice(2)); else if (sec.startsWith('a:')) t.attributes.push(sec.slice(2))
+      return { test: t, label: f.elements.label.value.trim(), who: cands.filter((c, i) => f.elements[`who${i}`]?.checked).map((c) => c.actor), secret: f.elements.secret.checked, hideDiff: f.elements.hideDiff.checked }
+    } },
+    rejectClose: false
+  }).catch(() => null)
+  if (!r || !r.who.length) return null
+  return a2lRequest(r)
+}
+// Post the request card. who: actors.
+async function a2lRequest ({ test, label = '', who = [], secret = false, hideDiff = false } = {}) {
+  if (!game.user.isGM || !who.length) return null
+  const targets = who.map((a) => ({ uuid: a.uuid, name: a.name }))
+  const whisper = secret ? [...new Set([...game.users.filter((u) => u.isGM).map((u) => u.id), ...who.flatMap((a) => game.users.filter((u) => !u.isGM && a.testUserPermission(u, 'OWNER')).map((u) => u.id))])] : []
+  const shown = { ...test }
+  const title = label || 'A test'
+  return ChatMessage.create({
+    content: `<div class="a2l-request"><h4>${a2Esc(title)}</h4><p>${a2Esc(a2lTestLabel(hideDiff ? { ...shown, difficulty: 0 } : shown))}${hideDiff ? ', against a hidden Difficulty' : ''}</p></div>`,
+    speaker: { alias: 'Storyteller' },
+    whisper,
+    flags: { world: { a2req: { v: 1, test, label: title, hideDiff, targets, results: {} } } }
+  })
+}
+function a2lRenderChat (message, html) {
+  const req = message.flags?.world?.a2req
+  if (!req) return
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  const box = root?.querySelector('.a2l-request')
+  if (!box || box.querySelector('.a2l-rows')) return
+  const rows = document.createElement('div')
+  rows.className = 'a2l-rows'
+  for (const t of req.targets ?? []) {
+    const actor = a2FromUuid(t.uuid)
+    const res = req.results?.[a2lKey(t.uuid)]
+    const row = document.createElement('div')
+    row.className = 'a2l-row'
+    const span = document.createElement('span')
+    span.textContent = res ? `${t.name}: ${res.text}` : `${t.name}: not rolled yet`
+    row.append(span)
+    if (!res && actor?.isOwner) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.innerHTML = '<i class="fa-solid fa-dice-d10"></i> Roll'
+      b.addEventListener('click', (ev) => { ev.preventDefault(); a2lRollTest(req.hideDiff && !game.user.isGM ? { ...req.test, difficulty: undefined } : req.test, { actor, request: message.id }) })
+      row.append(b)
+    }
+    rows.append(row)
+  }
+  box.append(rows)
+}
+function a2lKey (uuid) { return String(uuid).replace(/\./g, '_') }
+// A roll made from a request: tag it (roller's client), then the GM notes the result on the card.
+async function a2lOnCreate (message, options, userId) {
+  try {
+    const roll = message.rolls?.find((r) => r?.options?.a2?.built)
+    if (!roll) return
+    const actor = a2xSpeaker(message)
+    if (userId === game.user.id && actor) {
+      const pend = a2lState.pendingReq.get(actor.uuid)
+      if (pend && Date.now() - pend.at < 180000) {
+        a2lState.pendingReq.delete(actor.uuid)
+        await message.update({ 'flags.world.a2reqOf': pend.id })
+      }
+    }
+  } catch (e) { console.error('V6 Automation | roll request', e) }
+}
+async function a2lOnUpdate (message, change) {
+  try {
+    const id = change?.flags?.world?.a2reqOf
+    if (!id || !a2xIsGM()) return
+    const card = game.messages.get(id)
+    const req = card?.flags?.world?.a2req
+    const roll = message.rolls?.find((r) => r?.options?.a2?.built)
+    const actor = a2xSpeaker(message)
+    if (!req || !roll || !actor) return
+    let v = a2RollVerdict(roll)
+    // The player rolled without the hidden Difficulty: judge it here.
+    const diff = a2Int(req.test.difficulty)
+    const successes = a2Int(v.successes ?? roll.total)
+    const win = req.hideDiff ? (diff <= 0 ? successes > 0 : successes >= diff) : v.win !== false
+    const margin = diff > 0 ? successes - diff : null
+    const text = `${successes} ${successes === 1 ? 'success' : 'successes'}: ${win ? 'win' : 'failure'}${margin !== null ? `, margin ${margin >= 0 ? '+' : ''}${margin}` : ''}${v.critical ? ', critical' : ''}${v.painful ? ', painful' : ''}${v.bestial ? ', bestial' : ''}`
+    await card.update({ [`flags.world.a2req.results.${a2lKey(actor.uuid)}`]: { text, win, successes, messageId: message.id } })
+  } catch (e) { console.error('V6 Automation | roll request', e) }
+}
+
+function a2lInjectStyles () {
+  document.getElementById('v6a-links-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-links-style'
+  style.textContent = `
+a.v6-roll { display: inline; padding: 0.05em 0.4em; border-radius: 4px; border: 1px solid color-mix(in srgb, #b3261e 55%, transparent); background: color-mix(in srgb, #b3261e 9%, transparent); color: inherit; font-weight: 600; white-space: nowrap; cursor: pointer; text-decoration: none; }
+a.v6-roll:hover { background: color-mix(in srgb, #b3261e 22%, transparent); text-shadow: none; }
+a.v6-roll i { font-size: 0.85em; opacity: 0.8; margin-right: 0.3em; }
+a.v6-actor { cursor: pointer; white-space: nowrap; }
+a.v6-actor i { font-size: 0.8em; opacity: 0.7; margin-right: 0.25em; }
+.a2l-request h4 { margin: 0 0 2px; font-weight: 700; }
+.a2l-request p { margin: 0 0 6px; }
+.a2l-rows { display: flex; flex-direction: column; gap: 4px; }
+.a2l-row { display: flex; align-items: center; gap: 8px; }
+.a2l-row span { flex: 1; }
+.a2l-row button { flex: 0 0 auto; width: auto; line-height: 1.6; padding: 0 10px; }
+.a2l-dialog .form-group span { flex: 0 0 auto; padding: 0 6px; }
+.a2l-dialog fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; margin: 6px 0; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2LinksBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.links?.booted) return true
+  a2eReg('journalLinks', { name: 'Clickable journals', hint: 'Tests written in V6 journal pages become roll buttons, and character names become links to their sheets.', scope: 'client', config: true, type: Boolean, default: true, requiresReload: true })
+  a2lInjectStyles()
+  if (!a2lState.hooked) {
+    a2lState.hooked = true
+    document.addEventListener('click', a2lOnClick, true)
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { a2lRenderChat(message, html) } catch (e) { console.error('V6 Automation | request card', e) } })
+    Hooks.on('createChatMessage', a2lOnCreate)
+    Hooks.on('updateChatMessage', a2lOnUpdate)
+    Hooks.on('getSceneControlButtons', (controls) => {
+      const tools = controls?.tokens?.tools
+      if (!tools || !game.user?.isGM || !a2Enabled()) return
+      tools['v6a2-request'] = { name: 'v6a2-request', title: 'Ask for a roll', icon: 'fa-solid fa-bullhorn', order: 104, button: true, onChange: () => a2lRequestDialog() }
+    })
+    try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
+  }
+  api.links = { booted: true, rollTest: a2lRollTest, openActor: a2lOpenActor, rules: { findTests: a2lFindTests, linkable: a2lLinkable } }
+  api.request = Object.assign((opts) => (opts?.test ? a2lRequest(opts) : a2lRequestDialog(opts ?? {})), { dialog: a2lRequestDialog, post: a2lRequest })
+  console.log('V6 Automation | journal links and roll requests loaded')
+  return true
+}
+globalThis.a2LinksBoot ??= a2LinksBoot
+
+// ---- combat flow (PG p.110, p.115) ----------------------------------------------------
+// Turn order: highest Wits first. A Storyteller character with no Wits of its own (the
+// simple "npc" sheet) uses half its Physical pool, rounded up. Storyteller characters act
+// after player characters on a tie. Nobody rolls: the tracker fills in the number when a
+// combatant joins, and "Roll initiative" sets the same number again.
+// Turn start: a card for whoever's turn it is, whispered to its owners and the
+// Storyteller: movement + 1 action + 1 minor action, reactions refreshed to Wits, and
+// what is weighing on the character (impairment, frenzy, low Health). The card counts
+// reactions: "Use a reaction" ticks one off until the next turn.
+//
+// Settings (world): initiative (on), turnCards (on).
+
+// Initiative number. Pure. Storyteller characters sit a hair below so ties go to players.
+function a2kInitiative ({ wits = null, physical = null, player = false } = {}) {
+  const base = wits !== null && wits !== undefined ? Math.max(0, a2Int(wits)) : Math.ceil(Math.max(0, a2Int(physical)) / 2)
+  return player ? base : Math.max(0, base - 0.01)
+}
+// Reactions between turns = Wits (PG p.110); the simple npc sheet uses the same stand-in. Pure.
+function a2kReactions ({ wits = null, physical = null } = {}) {
+  return wits !== null && wits !== undefined ? Math.max(0, a2Int(wits)) : Math.ceil(Math.max(0, a2Int(physical)) / 2)
+}
+// The reminder lines for a turn. Pure.
+function a2kTurnLines ({ reactions = 0, health = null, impaired = [], frenzy = null, torpor = false, surprised = false } = {}) {
+  const lines = ['Movement within Short, 1 action and 1 minor action. Give up the action to move within Medium (PG p.109, p.115).']
+  lines.push(`Reactions until your next turn: ${reactions} (PG p.110). Defending costs none (PG p.120).`)
+  if (surprised) lines.push('Surprised: −2 on every test, and no reactions before this turn (PG p.115).')
+  if (frenzy) lines.push(`In a ${frenzy} frenzy: it sets what you can do this turn (PG p.144).`)
+  if (impaired.length) lines.push(`Impaired: ${impaired.join(', ')}.`)
+  if (health && health.max > 0 && health.value <= 0) lines.push('At 0 Health.')
+  else if (health && health.max > 0 && health.value * 2 <= health.max) lines.push(`Health ${health.value} of ${health.max}.`)
+  if (torpor) lines.push('In torpor: no turn.')
+  return lines
+}
+
+const a2kState = { hooked: false, patched: false }
+function a2kOn (key) { return a2Enabled() && a2eGet(key, true) !== false }
+function a2kStats (actor) {
+  if (!actor) return { wits: 0, physical: null }
+  if (actor.type === 'npc') {
+    const levels = typeof a2NpcLevels === 'function' ? a2NpcLevels(actor) : []
+    const phys = levels.find((l) => l.key === 'physical') ?? levels.sort((a, b) => b.value - a.value)[0]
+    return { wits: null, physical: a2Int(phys?.value) }
+  }
+  const w = actor.system?.attributes?.wits
+  return { wits: a2Int(w?.effective ?? w?.value), physical: null }
+}
+function a2kInitFor (actor) {
+  return a2kInitiative({ ...a2kStats(actor), player: Boolean(actor?.hasPlayerOwner) })
+}
+function a2kPatch () {
+  if (a2kState.patched) return
+  const proto = CONFIG.Combat?.documentClass?.prototype
+  if (!proto?.rollInitiative) return
+  a2kState.patched = true
+  const orig = proto.rollInitiative
+  proto.rollInitiative = async function (ids, options = {}) {
+    if (!a2kOn('initiative')) return orig.call(this, ids, options)
+    const list = (typeof ids === 'string' ? [ids] : [...(ids ?? [])]).map((id) => this.combatants.get(id)).filter((c) => c?.isOwner)
+    const updates = list.map((c) => ({ _id: c.id, initiative: a2kInitFor(c.actor) }))
+    if (updates.length) await this.updateEmbeddedDocuments('Combatant', updates)
+    return this
+  }
+}
+
+async function a2kTurnCard (combat) {
+  const c = combat?.combatant
+  const actor = c?.actor
+  if (!actor || c.defeated) return
+  const st = a2kStats(actor)
+  const reactions = a2kReactions(st)
+  let health = null
+  let impaired = []
+  let frenzy = null
+  let torpor = false
+  try {
+    if (a2Rules(actor) || actor.type === 'npc') health = a2ActorHealth(actor)
+    const f = actor.flags?.world?.a2 ?? {}
+    frenzy = f.frenzy?.type ?? null
+    torpor = Boolean(f.torpor)
+    if (typeof a2xImpairment === 'function' && actor.type === 'vampire') impaired = [...a2xImpairment(actor).all].map((k) => a2Cap(String(k)))
+  } catch (e) { /* the reminder still goes out */ }
+  const lines = a2kTurnLines({ reactions, health, impaired, frenzy, torpor })
+  const owners = game.users.filter((u) => u.isGM || actor.testUserPermission(u, 'OWNER')).map((u) => u.id)
+  const hidden = c.hidden || c.token?.hidden
+  await ChatMessage.create({
+    content: `<div class="a2k-turn"><h4>${a2Esc(c.name ?? actor.name)}: your turn</h4><ul>${lines.map((l) => `<li>${a2Esc(l)}</li>`).join('')}</ul></div>`,
+    speaker: { alias: `Round ${combat.round}` },
+    whisper: hidden ? game.users.filter((u) => u.isGM).map((u) => u.id) : owners,
+    flags: { world: { a2turn: { v: 1, combatId: combat.id, combatantId: c.id, round: combat.round, reactions } } }
+  })
+}
+function a2kRenderChat (message, html) {
+  const t = message.flags?.world?.a2turn
+  if (!t) return
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  const box = root?.querySelector('.a2k-turn')
+  if (!box || box.querySelector('.a2k-react')) return
+  const combat = game.combats?.get(t.combatId)
+  const c = combat?.combatants?.get(t.combatantId)
+  const row = document.createElement('div')
+  row.className = 'a2k-react'
+  // live while it is this combatant's newest turn card
+  const newest = game.messages.contents.findLast((m) => m.flags?.world?.a2turn?.combatantId === t.combatantId && m.flags.world.a2turn.combatId === t.combatId)
+  const live = Boolean(c) && newest?.id === message.id
+  const used = live ? Math.min(a2Int(c.flags?.world?.a2k?.card === message.id ? c.flags.world.a2k.used : 0), t.reactions) : null
+  const pips = used === null ? '' : '●'.repeat(Math.max(0, t.reactions - used)) + '○'.repeat(used)
+  row.innerHTML = used === null ? '<span>This turn is over.</span>' : `<span title="Reactions left until your next turn">Reactions ${pips || '–'}</span>`
+  if (used !== null && c?.isOwner) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.textContent = 'Use a reaction'
+    b.disabled = used >= t.reactions
+    b.addEventListener('click', async (ev) => { ev.preventDefault(); await c.update({ 'flags.world.a2k': { card: message.id, used: used + 1 } }) })
+    row.append(b)
+    if (used > 0) {
+      const u = document.createElement('a')
+      u.textContent = 'undo'
+      u.addEventListener('click', async (ev) => { ev.preventDefault(); await c.update({ 'flags.world.a2k': { card: message.id, used: used - 1 } }) })
+      row.append(u)
+    }
+  }
+  box.append(row)
+}
+
+function a2kHooks () {
+  if (a2kState.hooked) return
+  a2kState.hooked = true
+  Hooks.on('preCreateCombatant', (combatant, data) => {
+    try {
+      if (!a2kOn('initiative') || (data?.initiative !== undefined && data.initiative !== null)) return
+      const actor = combatant.actor
+      if (actor) combatant.updateSource({ initiative: a2kInitFor(actor) })
+    } catch (e) { console.error('V6 Automation | initiative', e) }
+  })
+  Hooks.on('updateCombat', (combat, changes) => {
+    try {
+      if (!a2kOn('turnCards') || !a2xIsGM() || !combat?.started) return
+      if (!('turn' in (changes ?? {})) && !('round' in (changes ?? {}))) return
+      a2kTurnCard(combat).catch((e) => console.error('V6 Automation | turn card', e))
+    } catch (e) { console.error('V6 Automation | turn card', e) }
+  })
+  Hooks.on('createChatMessage', (m) => {
+    const t = m.flags?.world?.a2turn
+    if (!t) return
+    const prev = game.messages.contents.filter((x) => x.id !== m.id && x.flags?.world?.a2turn?.combatantId === t.combatantId).pop()
+    if (prev) ui.chat?.updateMessage?.(prev)
+  })
+  Hooks.on('renderChatMessageHTML', (message, html) => { try { a2kRenderChat(message, html) } catch (e) { console.error('V6 Automation | turn card', e) } })
+  // a reaction ticked off: redraw that card for everyone who sees it
+  Hooks.on('updateCombatant', (c, changes) => {
+    const id = changes?.flags?.world?.a2k?.card
+    const m = id ? game.messages.get(id) : null
+    if (m) ui.chat?.updateMessage?.(m)
+  })
+}
+
+function a2kInjectStyles () {
+  document.getElementById('v6a-combat-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-combat-style'
+  style.textContent = `
+.a2k-turn h4 { margin: 0 0 2px; font-weight: 700; }
+.a2k-turn ul { margin: 2px 0 6px; padding-left: 18px; font-size: 12px; }
+.a2k-react { display: flex; align-items: center; gap: 8px; }
+.a2k-react span { flex: 1; letter-spacing: 1px; }
+.a2k-react button { flex: 0 0 auto; width: auto; line-height: 1.6; padding: 0 10px; }
+.a2k-react a { font-size: 12px; cursor: pointer; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2CombatBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.combat?.booted) return true
+  a2eReg('initiative', { name: 'Turn order by Wits', hint: 'Combatants get their place in the turn order without a roll: Wits, or half the Physical pool for simple NPC sheets; players win ties (PG p.115).', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('turnCards', { name: 'Turn reminders', hint: 'At the start of each turn, whisper a card to that character\'s players: movement, action, minor action, reactions, and what weighs on the character.', scope: 'world', config: true, type: Boolean, default: true })
+  a2kInjectStyles()
+  a2kPatch()
+  a2kHooks()
+  try { if (a2kOn('initiative') && CONFIG.Combat?.initiative) CONFIG.Combat.initiative.decimals = 0 } catch (e) { /* display only */ }
+  api.combat = { booted: true, initiativeFor: a2kInitFor, rules: { initiative: a2kInitiative, reactions: a2kReactions, turnLines: a2kTurnLines } }
+  console.log('V6 Automation | combat flow loaded')
+  return true
+}
+globalThis.a2CombatBoot ??= a2CombatBoot
+
+// ---- character creation (PG p.22-63) ---------------------------------------------------
+// One window that walks through the Player Guide's steps and counts the dots:
+//  1 What are you: vampire, Duskborn or ghoul; generation (it sets the tier, the
+//    generation modifier, Vitae, the dot budget and the number of flaws); ages; sire.
+//  2 Clan.  3 Lifepaths (5 Skill and 3 Resource dots each).  4 Attributes.  5 Skills
+//  and specialties.  6 Disciplines and powers.  7 Clan traits, merits, flaws.
+//  8 Resources.  9 Review: every rule is a line that is met or not; the Storyteller may
+//  apply anyway.
+// "Create" writes it all to the sheet: dots, items from the world's V6 library (or the
+// V6 Rules compendium), Humanity 6, full Health, Vitae and Willpower.
+// Open it from the sheet (wand in the XP line), or V6Alpha2.create(actor).
+// House rules, marked in the window: ghouls use the Duskborn row without clan traits
+// (the PG prints no ghoul row); Methuselahs use the elder row.
+
+const A2C_ATTR_CATS = { physical: ['strength', 'dexterity', 'stamina'], social: ['charisma', 'manipulation', 'composure'], mental: ['intelligence', 'wits', 'resolve'] }
+const A2C_SKILLS = ['athletics', 'awareness', 'craft', 'expression', 'fighting', 'investigation', 'knowledge', 'medicine', 'persuasion', 'sabotage', 'shooting', 'subterfuge', 'survival']
+const A2C_DISCS = ['animalism', 'auspex', 'bloodSorcery', 'celerity', 'corruption', 'dominate', 'fortitude', 'necromancy', 'obfuscate', 'oblivion', 'potence', 'presence', 'tellurgy', 'vicissitude']
+const A2C_TIER_ORDER = ['mortal', 'ghoul', 'duskborn', 'neonate', 'ancilla', 'elder', 'methuselah']
+// PG p.22 and p.36 (Dot Distribution), p.44 (starting Discipline limit), p.36 (starting Skill limit).
+const A2C_BUDGET = {
+  ghoul: { label: 'Ghoul', house: 'The Player Guide prints no ghoul row: this uses the Duskborn row, mortal lifepaths, no clan traits.', lifepaths: 2, attrs: [6, 4, 3], disc: 2, sire: 1, extra: 0, powers: 3, merits: 1, traits: 0, skills: 8, resources: 2, startDisc: 2, startSkill: 3, maxDots: 5, paths: ['mortal'] },
+  duskborn: { label: 'Duskborn', lifepaths: 2, attrs: [6, 4, 3], disc: 2, sire: 1, extra: 0, powers: 3, merits: 1, traits: 1, skills: 8, resources: 2, startDisc: 2, startSkill: 3, maxDots: 5, paths: ['mortal', 'neonate'] },
+  neonate: { label: 'Neonate', lifepaths: 2, attrs: [7, 5, 3], disc: 3, sire: 1, extra: 0, powers: 4, merits: 1, traits: 2, skills: 8, resources: 3, startDisc: 3, startSkill: 3, maxDots: 5, paths: ['mortal', 'neonate'] },
+  ancilla: { label: 'Ancilla', lifepaths: 3, attrs: [8, 6, 4], disc: 5, sire: 1, extra: 1, powers: 7, merits: 2, traits: 3, skills: 8, resources: 5, startDisc: 4, startSkill: 4, maxDots: 7, paths: ['mortal', 'neonate', 'ancilla'] },
+  elder: { label: 'Elder', lifepaths: 4, attrs: [9, 7, 5], disc: 7, sire: 1, extra: 2, powers: 10, merits: 3, traits: 4, skills: 8, resources: 7, startDisc: 6, startSkill: 5, maxDots: 8, paths: ['mortal', 'neonate', 'ancilla'] },
+  methuselah: { label: 'Methuselah', house: 'The Player Guide has no Methuselah row: this uses the elder row.', lifepaths: 4, attrs: [9, 7, 5], disc: 7, sire: 1, extra: 2, powers: 10, merits: 3, traits: 4, skills: 8, resources: 7, startDisc: 6, startSkill: 5, maxDots: 10, paths: ['mortal', 'neonate', 'ancilla'] }
+}
+// PG p.26 (Feral: the table says Potence, the text Fortitude; both offered).
+const A2C_SIRES = {
+  'Brood Child': null,
+  Caring: ['fortitude', 'potence', 'presence'],
+  Cruel: ['dominate', 'fortitude', 'obfuscate'],
+  Distant: ['celerity', 'fortitude', 'obfuscate'],
+  Feral: ['animalism', 'celerity', 'potence', 'fortitude'],
+  Manipulative: ['dominate', 'potence', 'presence'],
+  Secretive: ['auspex', 'celerity', 'obfuscate'],
+  Uncaring: ['auspex', 'fortitude', 'potence'],
+  Unknown: ['celerity', 'fortitude', 'potence'],
+  Vigilant: ['auspex', 'dominate', 'fortitude']
+}
+
+// ---- pure rules ----
+function a2cTierKey (creature, generation) {
+  if (creature === 'ghoul') return 'ghoul'
+  const g = a2Int(generation, 13)
+  if (creature === 'duskborn' || g >= 14) return 'duskborn'
+  if (g >= 11) return 'neonate'
+  if (g >= 9) return 'ancilla'
+  if (g >= 6) return 'elder'
+  return 'methuselah'
+}
+// Everything the generation decides. Pure.
+function a2cFrame (creature, generation) {
+  const key = a2cTierKey(creature, generation)
+  const gen = creature === 'ghoul' ? null : a2Clamp(a2Int(generation, 13), 4, 16)
+  const genMod = creature === 'ghoul' ? 0 : a2GenModifier(gen)
+  return { key, generation: gen, genMod, budget: A2C_BUDGET[key], vitae: creature === 'ghoul' ? 5 : 5 + 5 * genMod, flaws: Math.max(1, genMod) }
+}
+function a2cTierAllows (need, have) {
+  if (!need) return true
+  return A2C_TIER_ORDER.indexOf(have) >= A2C_TIER_ORDER.indexOf(need)
+}
+// How many specialties a Skill's dots give (PG p.39: at 1, 3 and 5 dots). Pure.
+function a2cSpecialties (dots) { const d = a2Int(dots); return d >= 5 ? 3 : d >= 3 ? 2 : d >= 1 ? 1 : 0 }
+// Final dots from a state. Pure.
+// state: { creature, generation, clanDiscs:[keys], attrs:{k:total}, lifepaths:[{name, skills:{k:dots}, resources:[dots]}],
+//          skills:{k:free dots}, disc:{k:clan dots}, sireDisc, extraDiscs:[k], powers:[{disc, level}], traits, merits, flaws, resourcesExtra }
+function a2cTotals (state) {
+  const skills = Object.fromEntries(A2C_SKILLS.map((k) => [k, a2Int(state.skills?.[k])]))
+  for (const lp of state.lifepaths ?? []) for (const [k, v] of Object.entries(lp.skills ?? {})) if (k in skills) skills[k] += a2Int(v)
+  const disc = Object.fromEntries(A2C_DISCS.map((k) => [k, a2Int(state.disc?.[k])]))
+  if (state.sireDisc && state.sireDisc in disc) disc[state.sireDisc] += 1
+  for (const k of state.extraDiscs ?? []) if (k && k in disc) disc[k] += 1
+  return { skills, disc }
+}
+// The checklist. Pure. → [{ ok, text, step }]
+function a2cCheck (state) {
+  const f = a2cFrame(state.creature, state.generation)
+  const b = f.budget
+  const out = []
+  const add = (step, ok, text) => out.push({ step, ok: Boolean(ok), text })
+  const t = a2cTotals(state)
+  add(2, state.creature === 'ghoul' || Boolean(state.clan), state.creature === 'ghoul' ? 'Ghouls have no clan of their own' : `Clan: ${state.clan || 'not chosen'}`)
+  // lifepaths
+  const lps = (state.lifepaths ?? []).filter((l) => l.name)
+  add(3, lps.length === b.lifepaths, `Lifepaths: ${lps.length} of ${b.lifepaths}`)
+  for (const lp of lps) {
+    const s = Object.values(lp.skills ?? {}).reduce((x, y) => x + a2Int(y), 0)
+    const r = (lp.resources ?? []).reduce((x, y) => x + a2Int(y), 0)
+    add(3, s === 5 && r === 3, `${lp.name}: ${s} of 5 Skill dots, ${r} of 3 Resource dots`)
+  }
+  if (new Set(lps.map((l) => l.name)).size !== lps.length) add(3, false, 'The same lifepath is chosen twice')
+  // attributes
+  const sums = Object.values(A2C_ATTR_CATS).map((keys) => keys.reduce((x, k) => x + Math.max(0, a2Int(state.attrs?.[k], 1) - 1), 0)).sort((x, y) => y - x)
+  add(4, sums.every((v, i) => v === b.attrs[i]), `Attributes: ${sums.join(' / ')} added, should be ${b.attrs.join(' / ')} (each starts at 1)`)
+  const overAttr = Object.entries(state.attrs ?? {}).filter(([, v]) => a2Int(v) > b.maxDots).map(([k]) => k)
+  if (overAttr.length) add(4, false, `Above the maximum of ${b.maxDots}: ${overAttr.join(', ')}`)
+  // skills
+  const free = A2C_SKILLS.reduce((x, k) => x + a2Int(state.skills?.[k]), 0)
+  add(5, free === b.skills, `Skills: ${free} of ${b.skills} free dots (lifepath dots come on top)`)
+  const overSkill = A2C_SKILLS.filter((k) => t.skills[k] > b.startSkill)
+  add(5, !overSkill.length, overSkill.length ? `Above the starting limit of ${b.startSkill}: ${overSkill.join(', ')}` : `No Skill above the starting limit of ${b.startSkill}`)
+  const spec = A2C_SKILLS.filter((k) => (state.specialties?.[k] ?? []).length > a2cSpecialties(t.skills[k]))
+  if (spec.length) add(5, false, `More specialties than the dots give (1 at 1, 3 and 5 dots): ${spec.join(', ')}`)
+  // disciplines
+  const clanDiscs = state.clanDiscs ?? []
+  const clanDots = A2C_DISCS.reduce((x, k) => x + a2Int(state.disc?.[k]), 0)
+  add(6, clanDots === b.disc, `Disciplines: ${clanDots} of ${b.disc} dots in ${state.creature === 'ghoul' ? "your master's" : 'clan'} Disciplines`)
+  const stray = A2C_DISCS.filter((k) => a2Int(state.disc?.[k]) > 0 && clanDiscs.length && !clanDiscs.includes(k))
+  if (stray.length) add(6, false, `Not a clan Discipline: ${stray.join(', ')}`)
+  add(6, Boolean(state.sireDisc), `${state.creature === 'ghoul' ? 'Master' : 'Sire'} dot: ${state.sireDisc || 'not chosen'}`)
+  if (b.extra) {
+    const ex = (state.extraDiscs ?? []).filter(Boolean)
+    add(6, ex.length === b.extra && ex.every((k) => !clanDiscs.includes(k)), `Out-of-clan dots: ${ex.length} of ${b.extra}${ex.some((k) => clanDiscs.includes(k)) ? ' (one is a clan Discipline)' : ''}`)
+  }
+  const overDisc = A2C_DISCS.filter((k) => t.disc[k] > b.startDisc)
+  add(6, !overDisc.length, overDisc.length ? `Above the starting limit of ${b.startDisc}: ${overDisc.join(', ')}` : `No Discipline above the starting limit of ${b.startDisc}`)
+  const powers = state.powers ?? []
+  add(6, powers.length === b.powers, `Powers: ${powers.length} of ${b.powers}`)
+  const bad = powers.filter((p) => a2Int(p.level) > a2Int(t.disc[p.disc]))
+  if (bad.length) add(6, false, `Power rank above your dots: ${bad.map((p) => p.name).join(', ')}`)
+  // traits, merits, flaws
+  if (b.traits || (state.traits ?? []).length) add(7, (state.traits ?? []).length === b.traits, `Clan traits: ${(state.traits ?? []).length} of ${b.traits}`)
+  add(7, (state.merits ?? []).length === b.merits, `Merits: ${(state.merits ?? []).length} of ${b.merits}`)
+  add(7, (state.flaws ?? []).length >= f.flaws, `Flaws: ${(state.flaws ?? []).length}, at least ${f.flaws}`)
+  for (const u of state.unmet ?? []) add(7, false, u)
+  // resources
+  const rx = (state.resourcesExtra ?? []).reduce((x, r) => x + a2Int(r.dots), 0)
+  add(8, rx === b.resources, `Resources: ${rx} of ${b.resources} extra dots (lifepath dots come on top)`)
+  return out
+}
+// Does an item's prerequisite block hold? Pure. → '' or the reason.
+function a2cPrereq (item, { tier, disc }) {
+  const p = item?.system?.prerequisites ?? {}
+  if (p.generationTier && !a2cTierAllows(p.generationTier, tier)) return `${item.name} needs ${p.generationTier} or stronger`
+  for (const req of p.disciplineRequirements ?? []) {
+    const opts = req?.options ?? []
+    if (opts.length && !opts.some((o) => a2Int(disc?.[o.discipline]) >= a2Int(o.dots))) return `${item.name} needs ${opts.map((o) => `${o.discipline} ${o.dots}`).join(' or ')}`
+  }
+  return ''
+}
+
+// ---- library ----
+const a2cState = { lib: null, hooked: false }
+async function a2cLibrary () {
+  if (a2cState.lib) return a2cState.lib
+  const lib = { clan: new Map(), lifepath: new Map(), merit: new Map(), flaw: new Map(), clanTrait: new Map(), discipline: new Map(), nature: new Map() }
+  const add = (i) => { const m = lib[i.type]; if (m && !m.has(i.name)) m.set(i.name, i) }
+  for (const i of game.items ?? []) add(i)
+  if (!lib.clan.size || !lib.lifepath.size || !lib.discipline.size) {
+    for (const pack of game.packs ?? []) {
+      if (pack.documentName !== 'Adventure' || !/v6/i.test(`${pack.collection} ${pack.title ?? ''}`)) continue
+      try { for (const adv of await pack.getDocuments()) for (const i of adv.items ?? []) add(i) } catch (e) { /* skip the pack */ }
+    }
+  }
+  if (lib.clan.size) a2cState.lib = lib
+  return lib
+}
+
+// ---- the window ----
+function a2cLabel (cfg, k) { return typeof a2TraitLabel === 'function' ? a2TraitLabel(cfg, k) : k }
+function a2cNum (name, value, min, max, extra = '') { return `<input type="number" name="${name}" value="${value}" min="${min}" max="${max}" step="1" class="a2c-num" ${extra}>` }
+function a2cItemList (kind, items, attrs = () => '') {
+  return `<input type="search" class="a2c-filter" data-list="${kind}" placeholder="Filter…"><div class="a2c-list" data-kind="${kind}">${items.map((i) => `<label class="a2c-item" ${attrs(i)} data-name="${a2Esc(i.name.toLowerCase())}" title="${a2Esc(String(i.system?.description ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 420))}"><input type="checkbox" name="${kind}" value="${a2Esc(i.name)}"> ${a2Esc(i.name)} <small>${a2Esc(i.flags?.world?.a2?.clan ?? i.system?.source?.book ?? '')}</small></label>`).join('')}</div>`
+}
+function a2cContent (actor, lib) {
+  const byName = (m) => [...m.values()].sort((a, b) => a.name.localeCompare(b.name))
+  const gen = a2Clamp(a2Int(actor.system?.vampire?.generation?.value, 13), 4, 16)
+  const steps = ['What are you', 'Clan', 'Lifepaths', 'Attributes', 'Skills', 'Disciplines', 'Traits, merits, flaws', 'Resources', 'Review']
+  const discOpts = (list) => `<option value="">choose…</option>${list.map((k) => `<option value="${k}">${a2Esc(a2cLabel('Disciplines', k))}</option>`).join('')}`
+  const attrs = Object.entries(A2C_ATTR_CATS).map(([cat, keys]) => `<fieldset><legend>${cat[0].toUpperCase()}${cat.slice(1)} <span data-a2c="cat-${cat}"></span></legend>${keys.map((k) => `<label class="a2c-row">${a2Esc(a2cLabel('Attributes', k))} ${a2cNum(`attr.${k}`, 1, 1, 10)}</label>`).join('')}</fieldset>`).join('')
+  const skills = A2C_SKILLS.map((k) => `<tr><td>${a2Esc(a2cLabel('Skills', k))}</td><td class="c" data-a2c="lp-${k}">0</td><td class="c">${a2cNum(`skill.${k}`, 0, 0, 10)}</td><td class="c" data-a2c="tot-${k}">0</td><td><input type="text" name="spec.${k}" placeholder="specialties, comma-separated"></td></tr>`).join('')
+  const powers = byName(lib.discipline).sort((a, b) => String(a.system.disciplineType).localeCompare(String(b.system.disciplineType)) || a2Int(a.system.level) - a2Int(b.system.level) || a.name.localeCompare(b.name))
+  return `<div class="a2c">
+  <nav class="a2c-nav">${steps.map((s, i) => `<a data-step="${i + 1}" class="${i ? '' : 'on'}"><b>${i + 1}</b> ${s}</a>`).join('')}</nav>
+  <div class="a2c-body">
+  <section data-step="1">
+    <div class="a2c-grid">
+      <label>Name <input type="text" name="name" value="${a2Esc(actor.name)}"></label>
+      <label>Concept <input type="text" name="concept" placeholder="Burned-out paramedic, turned on shift"></label>
+      <label>You are a <select name="creature"><option value="vampire">Vampire</option><option value="duskborn">Duskborn</option><option value="ghoul">Ghoul</option></select></label>
+      <label title="Normally set by the Storyteller (PG p.26-28). It decides the tier.">Generation <select name="generation">${[16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4].map((g) => `<option value="${g}" ${g === gen ? 'selected' : ''}>${g}th</option>`).join('')}</select></label>
+      <label>Born (year) <input type="number" name="born" step="1" placeholder="1988"></label>
+      <label>Embraced (year) <input type="number" name="embraced" step="1" placeholder="2019"></label>
+      <label>Apparent age <input type="number" name="apparentAge" min="0" step="1" placeholder="31"></label>
+      <label title="The decade you still feel at home in (PG p.56-59).">Nostalgic decade <input type="text" name="decade" placeholder="1990s"></label>
+      <label><span data-a2c="sire-word">Sire</span>'s name <input type="text" name="sireName"></label>
+      <label title="The kind of sire gives 1 dot in one of three Disciplines (PG p.26)."><span data-a2c="sire-word2">Sire</span> was <select name="sireType">${Object.keys(A2C_SIRES).map((s) => `<option value="${s}" ${s === 'Unknown' ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+    </div>
+    <p class="a2c-frame" data-a2c="frame"></p>
+  </section>
+  <section data-step="2" hidden>
+    <label>Clan <select name="clan"><option value="">choose…</option>${byName(lib.clan).map((c) => `<option value="${a2Esc(c.name)}">${a2Esc(c.name)}</option>`).join('')}</select></label>
+    <div data-a2c="clan-info" class="a2c-info"></div>
+    <div data-a2c="caitiff" hidden><p>Pick this character's three Disciplines:</p>${[0, 1, 2].map((i) => `<select name="caitiff${i}">${discOpts(A2C_DISCS)}</select>`).join(' ')}</div>
+  </section>
+  <section data-step="3" hidden>
+    <p class="a2c-hint">Each lifepath gives 5 Skill dots and 3 Resource dots, spread over its lists (PG p.29).</p>
+    ${[0, 1, 2, 3].map((i) => `<fieldset data-lp="${i}"><legend>Lifepath ${i + 1} <select name="lp${i}"><option value="">choose…</option>${byName(lib.lifepath).map((l) => `<option value="${a2Esc(l.name)}" data-cat="${a2Esc(l.flags?.world?.a2?.category ?? 'mortal')}">${a2Esc(l.name)} (${a2Esc(l.flags?.world?.a2?.category ?? 'mortal')})</option>`).join('')}</select></legend><div data-a2c="lp-body-${i}"></div></fieldset>`).join('')}
+  </section>
+  <section data-step="4" hidden>
+    <p class="a2c-hint" data-a2c="attr-hint"></p>
+    <div class="a2c-cols">${attrs}</div>
+  </section>
+  <section data-step="5" hidden>
+    <p class="a2c-hint" data-a2c="skill-hint"></p>
+    <table class="a2c-table"><tr><th>Skill</th><th class="c">Lifepaths</th><th class="c">Free dots</th><th class="c">Total</th><th>Specialties (1 at 1, 3 and 5 dots)</th></tr>${skills}</table>
+  </section>
+  <section data-step="6" hidden>
+    <p class="a2c-hint" data-a2c="disc-hint"></p>
+    <div class="a2c-cols">
+      <fieldset><legend>Clan Disciplines</legend>${A2C_DISCS.map((k) => `<label class="a2c-row" data-disc-row="${k}">${a2Esc(a2cLabel('Disciplines', k))} ${a2cNum(`disc.${k}`, 0, 0, 10)}</label>`).join('')}</fieldset>
+      <fieldset><legend>Extra dots</legend>
+        <label class="a2c-row"><span data-a2c="sire-word3">Sire</span> dot <select name="sireDisc"></select></label>
+        ${[0, 1].map((i) => `<label class="a2c-row" data-extra="${i}">Out of clan <select name="extra${i}">${discOpts(A2C_DISCS)}</select></label>`).join('')}
+        <p data-a2c="disc-total" class="a2c-info"></p>
+      </fieldset>
+    </div>
+    <h4>Powers <span data-a2c="power-count"></span></h4>
+    <p class="a2c-hint">Only powers whose rank your dots reach are listed (PG p.44).</p>
+    ${a2cItemList('power', powers, (i) => `data-disc="${a2Esc(i.system.disciplineType)}" data-level="${a2Int(i.system.level)}"`).replace(/<small>[^<]*<\/small>/g, '')}
+  </section>
+  <section data-step="7" hidden>
+    <h4>Clan traits <span data-a2c="trait-count"></span> <label class="a2c-inline"><input type="checkbox" name="otherClans"> show other clans</label></h4>
+    ${a2cItemList('trait', byName(lib.clanTrait), (i) => `data-clan="${a2Esc(i.flags?.world?.a2?.clan ?? '')}" data-tier="${a2Esc(i.system?.prerequisites?.generationTier ?? '')}"`)}
+    <h4>Merits <span data-a2c="merit-count"></span></h4>
+    ${a2cItemList('merit', byName(lib.merit), (i) => `data-tier="${a2Esc(i.system?.prerequisites?.generationTier ?? '')}"`)}
+    <h4>Flaws <span data-a2c="flaw-count"></span></h4>
+    ${a2cItemList('flaw', byName(lib.flaw))}
+    <label>Your own flaw <input type="text" name="ownFlaw" placeholder="Name of a free-form flaw (−2 when it complicates things)"></label>
+  </section>
+  <section data-step="8" hidden>
+    <p class="a2c-hint" data-a2c="res-hint"></p>
+    <div data-a2c="lp-res"></div>
+    <table class="a2c-table"><tr><th>Extra Resource</th><th>Kind</th><th class="c">Dots</th></tr>
+    ${[0, 1, 2, 3, 4, 5].map((i) => `<tr><td><input type="text" name="res${i}.name" placeholder="Haven: flat above the laundrette"></td><td><select name="res${i}.type"><option value="physicalAssets">Physical asset</option><option value="socialAssets">Social asset</option><option value="wealth">Wealth</option></select></td><td class="c">${a2cNum(`res${i}.dots`, 0, 0, 5)}</td></tr>`).join('')}</table>
+  </section>
+  <section data-step="9" hidden>
+    <p class="a2c-hint">Humanity starts at rank 6 (PG p.50). Health, Vitae and Willpower are filled. Clan, lifepath, power, trait, merit, flaw and Resource items already on the sheet are replaced.</p>
+    <label>Humanity or Path rank ${a2cNum('humanity', 6, 1, 10)}</label>
+    <div data-a2c="review"></div>
+  </section>
+  </div>
+  <aside class="a2c-side"><h4>Checklist</h4><div data-a2c="checks"></div><div class="a2c-steps"><button type="button" data-a2c="prev">Back</button><button type="button" data-a2c="next">Next</button></div></aside>
+</div>`
+}
+
+function a2cRead (root, lib) {
+  const q = (n) => root.querySelector(`[name="${n}"]`)
+  const val = (n) => q(n)?.value ?? ''
+  const creature = val('creature') || 'vampire'
+  const generation = a2Int(val('generation'), 13)
+  const clan = creature === 'ghoul' ? '' : val('clan')
+  const clanItem = lib.clan.get(clan)
+  let clanDiscs = [...(clanItem?.system?.disciplines ?? [])]
+  if (clan && !clanDiscs.length) clanDiscs = [0, 1, 2].map((i) => val(`caitiff${i}`)).filter(Boolean)
+  const state = { creature, generation, clan, clanDiscs, name: val('name').trim(), concept: val('concept').trim(), born: val('born'), embraced: val('embraced'), apparentAge: val('apparentAge'), decade: val('decade').trim(), sireName: val('sireName').trim(), sireType: val('sireType'), sireDisc: val('sireDisc'), humanity: a2Clamp(a2Int(val('humanity'), 6), 1, 10) }
+  const f = a2cFrame(creature, generation)
+  state.attrs = Object.fromEntries(Object.values(A2C_ATTR_CATS).flat().map((k) => [k, Math.max(1, a2Int(val(`attr.${k}`), 1))]))
+  state.skills = Object.fromEntries(A2C_SKILLS.map((k) => [k, Math.max(0, a2Int(val(`skill.${k}`)))]))
+  state.specialties = Object.fromEntries(A2C_SKILLS.map((k) => [k, val(`spec.${k}`).split(',').map((s) => s.trim()).filter(Boolean)]))
+  state.disc = Object.fromEntries(A2C_DISCS.map((k) => [k, Math.max(0, a2Int(val(`disc.${k}`)))]))
+  state.extraDiscs = [0, 1].slice(0, f.budget.extra).map((i) => val(`extra${i}`))
+  state.lifepaths = []
+  for (let i = 0; i < f.budget.lifepaths; i++) {
+    const name = val(`lp${i}`)
+    const item = lib.lifepath.get(name)
+    if (!item) { state.lifepaths.push({ name: '' }); continue }
+    const a2 = item.flags?.world?.a2 ?? {}
+    const sk = {}
+    const specs = {}
+    ;(a2.skills ?? []).forEach((s, j) => { sk[s.skill] = (sk[s.skill] ?? 0) + Math.max(0, a2Int(val(`lp${i}.s${j}`))); if (s.specialty) specs[s.skill] = s.specialty })
+    state.lifepaths.push({ name, skills: sk, specs, resources: (a2.resources ?? []).map((r, j) => Math.max(0, a2Int(val(`lp${i}.r${j}`)))), resourceNames: a2.resources ?? [] })
+  }
+  const checked = (kind) => [...root.querySelectorAll(`input[name="${kind}"]:checked`)].map((e) => e.value)
+  state.powers = checked('power').map((n) => { const it = lib.discipline.get(n); return { name: n, disc: it?.system?.disciplineType, level: a2Int(it?.system?.level) } })
+  state.traits = checked('trait')
+  state.merits = checked('merit')
+  state.flaws = [...checked('flaw'), ...(val('ownFlaw').trim() ? [val('ownFlaw').trim()] : [])]
+  state.ownFlaw = val('ownFlaw').trim()
+  state.resourcesExtra = [0, 1, 2, 3, 4, 5].map((i) => ({ name: val(`res${i}.name`).trim(), type: val(`res${i}.type`), dots: Math.max(0, a2Int(val(`res${i}.dots`))) })).filter((r) => r.dots > 0)
+  const t = a2cTotals(state)
+  state.unmet = [...state.traits.map((n) => lib.clanTrait.get(n)), ...state.merits.map((n) => lib.merit.get(n))].filter(Boolean).map((it) => a2cPrereq(it, { tier: f.key, disc: t.disc })).filter(Boolean)
+  return state
+}
+
+function a2cUpdate (root, lib, ui2) {
+  // first the parts of the form that other fields depend on
+  const creature0 = root.querySelector('[name="creature"]')?.value || 'vampire'
+  const genSel = root.querySelector('[name="generation"]')
+  if (genSel) {
+    genSel.disabled = creature0 === 'ghoul'
+    if (creature0 === 'duskborn' && a2Int(genSel.value) < 14) genSel.value = '14'
+    if (creature0 === 'vampire' && a2Int(genSel.value) > 13) genSel.value = '13'
+  }
+  const b0 = a2cFrame(creature0, genSel?.value).budget
+  root.querySelectorAll('fieldset[data-lp]').forEach((fs) => {
+    const i = a2Int(fs.dataset.lp)
+    fs.hidden = i >= b0.lifepaths
+    const sel = fs.querySelector('select')
+    fs.querySelectorAll('option[data-cat]').forEach((o) => { o.hidden = !b0.paths.includes(o.dataset.cat); o.disabled = o.hidden })
+    if (sel?.selectedOptions?.[0]?.disabled) sel.value = ''
+    const name = sel?.value ?? ''
+    const body = fs.querySelector(`[data-a2c="lp-body-${i}"]`)
+    if (body && body.dataset.for !== name) {
+      body.dataset.for = name
+      const a2 = lib.lifepath.get(name)?.flags?.world?.a2
+      body.innerHTML = a2 ? `<div class="a2c-lp"><div><em>Skills (5)</em>${(a2.skills ?? []).map((s, j) => `<label class="a2c-row">${a2Esc(a2cLabel('Skills', s.skill))}${s.specialty ? ` <small>(${a2Esc(s.specialty)})</small>` : ''} ${a2cNum(`lp${i}.s${j}`, 1, 0, 5)}</label>`).join('')}</div><div><em>Resources (3)</em>${(a2.resources ?? []).map((r, j) => `<label class="a2c-row">${a2Esc(r)} ${a2cNum(`lp${i}.r${j}`, 1, 0, 3)}</label>`).join('')}</div></div>` : ''
+    }
+  })
+  const state = a2cRead(root, lib)
+  const f = a2cFrame(state.creature, state.generation)
+  const b = f.budget
+  const set = (key, html) => { const e = root.querySelector(`[data-a2c="${key}"]`); if (e) e.innerHTML = html }
+  const ghoul = state.creature === 'ghoul'
+  for (const k of ['sire-word', 'sire-word2', 'sire-word3']) set(k, ghoul ? 'Master' : 'Sire')
+  set('frame', `<strong>${b.label}</strong>${ghoul ? '' : `, ${f.generation}th generation: generation modifier ${f.genMod}`}. Vitae ${f.vitae}. Traits up to ${b.maxDots} dots. Lifepaths ${b.lifepaths}, Attributes ${b.attrs.join('/')}, Disciplines ${b.disc}+${b.sire + b.extra}, powers ${b.powers}, merits ${b.merits}, clan traits ${b.traits}, free Skill dots ${b.skills}, extra Resource dots ${b.resources}, at least ${f.flaws} ${f.flaws === 1 ? 'flaw' : 'flaws'}.${b.house ? ` <em>House rule: ${b.house}</em>` : ''}`)
+  // clan
+  const clanItem = lib.clan.get(state.clan)
+  const clanRow = root.querySelector('[name="clan"]')?.closest('label')
+  if (clanRow) clanRow.hidden = ghoul
+  set('clan-info', ghoul ? "A ghoul learns its master's Disciplines: put the dots where the Storyteller agrees." : clanItem ? `<p><strong>Disciplines:</strong> ${state.clanDiscs.map((k) => a2Esc(a2cLabel('Disciplines', k))).join(', ') || 'your choice'}</p>${clanItem.system?.curse?.name ? `<p><strong>Curse:</strong> ${a2Esc(clanItem.system.curse.name)}</p>` : ''}${clanItem.system?.frenzy?.name ? `<p><strong>Clan frenzy:</strong> ${a2Esc(clanItem.system.frenzy.name)}</p>` : ''}${state.clanDiscs.length > 3 ? '<p>This clan offers a choice: put dots in three of them only.</p>' : ''}` : '')
+  const cait = root.querySelector('[data-a2c="caitiff"]')
+  if (cait) cait.hidden = !(clanItem && !(clanItem.system?.disciplines ?? []).length)
+  // attributes and skills
+  for (const [cat, keys] of Object.entries(A2C_ATTR_CATS)) set(`cat-${cat}`, `(+${keys.reduce((x, k) => x + state.attrs[k] - 1, 0)})`)
+  set('attr-hint', `Every Attribute starts at 1. Add ${b.attrs.join(', ')} dots to your primary, secondary and tertiary group. Maximum ${b.maxDots}.`)
+  const t = a2cTotals(state)
+  for (const k of A2C_SKILLS) { set(`lp-${k}`, String(t.skills[k] - state.skills[k])); set(`tot-${k}`, t.skills[k] > b.startSkill ? `<b class="a2c-bad">${t.skills[k]}</b>` : String(t.skills[k])) }
+  set('skill-hint', `${b.skills} free dots on top of your lifepaths. No Skill above ${b.startSkill} at the start (PG p.36).`)
+  // disciplines
+  root.querySelectorAll('[data-disc-row]').forEach((row) => { row.hidden = Boolean(state.clanDiscs.length) && !state.clanDiscs.includes(row.dataset.discRow); if (row.hidden) { const inp = row.querySelector('input'); if (inp && inp.value !== '0') inp.value = '0' } })
+  const sireSel = root.querySelector('[name="sireDisc"]')
+  if (sireSel && sireSel.dataset.for !== state.sireType) {
+    sireSel.dataset.for = state.sireType
+    const opts = A2C_SIRES[state.sireType] ?? A2C_DISCS
+    sireSel.innerHTML = `<option value="">choose…</option>${opts.map((k) => `<option value="${k}">${a2Esc(a2cLabel('Disciplines', k))}</option>`).join('')}`
+  }
+  root.querySelectorAll('[data-extra]').forEach((row) => { row.hidden = a2Int(row.dataset.extra) >= b.extra })
+  set('disc-hint', `${b.disc} dots among your clan Disciplines, 1 from your ${ghoul ? 'master' : 'sire'}${b.extra ? `, ${b.extra} out of clan (agree it with the Storyteller)` : ''}. No Discipline above ${b.startDisc} at the start (PG p.36, p.44).`)
+  set('disc-total', A2C_DISCS.filter((k) => t.disc[k] > 0).map((k) => `${a2Esc(a2cLabel('Disciplines', k))} ${t.disc[k]}`).join(' · ') || 'No dots yet')
+  root.querySelectorAll('.a2c-list[data-kind="power"] .a2c-item').forEach((row) => {
+    const ok = a2Int(t.disc[row.dataset.disc]) >= a2Int(row.dataset.level) && a2Int(row.dataset.level) > 0
+    row.dataset.off = ok ? '' : '1'
+    if (!ok) { const cb = row.querySelector('input'); if (cb.checked) cb.checked = false }
+  })
+  const other = root.querySelector('[name="otherClans"]')?.checked
+  root.querySelectorAll('.a2c-list[data-kind="trait"] .a2c-item').forEach((row) => { row.dataset.off = (other || row.dataset.clan === state.clan) && a2cTierAllows(row.dataset.tier, f.key) ? '' : '1' })
+  root.querySelectorAll('.a2c-list[data-kind="merit"] .a2c-item').forEach((row) => { row.dataset.off = a2cTierAllows(row.dataset.tier, f.key) ? '' : '1' })
+  const s2 = a2cRead(root, lib)
+  set('power-count', `${s2.powers.length} of ${b.powers}`)
+  set('trait-count', `${s2.traits.length} of ${b.traits}`)
+  set('merit-count', `${s2.merits.length} of ${b.merits}`)
+  set('flaw-count', `${s2.flaws.length}, at least ${f.flaws}`)
+  set('res-hint', `${b.resources} extra Resource dots on top of your lifepaths (PG p.53). Resources can't be bought with XP later.`)
+  set('lp-res', s2.lifepaths.filter((l) => l.name).map((l) => `<p><strong>${a2Esc(l.name)}:</strong> ${l.resourceNames.map((r, j) => `${a2Esc(r)} ${'●'.repeat(l.resources[j]) || '–'}`).join(', ')}</p>`).join(''))
+  // checklist
+  const checks = a2cCheck(s2)
+  const step = ui2.step
+  set('checks', checks.map((c) => `<div class="a2c-check ${c.ok ? 'ok' : 'no'} ${c.step === step ? 'here' : ''}" data-goto="${c.step}"><i class="fa-solid ${c.ok ? 'fa-check' : 'fa-xmark'}"></i> ${a2Esc(c.text)}</div>`).join(''))
+  const open = checks.filter((c) => !c.ok).length
+  set('review', `<p>${open ? `<b class="a2c-bad">${open} ${open === 1 ? 'line is' : 'lines are'} not met.</b> The Storyteller can still let it stand.` : '<b>Everything adds up.</b>'}</p><p>${a2Esc(s2.name || 'Unnamed')}: ${a2Esc(b.label)}${s2.clan ? `, ${a2Esc(s2.clan)}` : ''}. Health ${a2Int(s2.attrs.stamina) + 5}, Vitae ${f.vitae}, Willpower ${s2.attrs.composure + s2.attrs.resolve}.</p>`)
+  root.querySelectorAll('.a2c-nav a').forEach((a) => { const n = a2Int(a.dataset.step); a.classList.toggle('on', n === step); a.classList.toggle('bad', checks.some((c) => c.step === n && !c.ok)) })
+  root.querySelectorAll('.a2c-body > section').forEach((sec) => { sec.hidden = a2Int(sec.dataset.step) !== step })
+  return s2
+}
+
+// What "Create" writes. Pure apart from reading library items. → { update, items, removeTypes }
+function a2cBuild (state, lib) {
+  const f = a2cFrame(state.creature, state.generation)
+  const b = f.budget
+  const t = a2cTotals(state)
+  const max = b.maxDots
+  const update = { name: state.name || 'Unnamed', 'flags.world.a2.creature': state.creature === 'ghoul' ? 'ghoul' : 'vampire', 'flags.world.a2.tier': f.key }
+  for (const [k, v] of Object.entries(state.attrs)) { update[`system.attributes.${k}.value`] = v; update[`system.attributes.${k}.max`] = max }
+  for (const k of A2C_SKILLS) {
+    const specs = [...new Set([...(state.specialties[k] ?? []), ...state.lifepaths.filter((l) => l.name && a2Int(l.skills?.[k]) > 0 && l.specs?.[k]).map((l) => l.specs[k])])].slice(0, Math.max(a2cSpecialties(t.skills[k]), (state.specialties[k] ?? []).length))
+    update[`system.skills.${k}.value`] = t.skills[k]
+    update[`system.skills.${k}.max`] = max
+    update[`system.skills.${k}.focuses`] = t.skills[k] > 0 ? specs : []
+  }
+  for (const k of A2C_DISCS) { update[`system.vampire.disciplines.${k}.value`] = t.disc[k]; update[`system.vampire.disciplines.${k}.visible`] = t.disc[k] > 0 || state.clanDiscs.includes(k) }
+  if (f.generation) update['system.vampire.generation.value'] = f.generation
+  update['system.vampire.clan.name'] = state.clan
+  update['system.vampire.humanity.value'] = state.humanity
+  update['system.vampire.nature.value'] = 0
+  const wp = state.attrs.composure + state.attrs.resolve
+  update['system.willpower.value'] = wp
+  update['system.willpower.max'] = wp
+  update['system.health.value'] = f.vitae
+  update['system.health.max'] = f.vitae
+  const hp = state.attrs.stamina + 5
+  update['flags.world.a2.health'] = { value: hp, max: hp }
+  update['flags.world.a2.creation'] = { v: 1, concept: state.concept, born: state.born || null, embraced: state.embraced || null, apparentAge: state.apparentAge || null, decade: state.decade, sireName: state.sireName, sireType: state.sireType, sireDisc: state.sireDisc, extraDiscs: state.extraDiscs.filter(Boolean), tier: f.key }
+  const year = (v) => (a2Int(v) ? String(a2Int(v)) : '')
+  const facts = [state.concept && `<strong>Concept:</strong> ${a2Esc(state.concept)}`, year(state.born) && `<strong>Born:</strong> ${year(state.born)}`, year(state.embraced) && `<strong>${state.creature === 'ghoul' ? 'First fed' : 'Embraced'}:</strong> ${year(state.embraced)}`, a2Int(state.apparentAge) && `<strong>Apparent age:</strong> ${a2Int(state.apparentAge)}`, state.decade && `<strong>Nostalgic decade:</strong> ${a2Esc(state.decade)}`, (state.sireName || state.sireType) && `<strong>${state.creature === 'ghoul' ? 'Master' : 'Sire'}:</strong> ${a2Esc(state.sireName || 'unnamed')} (${a2Esc(String(state.sireType).toLowerCase())})`].filter(Boolean)
+  update.biographyFacts = facts.length ? `<p>${facts.join(' · ')}</p>` : ''
+  const items = []
+  const take = (map, name) => { const it = map.get(name); if (!it) return; const o = typeof it.toObject === 'function' ? it.toObject() : foundry.utils.deepClone(it); delete o._id; delete o.folder; delete o.ownership; delete o.sort; items.push(o) }
+  if (state.clan) take(lib.clan, state.clan)
+  for (const l of state.lifepaths) if (l.name) take(lib.lifepath, l.name)
+  for (const p of state.powers) take(lib.discipline, p.name)
+  for (const n of state.traits) take(lib.clanTrait, n)
+  for (const n of state.merits) take(lib.merit, n)
+  for (const n of state.flaws) { if (n === state.ownFlaw) items.push({ name: n, type: 'flaw', img: 'icons/svg/downgrade.svg', system: { description: '<p>Flaw dice penalty: −2 on a test this flaw makes harder (PG p.56).</p>' } }); else take(lib.flaw, n) }
+  if (state.creature !== 'ghoul') take(lib.nature, 'Humanity')
+  const kind = (text) => (/^wealth/i.test(text) ? 'wealth' : /^social/i.test(text) ? 'socialAssets' : 'physicalAssets')
+  const clean = (text) => String(text).replace(/^(?:Physical|Social) Asset\s*\(([^]*)\)\s*$/i, '$1').trim()
+  for (const l of state.lifepaths) (l.resourceNames ?? []).forEach((r, j) => { if (a2Int(l.resources[j]) > 0) items.push({ name: clean(r), type: 'resource', img: 'icons/svg/coins.svg', system: { description: `<p>From the ${a2Esc(l.name)} lifepath.</p>`, dots: { value: a2Int(l.resources[j]), max: 5 }, resourceType: kind(r) } }) })
+  for (const r of state.resourcesExtra) items.push({ name: r.name || 'Resource', type: 'resource', img: 'icons/svg/coins.svg', system: { description: '', dots: { value: r.dots, max: 5 }, resourceType: r.type || 'physicalAssets' } })
+  return { update, items, removeTypes: ['clan', 'lifepath', 'discipline', 'clanTrait', 'merit', 'flaw', 'resource', 'nature'] }
+}
+
+async function a2cApply (actor, state, lib) {
+  const plan = a2cBuild(state, lib)
+  const facts = plan.update.biographyFacts
+  delete plan.update.biographyFacts
+  if (facts) {
+    const bio = String(actor.system?.core?.biography ?? '').replace(/<p data-a2c="facts">[^]*?<\/p>/, '')
+    plan.update['system.core.biography'] = facts.replace('<p>', '<p data-a2c="facts">') + bio
+  }
+  const old = actor.items.filter((i) => plan.removeTypes.includes(i.type)).map((i) => i.id)
+  if (old.length) await actor.deleteEmbeddedDocuments('Item', old)
+  await actor.update(plan.update)
+  if (plan.items.length) await actor.createEmbeddedDocuments('Item', plan.items)
+  if (actor.prototypeToken && plan.update.name) { try { await actor.update({ 'prototypeToken.name': plan.update.name }) } catch (e) { /* not ours to rename */ } }
+  ui.notifications.info(`${plan.update.name} is ready: ${plan.items.length} items added.`)
+  return plan
+}
+
+async function a2cOpen (actorLike = null) {
+  if (!a2Enabled()) { ui.notifications.warn('The Alpha 2 rules are off.'); return null }
+  let actor = actorLike?.documentName === 'Actor' ? actorLike : (typeof actorLike === 'string' ? (game.actors.get(actorLike) ?? game.actors.getName(actorLike)) : null)
+  actor ??= globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character
+  if (!actor) {
+    if (!game.user.can?.('ACTOR_CREATE')) { ui.notifications.warn('Open your character sheet first, or ask the Storyteller to make you a blank character.'); return null }
+    actor = await Actor.create({ name: 'New character', type: 'vampire' })
+  }
+  if (actor.type !== 'vampire') { ui.notifications.warn('Character creation is for player-type characters.'); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const lib = await a2cLibrary()
+  if (!lib.clan.size || !lib.lifepath.size) { ui.notifications.error('The V6 library (clans, lifepaths, powers) is not in this world. Import the V6 Rules bundle first.'); return null }
+  const ui2 = { step: 1 }
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: `Character creation: ${actor.name}`, resizable: true },
+    position: { width: 940 },
+    classes: ['a2c-window'],
+    content: a2cContent(actor, lib),
+    ok: { icon: 'fa-solid fa-wand-magic-sparkles', label: 'Create', callback: (ev, button) => a2cRead(button.form, lib) },
+    rejectClose: false,
+    render: (ev, dialog) => {
+      const root = dialog?.element
+      if (!root) return
+      const go = (n) => { ui2.step = a2Clamp(n, 1, 9); a2cUpdate(root, lib, ui2) }
+      root.addEventListener('change', () => a2cUpdate(root, lib, ui2))
+      root.addEventListener('input', (e) => {
+        if (!e.target?.classList?.contains('a2c-filter')) return
+        const needle = e.target.value.trim().toLowerCase()
+        root.querySelectorAll(`.a2c-list[data-kind="${e.target.dataset.list}"] .a2c-item`).forEach((row) => { row.dataset.hide = needle && !row.dataset.name.includes(needle) ? '1' : '' })
+      })
+      root.addEventListener('click', (e) => {
+        const nav = e.target?.closest?.('.a2c-nav a, .a2c-check')
+        if (nav) { e.preventDefault(); go(a2Int(nav.dataset.step ?? nav.dataset.goto)); return }
+        const b = e.target?.closest?.('[data-a2c="prev"], [data-a2c="next"]')
+        if (b) { e.preventDefault(); go(ui2.step + (b.dataset.a2c === 'next' ? 1 : -1)) }
+      })
+      root.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target?.tagName === 'INPUT') e.preventDefault() })
+      a2cUpdate(root, lib, ui2)
+    }
+  }).catch((e) => { console.error('V6 Automation | character creation', e); return null })
+  if (!res) return null
+  const open = a2cCheck(res).filter((c) => !c.ok)
+  if (open.length) {
+    const sure = await foundry.applications.api.DialogV2.confirm({ window: { title: 'Not everything adds up' }, content: `<p>${open.length} ${open.length === 1 ? 'line is' : 'lines are'} not met:</p><ul>${open.slice(0, 12).map((c) => `<li>${a2Esc(c.text)}</li>`).join('')}</ul><p>Create the character anyway?</p>`, rejectClose: false }).catch(() => false)
+    if (!sure) return a2cOpen(actor)
+  }
+  try { await a2cApply(actor, res, lib) } catch (e) { console.error('V6 Automation | character creation', e); ui.notifications.error('Character creation could not write the sheet. See the console (F12).'); return null }
+  actor.sheet?.render(true)
+  return actor
+}
+
+function a2cRenderSheet (app, element) {
+  if (!a2Enabled() || a2eGet('creator', true) === false) return
+  const actor = app?.actor ?? app?.document
+  const root = element instanceof HTMLElement ? element : (element?.[0] ?? app?.element)
+  if (!actor || !root || actor.type !== 'vampire' || !actor.isOwner || actor.flags?.world?.a2?.npc) return
+  // offered until the character has dots; afterwards only the Storyteller sees it
+  const blank = !actor.items.some((i) => i.type === 'lifepath') && Object.values(actor.system?.skills ?? {}).every((s) => a2Int(s?.value) === 0)
+  if (!blank && !game.user.isGM) return
+  const add = () => {
+    const line = root.querySelector('.a2t-sheet-line')
+    if (!line || line.querySelector('[data-a2c="open"]')) return Boolean(line)
+    const a = document.createElement('a')
+    a.dataset.a2c = 'open'
+    a.title = 'Character creation, step by step (PG p.22-63)'
+    a.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> ${blank ? 'Create character' : 'Creation'}`
+    a.addEventListener('click', (ev) => { ev.preventDefault(); a2cOpen(actor) })
+    line.prepend(a)
+    return true
+  }
+  if (!add()) setTimeout(add, 50)
+}
+
+function a2cInjectStyles () {
+  document.getElementById('v6a-create-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-create-style'
+  style.textContent = `
+.a2c { display: grid; grid-template-columns: 1fr 250px; grid-template-rows: auto 1fr; gap: 8px 12px; font-size: 13px; min-height: 520px; }
+.a2c [hidden] { display: none !important; }
+.a2c-nav { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+.a2c-nav a { padding: 3px 8px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); border-radius: 12px; cursor: pointer; opacity: 0.75; }
+.a2c-nav a.on { opacity: 1; background: #7a0000; border-color: #7a0000; color: #fff; }
+.a2c-nav a.bad:not(.on) { border-color: #b3261e; }
+.a2c-body { max-height: 62vh; overflow-y: auto; padding-right: 6px; }
+.a2c-side { border-left: 1px solid color-mix(in srgb, currentColor 20%, transparent); padding-left: 10px; max-height: 62vh; overflow-y: auto; }
+.a2c-side h4, .a2c-body h4 { margin: 8px 0 4px; font-weight: 700; }
+.a2c-check { padding: 1px 0; cursor: pointer; font-size: 12px; opacity: 0.6; }
+.a2c-check.here { opacity: 1; }
+.a2c-check.ok i { color: #2e7d32; }
+.a2c-check.no i, .a2c-bad { color: #c62828; }
+.a2c-steps { display: flex; gap: 6px; margin-top: 10px; }
+.a2c-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+.a2c-grid label, .a2c-body > section > label { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.a2c-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.a2c-row { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin: 2px 0; }
+.a2c input.a2c-num { width: 3.6em; flex: 0 0 auto; text-align: center; }
+.a2c-lp { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.a2c-table { width: 100%; border-collapse: collapse; }
+.a2c-table td, .a2c-table th { padding: 2px 4px; text-align: left; }
+.a2c-table .c { text-align: center; }
+.a2c-list { max-height: 190px; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 4px; padding: 4px 6px; }
+.a2c-item { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.a2c-item[data-off="1"], .a2c-item[data-hide="1"] { display: none; }
+.a2c-item small { opacity: 0.6; }
+.a2c-hint, .a2c-info, .a2c-frame { margin: 4px 0; padding: 4px 8px; border-left: 3px solid #7a0000; background: color-mix(in srgb, currentColor 6%, transparent); }
+.a2c-inline { font-weight: 400; font-size: 12px; margin-left: 10px; }
+.a2c fieldset { margin: 4px 0; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2CreateBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.creator?.booted) return true
+  a2eReg('creator', { name: 'Character creation window', hint: 'Blank characters get a "Create character" link on their sheet that walks through the Player Guide\'s steps and counts the dots.', scope: 'world', config: true, type: Boolean, default: true })
+  a2cInjectStyles()
+  if (!a2cState.hooked) {
+    a2cState.hooked = true
+    Hooks.on('renderActorSheetV2', (app, el) => { try { a2cRenderSheet(app, el) } catch (e) { console.error('V6 Automation | creation link', e) } })
+    Hooks.on('createItem', (i) => { if (!i.parent) a2cState.lib = null })
+  }
+  api.creator = { booted: true, open: a2cOpen, rules: { frame: a2cFrame, check: a2cCheck, totals: a2cTotals, build: a2cBuild, prereq: a2cPrereq, specialties: a2cSpecialties, budget: A2C_BUDGET } }
+  api.create = a2cOpen
+  console.log('V6 Automation | character creation loaded')
+  return true
+}
+globalThis.a2CreateBoot ??= a2CreateBoot
 
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)
