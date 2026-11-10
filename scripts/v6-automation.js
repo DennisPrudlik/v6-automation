@@ -1211,7 +1211,7 @@ function a2ResultBlock (message, roll) {
   return block
 }
 
-function a2RollForTarget (message, roll, target) {
+function a2RollForTarget (message, roll, target, { auto = false } = {}) {
   const o = roll.options.a2.oppose
   a2State.pendingVs.set(target.uuid, { messageId: message.id, successes: a2Int(roll.total), name: message.alias ?? 'opponent' })
   if (target.type === 'npc') a2State.pendingPreset.set(target.uuid, { level: a2NpcBestLevel(target, o.attributes).key })
@@ -1219,7 +1219,10 @@ function a2RollForTarget (message, roll, target) {
     const src = a2FromUuid(roll.options.a2.itemUuid)
     a2uHint(target, { resist: src?.system?.disciplineType ? [src.system.disciplineType] : [], against: (typeof a2xSpeaker === 'function' ? a2xSpeaker(message)?.uuid : null) ?? null })
   }
-  a2State.RollDialog.open({ actor: target, test: { attributes: o.attributes, skills: o.skills, disciplines: o.disciplines } })
+  const test = { attributes: o.attributes, skills: o.skills, disciplines: o.disciplines }
+  // auto: the Storyteller's client rolls for a target nobody is playing (alpha2-oppose)
+  if (auto && typeof a2eOpenRoll === 'function') return a2eOpenRoll(target, test, { auto: true }) // eslint-disable-line no-undef
+  return a2State.RollDialog.open({ actor: target, test })
 }
 
 async function a2PromptCompare (message) {
@@ -4365,8 +4368,17 @@ async function a2tEndSceneApply ({ surges = true, conditions = true, uses = true
     if (upd.length) await actor.updateEmbeddedDocuments('Item', upd)
     if (ended.length || upd.length) lines.push(`${actor.name}: ${[ended.length ? `ended ${ended.map((i) => i.name).join(', ')}` : '', upd.length ? `${a2Plural(upd.length, 'use', 'uses')} reset` : ''].filter(Boolean).join('; ')}.`)
   }
+  // Discipline powers that last one scene end here too, so the card can say so
+  let powersDone = false
+  try {
+    if (typeof a2pEndScene === 'function' && typeof a2pOn === 'function' && a2pOn()) { // eslint-disable-line no-undef
+      const n = await a2pEndScene() // eslint-disable-line no-undef
+      powersDone = true
+      if (a2Int(n) > 0) lines.push(`${a2Plural(a2Int(n), 'Discipline power', 'Discipline powers')} ended.`)
+    }
+  } catch (e) { console.error('V6 Automation | powers at scene end', e) }
   if (card) await ChatMessage.create({ whisper: a2tGMs(), content: a2tCard('Scene ends', lines.length ? lines : ['Nothing to end.']), flags: { world: { a2t: { kind: 'endScene' } } } })
-  Hooks.callAll('v6a2EndScene', { actors: list, reason: 'endScene' })
+  Hooks.callAll('v6a2EndScene', { actors: list, reason: 'endScene', powersDone })
   return lines
 }
 
@@ -6623,7 +6635,8 @@ async function a2pActivate (item, { roll = null, messageId = null, targets = nul
   const successes = v ? a2pInt(v.successes) : 0
   const margin = v ? Math.max(0, a2pInt(v.margin ?? v.successes)) : 0
   const vars = { ...vars0, successes, margin, extra: a2pInt(answers.extra) }
-  const combat = game.combat ?? null
+  // the fight this actor is in: the one on screen, or any running one that holds it
+  const combat = (game.combat && a2pCombatantOf(game.combat, actor) ? game.combat : null) ?? game.combats?.find?.((x) => x.started && a2pCombatantOf(x, actor)) ?? game.combat ?? null
   const cbt = a2pCombatantOf(combat, actor)
   const duration = A2P_SYS_DURATION[spec.duration] ? spec.duration : (A2P_FROM_ITEM_DURATION[item.system?.activation?.duration] ?? 'scene')
   const turns = duration === 'turn' ? Math.max(1, a2pEval(spec.turns ?? 1, vars)) : null
@@ -7311,7 +7324,7 @@ function a2pHooks () {
     a2pEndScene().catch((e) => console.error(e))
   })
   Hooks.on('v6a2NewNight', () => { if (a2pOn()) a2pNewNight().catch((e) => console.error(e)) })
-  Hooks.on('v6a2EndScene', () => { if (a2pOn()) a2pEndScene().catch((e) => console.error(e)) })
+  Hooks.on('v6a2EndScene', (ev) => { if (a2pOn() && !ev?.powersDone) a2pEndScene().catch((e) => console.error(e)) })
   // Torpor (all Health baneful) ends the creator's powers of one scene or less (PG p.149).
   Hooks.on('updateActor', (actor, changes) => {
     if (!a2pOn() || !a2pIsActiveGM() || !foundry.utils.hasProperty(changes ?? {}, 'flags.world.a2.health')) return
@@ -7795,6 +7808,25 @@ async function a2oOnCreate (message, options, userId) {
   } catch (e) { console.error('V6 Automation | opposed test', e) }
 }
 
+// A contested Discipline power: the Storyteller's client rolls the Oppose pool for every target
+// nobody is playing, as it does for attacks. Players roll for their own from the power card.
+function a2oPowerAuto (message) {
+  try {
+    const c = message.flags?.world?.a2p
+    if (!c || !a2oOn() || !a2xIsGM() || a2eGet('opposeNpcAuto', true) === false || a2oState.seen.has(`p:${message.id}`)) return
+    const rollMsg = c.rollMessageId ? game.messages.get(c.rollMessageId) : null
+    const roll = rollMsg?.rolls?.find((r) => r?.options?.a2?.built)
+    if (!roll?.options?.a2?.oppose || typeof a2RollForTarget !== 'function') return
+    a2oState.seen.add(`p:${message.id}`)
+    for (const t of c.targets ?? []) {
+      if (t.status !== 'pending') continue
+      const actor = a2FromUuid(t.uuid)
+      if (!actor || a2oPlayerOwned(actor)) continue
+      a2oState.queue = a2oState.queue.then(() => a2RollForTarget(rollMsg, roll, actor, { auto: true })).then(() => a2eSleep(600)).catch((e) => console.error('V6 Automation | auto resist', e))
+    }
+  } catch (e) { console.error('V6 Automation | contested power', e) }
+}
+
 // 2 and 3. Everyone sees the flag arrive: the GM rolls for its NPCs, players are told.
 const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve(), moves: new Map(), plain: new Map() }
 function a2oOnUpdate (message, change) {
@@ -7907,12 +7939,13 @@ async function a2OpposeBoot () {
   const api = globalThis.V6Alpha2
   if (api.oppose?.booted) return true
   a2eReg('oppose', { name: 'Attacks: defence prompts', hint: 'An attack on a targeted token asks the target to defend, and links the two rolls (PG p.116, p.120).', scope: 'world', config: true, type: Boolean, default: true })
-  a2eReg('opposeNpcAuto', { name: 'Attacks: Storyteller characters defend by themselves', hint: 'A target no player owns rolls its better defence at once. Off: the Storyteller uses the buttons on the card.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('opposeNpcAuto', { name: 'Attacks and powers: Storyteller characters defend by themselves', hint: 'A target no player owns rolls its better defence at once, and its Oppose pool against a contested Discipline power. Off: the Storyteller uses the buttons on the card.', scope: 'world', config: true, type: Boolean, default: true })
   a2eReg('opposeDamage', { name: 'Attacks: damage after the defence', hint: '"Button" leaves Apply damage on the card. "At once" applies it when nothing needs choosing.', scope: 'world', config: true, type: String, choices: { button: 'Button on the card', auto: 'At once' }, default: 'button' })
   a2oInjectStyles()
   if (!a2oState.hooked) {
     a2oState.hooked = true
     Hooks.on('createChatMessage', a2oOnCreate)
+    Hooks.on('createChatMessage', a2oPowerAuto)
     Hooks.on('updateChatMessage', a2oOnUpdate)
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2oRenderChat(message, html) } catch (e) { console.error('V6 Automation | defence card', e) } })
   }
@@ -9325,18 +9358,27 @@ async function a2cOpen (actorLike = null) {
     const sure = await foundry.applications.api.DialogV2.confirm({ window: { title: 'Not everything adds up' }, content: `<p>${open.length} ${open.length === 1 ? 'line is' : 'lines are'} not met:</p><ul>${open.slice(0, 12).map((c) => `<li>${a2Esc(c.text)}</li>`).join('')}</ul><p>Create the character anyway?</p>`, rejectClose: false }).catch(() => false)
     if (!sure) return a2cOpen(actor)
   }
+  // a character that already has dots: creating again replaces what is on the sheet
+  if (!a2cBlank(actor)) {
+    const go = await foundry.applications.api.DialogV2.confirm({ window: { title: 'Create over an existing character?' }, content: `<p><strong>${a2Esc(actor.name)}</strong> already has lifepaths or Skill dots.</p><p>Creating again sets every Attribute, Skill and Discipline to what this window holds and replaces the clan, lifepaths, powers, traits, merits, flaws and Resources on the sheet. Experience spent since creation is not kept.</p><p>Go on?</p>`, rejectClose: false }).catch(() => false)
+    if (!go) return null
+  }
   try { await a2cApply(actor, res, lib) } catch (e) { console.error('V6 Automation | character creation', e); ui.notifications.error('Character creation could not write the sheet. See the console (F12).'); return null }
   actor.sheet?.render(true)
   return actor
 }
 
+// No lifepath and no Skill dots yet: creation has nothing to overwrite.
+function a2cBlank (actor) {
+  return !actor?.items?.some?.((i) => i.type === 'lifepath') && Object.values(actor?.system?.skills ?? {}).every((s) => a2Int(s?.value) === 0)
+}
 function a2cRenderSheet (app, element) {
   if (!a2Enabled() || a2eGet('creator', true) === false) return
   const actor = app?.actor ?? app?.document
   const root = element instanceof HTMLElement ? element : (element?.[0] ?? app?.element)
   if (!actor || !root || actor.type !== 'vampire' || !actor.isOwner || actor.flags?.world?.a2?.npc) return
   // offered until the character has dots; afterwards only the Storyteller sees it
-  const blank = !actor.items.some((i) => i.type === 'lifepath') && Object.values(actor.system?.skills ?? {}).every((s) => a2Int(s?.value) === 0)
+  const blank = a2cBlank(actor)
   if (!blank && !game.user.isGM) return
   const add = () => {
     const line = root.querySelector('.a2t-sheet-line')
@@ -10168,7 +10210,7 @@ function a2vRenderSheet (app, element) {
       ['Blood Bonds', 'fa-link', () => A.story?.bonds?.(actor), true],
       ['Downtime', 'fa-moon', () => A.story?.downtime?.(actor), true],
       ['Coterie', 'fa-people-roof', () => A.table?.coterie?.(), true],
-      ['Creation', 'fa-wand-magic-sparkles', () => A.create?.(actor), true],
+      ['Creation', 'fa-wand-magic-sparkles', () => A.create?.(actor), game.user.isGM || (typeof a2cBlank === 'function' && a2cBlank(actor))], // eslint-disable-line no-undef
       ['How to play', 'fa-book', () => A.guide?.open?.(), true]
     ].filter((t) => t[3])
     const row = document.createElement('div')
