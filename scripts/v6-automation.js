@@ -13650,6 +13650,18 @@ function v6iFlat (o, p = '', out = {}) {
   return out
 }
 function v6iSame (a, b) { return JSON.stringify(a ?? null) === JSON.stringify(b ?? null) }
+// HTML as Foundry stores it, for comparing: named characters written out (&ndash; is –), no
+// space at the ends, and a picture under vtm-v6/ counted the same whichever book's folder holds it.
+function v6iNormHtml (h) {
+  let s = String(h ?? '')
+  if (typeof document !== 'undefined' && document.createElement) { const d = document.createElement('div'); d.innerHTML = s; s = d.innerHTML } else s = s.replace(/&([a-z]+);/gi, (m, n) => (['amp', 'lt', 'gt', 'quot', 'nbsp'].includes(n.toLowerCase()) ? m : (V6I_ENT[n] ?? m)))
+  return s.replace(/vtm-v6\/[^/"'\s)]+\//g, 'vtm-v6/*/').trim()
+}
+// Two paths to the same picture: the same file name under vtm-v6/, in whichever book's folder.
+function v6iSameFile (a, b) {
+  const x = String(a ?? ''); const y = String(b ?? '')
+  return x === y || (/^vtm-v6\//.test(x) && /^vtm-v6\//.test(y) && x.split('/').pop() === y.split('/').pop())
+}
 // What writing `want` over `have` would change: the paths. A field the bundle doesn't
 // mention keeps the system's default, so only what the bundle sets is compared; flags are
 // replaced whole, so a flag the world has and the bundle lacks is lost.
@@ -13678,6 +13690,7 @@ function v6iChanges (have = {}, want = {}, { keys = ['name', 'type', 'img', 'sys
       continue
     }
     if (!(k in want)) continue
+    if ((k === 'img' || k === 'thumb') && v6iSameFile(have[k], want[k])) continue
     if (!v6iSame(have[k], want[k]) && !(v6iEmpty(have[k]) && v6iEmpty(want[k]))) out.push(k)
   }
   return out
@@ -13689,7 +13702,7 @@ function v6iPageChanges (have = [], want = []) {
   if (have.length !== want.length) out.push(`pages ${have.length} → ${want.length}`)
   for (let i = 0; i < Math.min(have.length, want.length); i++) {
     if (String(have[i].name ?? '').trim() !== String(want[i].name ?? '').trim()) out.push(`page ${i + 1} name: "${have[i].name}" → "${want[i].name}"`)
-    else if (String(have[i].text?.content ?? '').trim() !== String(want[i].text?.content ?? '').trim()) out.push(`page "${want[i].name}" text`) // Foundry trims the text it stores
+    else if (v6iNormHtml(have[i].text?.content) !== v6iNormHtml(want[i].text?.content)) out.push(`page "${want[i].name}" text`)
   }
   return out
 }
@@ -14016,6 +14029,7 @@ async function runV6Importer (opts = {}) {
   for (const f of choice.list) {
     try {
       const bundle = JSON.parse(await f.text())
+      urlMap.clear() // each book looks in its own folder first
       const toWorld = bundle.target === 'world' || choice.mode === 'world'
       if (dry) {
         log(`Comparing "${bundle.name}"…`)
