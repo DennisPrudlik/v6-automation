@@ -7408,6 +7408,30 @@ function a2sWanted (entry) {
 }
 
 // Dress one page's text. `root` holds the page's own HTML.
+// Rows that follow each other with the same first cell ("Powerful Strike" at 6 dots, then
+// at 8) are one entry: the name is shown once, spanning its rows.
+function a2sMergeRows (table) {
+  let n = 0
+  const bodies = [...table.children].filter((c) => c.tagName === 'TBODY')
+  for (const body of bodies.length ? bodies : [table]) {
+    let head = null
+    let key = ''
+    for (const row of [...body.children].filter((c) => c.tagName === 'TR')) {
+      const cells = [...row.children]
+      const c = cells[0]
+      if (!c || cells.length < 2 || c.tagName !== 'TD' || c.hasAttribute('colspan') || c.hasAttribute('rowspan')) { head = null; key = ''; continue }
+      const k = String(c.textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
+      if (head && k && k === key) {
+        c.classList.add('v6-merged')
+        row.classList.add('v6-cont')
+        head.dataset.v6Span = String((Number(head.dataset.v6Span) || 1) + 1)
+        n++
+      } else { if (head?.dataset.v6Span) { head.setAttribute('rowspan', head.dataset.v6Span); head.classList.add('v6-span') } head = c; key = k }
+    }
+    if (head?.dataset.v6Span) { head.setAttribute('rowspan', head.dataset.v6Span); head.classList.add('v6-span') }
+  }
+  return n
+}
 function a2sDecorate (root, pageName) {
   if (!root || root.dataset?.v6Styled === '1') return
   if (root.dataset) root.dataset.v6Styled = '1'
@@ -7449,6 +7473,7 @@ function a2sDecorate (root, pageName) {
   }
   for (const t of root.querySelectorAll('table')) {
     if (t.parentElement?.classList.contains('v6-table-wrap')) continue
+    a2sMergeRows(t)
     const wrap = root.ownerDocument.createElement('div')
     wrap.className = 'v6-table-wrap'
     t.replaceWith(wrap)
@@ -7530,6 +7555,9 @@ function a2sInjectStyles () {
 .v6-doc td { padding: 0.45em 0.7em; vertical-align: top; border: 0; border-top: 1px solid var(--v6-line); }
 .v6-doc tbody tr:nth-child(even) { background: var(--v6-tint); }
 .v6-doc tbody tr:first-child td { border-top: 0; }
+.v6-doc td.v6-merged { display: none; }
+.v6-doc td.v6-span { vertical-align: top; border-inline-end: 1px solid var(--v6-line); }
+.v6-doc tbody tr.v6-cont td { border-top-style: dashed; }
 .v6-doc td:first-child { font-weight: 600; }
 .v6-doc img { max-width: 100%; height: auto; border-radius: 5px; border: 0; }
 .v6-doc hr { border: 0; border-top: 1px solid var(--v6-line); margin: 1.4em 0; }
@@ -7566,7 +7594,7 @@ async function a2StyleBoot () {
   }
   // Journals that are already open.
   for (const app of foundry.applications?.instances?.values?.() ?? []) { if (app.rendered) a2sOnRender(app, app.element) }
-  api.style = { booted: true, decorate: a2sDecorate, rules: { sameTitle: a2sSameTitle, levels: a2sLevels } }
+  api.style = { booted: true, decorate: a2sDecorate, rules: { sameTitle: a2sSameTitle, levels: a2sLevels, mergeRows: a2sMergeRows } }
   console.log('V6 Automation | journal styling loaded')
   return true
 }
