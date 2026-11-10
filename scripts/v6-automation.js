@@ -13635,7 +13635,7 @@ function v6iPages (pages) {
     if ((p.type ?? 'text') !== 'text' || typeof p.text?.content !== 'string') return { ...p, name: v6iUnescape(p.name).trim() }
     // names as Foundry shows them: no HTML codes, no stray spaces
     const name = v6iPageTitle(v6iUnescape(p.name).trim())
-    return { ...p, name, text: { ...p.text, content: v6iTidyPage(v6iTidyPage(p.text.content, p.name), name) } }
+    return { ...p, name, text: { ...p.text, content: v6iTidyPage(v6iTidyPage(p.text.content, p.name), name).trim() } }
   })
   if (out.length >= 4 && out.every((p) => /^(?:Elder|Ported) Powers: /.test(p.name ?? ''))) out.sort((a, b) => String(a.name).localeCompare(String(b.name)))
   return out
@@ -13653,9 +13653,17 @@ function v6iSame (a, b) { return JSON.stringify(a ?? null) === JSON.stringify(b 
 // What writing `want` over `have` would change: the paths. A field the bundle doesn't
 // mention keeps the system's default, so only what the bundle sets is compared; flags are
 // replaced whole, so a flag the world has and the bundle lacks is lost.
-function v6iChanges (have = {}, want = {}, { keys = ['name', 'type', 'img', 'system', 'flags', 'ownership', 'folder'], flagsReplace = true } = {}) {
+function v6iChanges (have = {}, want = {}, { keys = ['name', 'type', 'img', 'system', 'flags', 'ownership', 'folder'], flagsReplace = true, exact = false } = {}) {
   const out = []
   for (const k of keys) {
+    if (k === 'name') { if (String(have.name ?? '').trim() !== String(want.name ?? '').trim()) out.push('name'); continue } // Foundry trims names
+    if (k === 'system' && exact) {
+      // `want` was run through the document class: both sides are complete, so a field the bundle dropped shows too
+      const h = v6iFlat(have.system ?? {})
+      const w = v6iFlat(want.system ?? {})
+      for (const p of new Set([...Object.keys(h), ...Object.keys(w)])) if (!v6iSame(h[p], w[p]) && !(v6iEmpty(h[p]) && v6iEmpty(w[p]))) out.push(`system.${p}`)
+      continue
+    }
     if (k === 'flags') {
       const h = v6iFlat(have.flags ?? {})
       const w = v6iFlat(want.flags ?? {})
@@ -13680,18 +13688,18 @@ function v6iPageChanges (have = [], want = []) {
   const out = []
   if (have.length !== want.length) out.push(`pages ${have.length} → ${want.length}`)
   for (let i = 0; i < Math.min(have.length, want.length); i++) {
-    if ((have[i].name ?? '') !== (want[i].name ?? '')) out.push(`page ${i + 1} name: "${have[i].name}" → "${want[i].name}"`)
-    else if ((have[i].text?.content ?? '') !== (want[i].text?.content ?? '')) out.push(`page "${want[i].name}" text`)
+    if (String(have[i].name ?? '').trim() !== String(want[i].name ?? '').trim()) out.push(`page ${i + 1} name: "${have[i].name}" → "${want[i].name}"`)
+    else if (String(have[i].text?.content ?? '').trim() !== String(want[i].text?.content ?? '').trim()) out.push(`page "${want[i].name}" text`) // Foundry trims the text it stores
   }
   return out
 }
 // Embedded items of an actor: by position.
-function v6iItemChanges (have = [], want = []) {
+function v6iItemChanges (have = [], want = [], { exact = false } = {}) {
   const out = []
   if (have.length !== want.length) out.push(`items ${have.length} → ${want.length}`)
   for (let i = 0; i < Math.min(have.length, want.length); i++) {
-    if ((have[i].name ?? '') !== (want[i].name ?? '')) { out.push(`item ${i + 1}: "${have[i].name}" → "${want[i].name}"`); continue }
-    const c = v6iChanges(have[i], want[i], { keys: ['type', 'img', 'system', 'flags'], flagsReplace: true })
+    if (String(have[i].name ?? '').trim() !== String(want[i].name ?? '').trim()) { out.push(`item ${i + 1}: "${have[i].name}" → "${want[i].name}"`); continue }
+    const c = v6iChanges(have[i], want[i], { keys: ['type', 'img', 'system', 'flags'], flagsReplace: true, exact })
     if (c.length) out.push(`item "${want[i].name}": ${c.slice(0, 3).join(', ')}${c.length > 3 ? '…' : ''}`)
   }
   return out
@@ -13768,9 +13776,24 @@ async function runV6Importer (opts = {}) {
     existing.set(dir, set); return set
   }
   const urlMap = new Map()
+  // Every picture already under vtm-v6/, by file name (Alchemy's names are unique). Books share
+  // portraits: a shared one is used from the folder it is in, not fetched a second time.
+  let shelf = null
+  const shelved = async (name, dir) => {
+    if ((await listDir(dir)).has(name)) return `${dir}/${name}`
+    if (!shelf) {
+      shelf = new Map()
+      let dirs = []
+      try { dirs = (await FP.browse(SOURCE, ROOT_DIR)).dirs.map((d) => decodeURIComponent(d)).sort() } catch (e) { /* nothing there yet */ }
+      for (const d of dirs) { if (/\/bundles/.test(d)) continue; for (const f of await listDir(d)) if (!shelf.has(f)) shelf.set(f, `${d}/${f}`) }
+    }
+    return shelf.get(name) ?? null
+  }
   async function mirror (url, dir) {
     if (urlMap.has(url)) return urlMap.get(url)
     const name = url.split('/').pop().split('?')[0]
+    const there = await shelved(name, dir)
+    if (there) { urlMap.set(url, there); return there }
     const have = await listDir(dir)
     if (!have.has(name)) {
       const res = await fetch(url, { mode: 'cors', credentials: 'omit' })
@@ -13806,12 +13829,20 @@ async function runV6Importer (opts = {}) {
   const hasLevels = !!CONFIG.Scene?.documentClass?.schema?.fields?.levels
   const sceneData = async (e, folderId) => {
     const src = e.image; const [w, h] = src && !dry ? await imageSize(src) : [4000, 3000] // a comparison doesn't need the picture
-    const base = { name: e.name || 'Untitled scene', folder: folderId ?? null, width: w, height: h, padding: 0.05, grid: { type: e.gridType ?? 0, size: e.gridSize ?? 100 }, navigation: false, flags: { world: { [FLAG]: e.key } } }
+    const base = { name: String(e.name ?? '').trim() || 'Untitled scene', folder: folderId ?? null, width: w, height: h, padding: 0.05, grid: { type: e.gridType ?? 0, size: e.gridSize ?? 100 }, navigation: false, flags: { world: { [FLAG]: e.key } } }
     if (!src) return base
     const thumb = /\.(webp|png|jpe?g|gif|svg|avif)$/i.test(src) ? src : null // videos can be backgrounds, not thumbnails
     return hasLevels ? { ...base, thumb, levels: [{ _id: stableId(`${e.key}:level`), name: 'Ground', background: { src } }] } : { ...base, thumb, background: { src } }
   }
   const withFlags = (e) => ({ ...e.data, flags: foundry.utils.mergeObject(e.data.flags ?? {}, { world: { [FLAG]: e.key } }) })
+  // The bundle's data with every field the document class would add, so it can be held against what
+  // is stored field by field. If the class won't take it, the bundle's own fields are compared.
+  const fill = (Cls, d) => {
+    try { const o = new Cls(foundry.utils.deepClone(d)).toObject(); return { want: { ...d, system: o.system, items: Array.isArray(d.items) ? o.items : d.items }, exact: true } } catch (e) { return { want: d, exact: false } }
+  }
+  const itemPaths = (have, d) => { const f = fill(CONFIG.Item.documentClass, d); return v6iChanges(have, f.want, { exact: f.exact }) }
+  const actorPaths = (have, haveItems, d) => { const f = fill(CONFIG.Actor.documentClass, d); return [...v6iChanges(have, f.want, { keys: ['name', 'type', 'img', 'system', 'flags', 'folder'], exact: f.exact }), ...v6iItemChanges(haveItems, f.want.items ?? [], { exact: f.exact })] }
+  const journalPaths = (have, havePages, d, pages) => [...v6iChanges(have, d, { keys: ['name', 'folder'] }), ...v6iPageChanges(havePages, pages)]
 
   async function mirrorAll (bundle) {
     if (!choice.images) return null
@@ -13820,9 +13851,14 @@ async function runV6Importer (opts = {}) {
     const dir = `${ROOT_DIR}/${bundle.slug}`
     if (dry) {
       // nothing is fetched: note where each image would live, and how many are not there yet
-      const have = await listDir(dir)
       let missing = 0
-      for (const u of urls) { const name = u.split('/').pop().split('?')[0]; if (!have.has(name)) missing++; urlMap.set(u, `${dir}/${name}`) }
+      for (const u of urls) {
+        if (urlMap.has(u)) continue
+        const name = u.split('/').pop().split('?')[0]
+        const there = await shelved(name, dir)
+        if (!there) missing++
+        urlMap.set(u, there ?? `${dir}/${name}`)
+      }
       return { total: urls.length, missing }
     }
     await ensureDir(dir)
@@ -13850,19 +13886,19 @@ async function runV6Importer (opts = {}) {
       // the comparison: the same data an import would write, held against what is there
       const seenDry = (d) => ({ ...d, ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER, ...(d.ownership ?? {}) } })
       const items = byKey(game.items)
-      for (const e of data.items ?? []) { const ex = items.get(e.key); rows.push(v6iRow('item', e.data?.name ?? e.key, ex, ex ? v6iChanges(ex.toObject(), seenDry(meta(e))) : [])) }
+      for (const e of data.items ?? []) { const ex = items.get(e.key); rows.push(v6iRow('item', e.data?.name ?? e.key, ex, ex ? itemPaths(ex.toObject(), seenDry(meta(e))) : [])) }
       const actors = byKey(game.actors)
       for (const e of data.actors ?? []) {
         const d = meta(e); const ex = actors.get(e.key)
         if (ex?.hasPlayerOwner) { rows.push({ kind: 'actor', name: ex.name, state: 'kept', paths: ['a player owns it: an import leaves it alone'] }); continue }
         if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
-        rows.push(v6iRow('actor', d.name ?? e.key, ex, ex ? [...v6iChanges(ex.toObject(), d, { keys: ['name', 'type', 'img', 'system', 'flags', 'folder'] }), ...v6iItemChanges(ex.items.map((i) => i.toObject()), d.items ?? [])] : []))
+        rows.push(v6iRow('actor', d.name ?? e.key, ex, ex ? actorPaths(ex.toObject(), ex.items.map((i) => i.toObject()), d) : []))
       }
       const journals = byKey(game.journal)
       for (const e of data.journals ?? []) {
         const d = meta(e); const ex = journals.get(e.key)
         const pages = v6iPages(d.pages)
-        rows.push(v6iRow('journal', d.name ?? e.key, ex, ex ? [...v6iChanges(ex.toObject(), d, { keys: ['name', 'folder'] }), ...v6iPageChanges([...ex.pages].sort((a, b) => a.sort - b.sort).map((p) => p.toObject()), pages)] : []))
+        rows.push(v6iRow('journal', d.name ?? e.key, ex, ex ? journalPaths(ex.toObject(), [...ex.pages].sort((a, b) => a.sort - b.sort).map((p) => p.toObject()), d, pages) : []))
       }
       const scenes = byKey(game.scenes)
       for (const e of data.scenes ?? []) { const ex = scenes.get(e.key); rows.push(v6iRow('scene', e.name || 'Untitled scene', ex, ex ? v6iChanges(ex.toObject(), { name: e.name || 'Untitled scene' }, { keys: ['name'] }) : [])) }
@@ -13872,28 +13908,43 @@ async function runV6Importer (opts = {}) {
     const items = byKey(game.items); const newItems = []; const upd = []
     // rules items are for everyone to look up: players can see them unless the bundle says otherwise
     const seen = (d) => ({ ...d, ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER, ...(d.ownership ?? {}) } })
-    for (const e of data.items ?? []) { const d = seen(meta(e)); const ex = items.get(e.key); if (ex) upd.push({ _id: ex.id, ...d }); else newItems.push(d) }
+    let itemsSame = 0
+    for (const e of data.items ?? []) { const d = seen(meta(e)); const ex = items.get(e.key); if (!ex) newItems.push(d); else if (itemPaths(ex.toObject(), d).length) upd.push({ _id: ex.id, ...d }); else itemsSame++ }
     for (const c of chunk(newItems, 100)) await Item.createDocuments(c)
     for (const c of chunk(upd, 100)) await Item.updateDocuments(c, { recursive: false, diff: false })
-    if (data.items?.length) note(`${data.name}: ${newItems.length} items created, ${upd.length} updated.`)
+    if (data.items?.length) note(`${data.name}: ${newItems.length} items created, ${upd.length} updated, ${itemsSame} already up to date.`)
 
-    const actors = byKey(game.actors); let ac = 0; let au = 0; const kept = []
+    const actors = byKey(game.actors); let ac = 0; let au = 0; let as = 0; const kept = []
     for (const e of data.actors ?? []) {
       const d = meta(e); const ex = actors.get(e.key)
       // a character a player owns is in play: a re-import would wipe its items and what it has tracked
       if (ex?.hasPlayerOwner) { kept.push(ex.name); continue }
       if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
+      // nothing differs: its items keep their ids and whatever play has tracked on it stays
+      if (ex && !actorPaths(ex.toObject(), ex.items.map((i) => i.toObject()), d).length) { as++; continue }
       if (ex) { const embedded = d.items ?? []; delete d.items; await ex.update(d, { recursive: false, diff: false }); await ex.deleteEmbeddedDocuments('Item', ex.items.map((i) => i.id)); if (embedded.length) await ex.createEmbeddedDocuments('Item', embedded); au++ } else { await Actor.create(d); ac++ }
     }
-    if (data.actors?.length) note(`${data.name}: ${ac} actors created, ${au} updated.${kept.length ? ` Left alone, because a player owns them: ${kept.join(', ')}.` : ''}`)
+    if (data.actors?.length) note(`${data.name}: ${ac} actors created, ${au} updated, ${as} already up to date.${kept.length ? ` Left alone, because a player owns them: ${kept.join(', ')}.` : ''}`)
 
-    const journals = byKey(game.journal); let jc = 0; let ju = 0
+    const journals = byKey(game.journal); let jc = 0; let ju = 0; let js = 0
     for (const e of data.journals ?? []) {
       const d = meta(e); const ex = journals.get(e.key)
       d.pages = v6iPages(d.pages).map((p, i) => ({ ...p, sort: (i + 1) * 100 }))
-      if (ex) { const pages = d.pages; delete d.pages; await ex.update(d); await ex.deleteEmbeddedDocuments('JournalEntryPage', ex.pages.map((p) => p.id)); await ex.createEmbeddedDocuments('JournalEntryPage', pages); ju++ } else { await JournalEntry.create(d); jc++ }
+      if (!ex) { await JournalEntry.create(d); jc++; continue }
+      const have = [...ex.pages].sort((a, b) => a.sort - b.sort)
+      if (!journalPaths(ex.toObject(), have.map((p) => p.toObject()), d, d.pages).length) { js++; continue }
+      // pages are rewritten where they stand, so a page keeps its id and links to it keep working
+      const pages = d.pages; delete d.pages
+      await ex.update(d)
+      const n = Math.min(have.length, pages.length)
+      const upd = []
+      for (let i = 0; i < n; i++) upd.push({ ...pages[i], _id: have[i].id })
+      if (upd.length) await ex.updateEmbeddedDocuments('JournalEntryPage', upd)
+      if (pages.length > n) await ex.createEmbeddedDocuments('JournalEntryPage', pages.slice(n))
+      if (have.length > n) await ex.deleteEmbeddedDocuments('JournalEntryPage', have.slice(n).map((p) => p.id))
+      ju++
     }
-    if (data.journals?.length) note(`${data.name}: ${jc} journals created, ${ju} updated.`)
+    if (data.journals?.length) note(`${data.name}: ${jc} journals created, ${ju} updated, ${js} already up to date.`)
 
     const scenes = byKey(game.scenes); let sc = 0; let su = 0
     for (const e of data.scenes ?? []) {
@@ -13939,19 +13990,22 @@ async function runV6Importer (opts = {}) {
     }
     if (rows && pack && !advCache) advCache = await pack.getDocuments() // one read for the whole comparison
     const old = pack ? (rows ? advCache : await pack.getDocuments()).find((a) => a.getFlag('world', FLAG) === data.slug) : null
-    if (rows) {
+    // what differs between the bundle and the Adventure that is there
+    const cmp = rows ?? []
+    {
       const have = old ? old.toObject() : null
       const by = (list) => new Map((list ?? []).map((d) => [d._id, d]))
       const hf = by(have?.folders); const hi = by(have?.items); const ha = by(have?.actors); const hj = by(have?.journal); const hs = by(have?.scenes)
-      for (const f of folders) rows.push(v6iRow('folder', f.name, hf.get(f._id), hf.get(f._id) ? v6iChanges(hf.get(f._id), f, { keys: ['name', 'folder'] }) : []))
-      for (const d of items) rows.push(v6iRow('item', d.name, hi.get(d._id), hi.get(d._id) ? v6iChanges(hi.get(d._id), d) : []))
-      for (const d of actors) { const ex = ha.get(d._id); rows.push(v6iRow('actor', d.name, ex, ex ? [...v6iChanges(ex, d, { keys: ['name', 'type', 'img', 'system', 'flags', 'folder'] }), ...v6iItemChanges(ex.items ?? [], d.items ?? [])] : [])) }
-      for (const d of journal) { const ex = hj.get(d._id); rows.push(v6iRow('journal', d.name, ex, ex ? [...v6iChanges(ex, d, { keys: ['name', 'folder'] }), ...v6iPageChanges([...(ex.pages ?? [])].sort((a, b) => a.sort - b.sort), d.pages)] : [])) }
-      for (const d of scenes) rows.push(v6iRow('scene', d.name, hs.get(d._id), hs.get(d._id) ? v6iChanges(hs.get(d._id), d, { keys: ['name', 'folder'] }) : []))
+      for (const f of folders) cmp.push(v6iRow('folder', f.name, hf.get(f._id), hf.get(f._id) ? v6iChanges(hf.get(f._id), f, { keys: ['name', 'folder'] }) : []))
+      for (const d of items) cmp.push(v6iRow('item', d.name, hi.get(d._id), hi.get(d._id) ? itemPaths(hi.get(d._id), d) : []))
+      for (const d of actors) { const ex = ha.get(d._id); cmp.push(v6iRow('actor', d.name, ex, ex ? actorPaths(ex, ex.items ?? [], d) : [])) }
+      for (const d of journal) { const ex = hj.get(d._id); cmp.push(v6iRow('journal', d.name, ex, ex ? journalPaths(ex, [...(ex.pages ?? [])].sort((a, b) => a.sort - b.sort), d, d.pages) : [])) }
+      for (const d of scenes) cmp.push(v6iRow('scene', d.name, hs.get(d._id), hs.get(d._id) ? v6iChanges(hs.get(d._id), d, { keys: ['name', 'folder', 'thumb'] }) : []))
       // what the Adventure holds now and the bundle no longer does
-      for (const [kind, map, want] of [['item', hi, items], ['actor', ha, actors], ['journal', hj, journal], ['scene', hs, scenes]]) { const ids = new Set(want.map((d) => d._id)); for (const [id, d] of map) if (!ids.has(id)) rows.push({ kind, name: d.name, state: 'changed', paths: ['in the Adventure but not in the bundle: an import removes it'] }) }
-      return
+      for (const [kind, map, want] of [['item', hi, items], ['actor', ha, actors], ['journal', hj, journal], ['scene', hs, scenes]]) { const ids = new Set(want.map((d) => d._id)); for (const [id, d] of map) if (!ids.has(id)) cmp.push({ kind, name: d.name, state: 'changed', paths: ['in the Adventure but not in the bundle: an import removes it'] }) }
     }
+    if (rows) return
+    if (old && !cmp.some((r) => r.state !== 'same')) { note(`${data.name}: already up to date, nothing written.`); return }
     // the new one first: if Foundry rejects it, the old Adventure is still there
     const made = await CONFIG.Adventure.documentClass.create(adv, { pack: pack.collection })
     if (!made) throw new Error('Foundry rejected the Adventure data (see the console for the field)')
