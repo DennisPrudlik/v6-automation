@@ -48,6 +48,9 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Group hunt, Vaulderie and vinculum, session recap** (a journal page written from the chat log), and a **reaction menu** on the turn card (reaction powers, Blood Surge).
 - **Sheets** share the Nightfall look.
 - **Guide:** a journal with a player quick-start and a Storyteller cheat sheet is made in the world and kept up to date (`/v6 guide`).
+- **On the character sheet:** the Actions tab opens with a "V6 actions" block: every combat action as a button, the tools from the token controls (States, Feed, Blood Surge, Frenzy test, Spend XP, Blood Bonds, Downtime, Coterie, Creation, How to play), and what the module is tracking for that character.
+- **Tracked powers:** Blood Aegis counts its barrier down against ranged damage, Haruspex puts its free reroll on the roll cards, Pact with Ra switches sunlight off for the day and takes the Vitae at New Night.
+- **Coterie by drag and drop:** drop an item on the Coterie window to add it as a shared Resource, or on the Haven field to name the haven.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.
