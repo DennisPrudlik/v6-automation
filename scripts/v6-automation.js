@@ -11546,7 +11546,7 @@ const A2Q_PACK = ['Investigate', 'Track', 'Follow'] // exploration, taken from t
 function a2qCatalog () {
   const out = []
   for (const m of A2V_MOVES) {
-    if (m.id === 'states' || m.self) continue
+    if (m.id === 'states' || m.id === 'putout') continue
     out.push({ ref: m.id, kind: 'move', group: A2Q_GROUP[m.group] ?? 'general', name: m.label, role: m.group === 'Attack' || m.group === 'Wrestle' ? 'attack' : 'utility', act: m.instant ? 'minor' : 'action', test: m.test ? { attributes: [...m.test.attributes], skills: [...m.test.skills], modifier: a2Int(m.modifier) } : null, text: `${m.pool ? m.pool + '. ' : ''}${m.hint ?? ''}`, vampire: Boolean(m.vampire) })
   }
   for (const s of A2Y_APPROACHES) out.push({ ref: `soc-${s.id}`, kind: 'social', group: 'social', name: s.label, role: s.id === 'keepcool' ? 'defense' : 'attack', act: 'action', pools: s.pools, text: `${s.pools.map((p) => `${a2Cap(p[0])} + ${a2Cap(p[1])}`).join(' or ')}.${s.note ? ' ' + s.note : ''} The best pool is rolled.` })
@@ -11612,6 +11612,8 @@ async function a2qSync (actor, { quiet = true } = {}) {
     return data.length
   } finally { a2qState.busy.delete(actor.id) }
 }
+// the system keeps a test's traits in Sets
+function a2qTest (item) { const t = item?.system?.test ?? {}; return { attributes: [...(t.attributes ?? [])], skills: [...(t.skills ?? [])], disciplines: [...(t.disciplines ?? [])], modifier: t.modifier ?? null } }
 function a2qBest (actor, keys, kind) {
   const val = (k) => { const t = actor.system?.[kind]?.[k]; return a2Int(t?.effective ?? t?.value) }
   return [...(keys ?? [])].sort((x, y) => val(y) - val(x))[0]
@@ -11630,7 +11632,7 @@ async function a2qRun (actor, item) {
     else if (f.ref === 'bonds') await A.story?.bonds?.(actor)
     return true
   }
-  const t = item.system?.test ?? {}
+  const t = a2qTest(item)
   if (f?.kind === 'social') {
     const s = A2Y_APPROACHES.find((x) => `soc-${x.id}` === f.ref)
     const p = s ? a2yBestPool(actor, s.pools) : null
@@ -11649,9 +11651,9 @@ function a2qPoolText (actor, item) {
   if (f?.kind === 'downtime') return 'downtime'
   if (f?.kind === 'tool') return ''
   if (f?.kind === 'move') { const m = A2V_MOVES.find((x) => x.id === f.ref); return m?.pool ?? '' }
-  const t = item.system?.test ?? {}
-  let a = t.attributes ?? []
-  let s = t.skills ?? []
+  const t = a2qTest(item)
+  let a = t.attributes
+  let s = t.skills
   if (f?.kind === 'social') { const ap = A2Y_APPROACHES.find((x) => `soc-${x.id}` === f.ref); const p = ap ? a2yBestPool(actor, ap.pools) : null; if (p) { a = [p[0]]; s = [p[1]] } }
   const parts = [a.length ? a2Cap(a2qBest(actor, a, 'attributes')) : null, s.length ? a2Cap(a2qBest(actor, s, 'skills')) : null].filter(Boolean)
   const mv = a2Int(t.modifier?.value)
@@ -11667,7 +11669,7 @@ function a2qRenderSheet (app, element) {
     for (const row of tab.querySelectorAll('.action-row[data-item-id]')) {
       if (row.dataset.a2q) continue
       const item = actor.items.get(row.dataset.itemId)
-      const t = item?.system?.test ?? {}
+      const t = a2qTest(item)
       if (!item || !(item.flags?.world?.a2act || t.attributes?.length || t.skills?.length)) continue
       row.dataset.a2q = '1'
       row.classList.add('a2q-row')
