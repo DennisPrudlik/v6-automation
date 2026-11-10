@@ -2614,7 +2614,7 @@ function a2xDecorateBlock (message, roll, i, block) {
   const byPowerCard = info?.item?.type === 'discipline' && typeof a2pHandlesDamage === 'function' && a2pHandlesDamage(info.item) // eslint-disable-line no-undef
   // a wrestling move, a feed or a trick resolves on its own card: no weapon damage to apply here
   const moveKind = message.flags?.world?.a2def?.move?.effect?.kind
-  const byMove = Boolean(moveKind) && !['stake', 'behead'].includes(moveKind)
+  const byMove = Boolean(moveKind) && (!['stake', 'behead'].includes(moveKind) || message.flags?.world?.a2def?.settled === true)
   if (info && !byPowerCard && !byMove && (game.user.isGM || owner) && (v.win !== false || act.bargain)) {
     btn('fa-solid fa-burst', 'Apply damage', `Weapon damage + margin to the targeted tokens, or the selected ones (PG p.116). ${info.label}.`, () => a2xPromptCardDamage(message, i)).dataset.a2x = 'damage'
   }
@@ -10098,7 +10098,7 @@ async function a2vResolve (attack, defender) {
   }
   const vit = attacker?.system?.health
   const out = a2vOutcome(effect, { win, margin, attacker: { name: attacker?.name, strength: a2vEff(attacker, 'strength'), stamina: a2vEff(attacker, 'stamina'), missing: vit ? a2Int(vit.max) - a2Int(vit.value) : 0 }, target: { name: defender.name, vampire: a2Creature(defender) === 'vampire', blood: a2Creature(defender) === 'vampire' ? a2Int(defender.system?.health?.value) : null } })
-  await attack.update({ 'flags.world.a2def.resolved': true })
+  await attack.update({ 'flags.world.a2def.resolved': true, 'flags.world.a2def.settled': !out.button }) // settled: nothing left to apply by hand
   try {
     for (const s of out.set) await a2zSet(s.who === 'self' ? attacker : defender, s.state, s.on)
     if (out.edge) await a2zAddEdge(defender, { ...out.edge, from: attacker?.uuid ?? null, combatantId: a2vCombatantId(attacker) })
@@ -12314,7 +12314,7 @@ async function a2fLimbsOpen (actorLike = null) {
     const c = a2fMendCost(l.level)
     return `<tr><td><strong>${a2Esc(a2Cap(l.limb))}</strong><br><small>${a2Esc(A2F_INJURY[l.level]?.text ?? '')}</small></td>
       <td class="c"><label title="An ear, a finger, a toe"><input type="checkbox" name="small.${i}"> small</label>${l.level === 5 ? `<br><label title="The lost part is at hand: 1 Vitae and 1 Willpower less"><input type="checkbox" name="kept.${i}"> have it</label>` : ''}</td>
-      <td class="c">${c.vitae[0] === c.vitae[1] ? '' : `<input type="number" name="vitae.${i}" value="${c.vitae[0]}" min="${Math.max(0, c.vitae[0] - 1)}" max="${c.vitae[1]}" style="width:3.5em" title="The Storyteller sets the price in this range">`}</td>
+      <td class="c">${c.vitae[0] === c.vitae[1] ? '' : `<input type="number" name="vitae.${i}" value="${c.vitae[0]}" min="${c.vitae[0]}" max="${c.vitae[1]}" style="width:3.5em" title="The Storyteller sets the price in this range">`}</td>
       <td class="c"><button type="button" data-a2f-mend="${i}"${vamp ? '' : ' disabled'}><i class="fa-solid fa-droplet"></i> Mend</button> <button type="button" data-a2f-drop="${i}" title="Remove it without a cost (healed otherwise, or entered by mistake)"><i class="fa-solid fa-xmark"></i></button></td></tr>`
   }).join('')
   let action = null
@@ -12795,7 +12795,7 @@ async function a2nTorpor (actorLike = null) {
     rejectClose: false
   }).catch(() => null)
   if (!pick || pick === 'close') return null
-  const rise = async (lines) => { const upd = {}; a2Unset(upd, 'flags.world.a2.torpor'); await actor.update(upd); try { await a2zSet(actor, 'torpor', false) } catch (e) { /* state already off */ } await a2nCard(actor, `${actor.name} rises from torpor`, lines) }
+  const rise = async (lines) => { if (actor.flags?.world?.a2?.torpor) { const upd = {}; a2Unset(upd, 'flags.world.a2.torpor'); await actor.update(upd); await new Promise((resolve) => setTimeout(resolve, 600)) } try { if (a2zHas(actor, 'torpor')) await a2zSet(actor, 'torpor', false) } catch (e) { /* state already off */ } await a2nCard(actor, `${actor.name} rises from torpor`, lines) }
   const wakeNotes = mod ? [`Waking from torpor: ${path.name} rank modifier ${a2Signed(mod)} (PG p.126).`] : []
   const asleep = /^(In torpor|Staked|Tied up|Held)\b/
   if (pick === 'enter') {
