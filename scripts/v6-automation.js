@@ -12400,7 +12400,7 @@ async function a2FightBoot () {
     a2fState.hooked = true
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2fRenderChat(message, html) } catch (e) { console.error('V6 Automation | fight card', e) } })
   }
-  api.fight = { booted: true, between: a2fBetween, limbs: a2fLimbsOpen, injure: a2fInjure, group: a2fGroup, weapon: a2fWeaponData, rules: { units: a2fUnits, band: a2fBand, bandKey: a2fBandKey, rangeMod: a2fRangeMod, weaponProfile: a2fWeaponProfile, generic: a2fGeneric, injuryLevel: a2fInjuryLevel, injuryMerge: a2fInjuryMerge, worstLimb: a2fWorstLimb, mendCost: a2fMendCost, groupBonus: a2fGroupBonus } }
+  api.fight = { booted: true, prepare: a2fPrepare, mods: a2fMods, between: a2fBetween, limbs: a2fLimbsOpen, injure: a2fInjure, group: a2fGroup, weapon: a2fWeaponData, rules: { units: a2fUnits, band: a2fBand, bandKey: a2fBandKey, rangeMod: a2fRangeMod, weaponProfile: a2fWeaponProfile, generic: a2fGeneric, injuryLevel: a2fInjuryLevel, injuryMerge: a2fInjuryMerge, worstLimb: a2fWorstLimb, mendCost: a2fMendCost, groupBonus: a2fGroupBonus } }
   console.log('V6 Automation | weapons, distance and injuries loaded')
   return true
 }
@@ -12516,7 +12516,7 @@ function a2nOwners (actor) { return game.users.filter((u) => u.isGM || actor?.te
 // One test without the roll window: the pool is built here and rolled at once.
 //  attributes, skills: keys; extra: dice on top; difficulty or opponent (their successes).
 //  → { roll, v, message } or null
-async function a2nRoll (actor, { label = 'Test', attributes = [], skills = [], extra = 0, difficulty = 0, opponent = null, hunger = true, notes = [], skipDay = false } = {}) {
+async function a2nRoll (actor, { label = 'Test', attributes = [], skills = [], extra = 0, difficulty = 0, opponent = null, hunger = true, notes = [], skipDay = false, drop = null } = {}) {
   if (!actor) return null
   const defs = a2xAttrDefs()
   const paths = attributes.map((k) => defs[k]?.path ?? `system.attributes.${k}`)
@@ -12540,6 +12540,7 @@ async function a2nRoll (actor, { label = 'Test', attributes = [], skills = [], e
       let dice = sm.dice
       let ns = sm.notes
       if (skipDay && typeof a2zHas === 'function' && a2zHas(actor, 'day')) { dice += 2 * Math.max(1, a2ActorGenMod(actor)); ns = ns.filter((n) => !/^Awake by day/.test(n)) }
+      if (drop) ns = ns.filter((n) => !drop.test(n)) // a line that makes no sense on this test ("can't act" on a test to wake)
       pool += dice
       lines.push(...ns)
     }
@@ -12574,7 +12575,7 @@ async function a2nViolate (actor, n, reason = '') {
   const path = a2PathInfo(actor)
   const lines = [`${reason || 'Violation'}: ${a2Plural(Math.max(1, a2Int(n, 1)), 'slash', 'slashes')}.`]
   if (res.lost) lines.push(`A slash fell on a filled box: rank ${before.rank} → ${res.rank}, and every slash is erased (PG p.127).`)
-  else lines.push(`${path.name} ${res.rank}: ${res.violations} of ${10 - res.rank} ${10 - res.rank === 1 ? 'slash' : 'slashes'} marked. One more than that and the rank drops.`)
+  else lines.push(`${path.name} ${res.rank}: ${res.violations} of ${10 - res.rank} ${10 - res.rank === 1 ? 'box' : 'boxes'} slashed.${res.violations >= 10 - res.rank ? ' The next violation costs a rank.' : ''}`)
   if (res.rank === 0) lines.push('Rank 0: the character becomes a wight (PG p.126).')
   await a2nCard(actor, `${actor.name}: ${path.name}`, lines)
   return res
@@ -12752,7 +12753,8 @@ async function a2nTorpor (actorLike = null) {
   }).catch(() => null)
   if (!pick || pick === 'close') return null
   const rise = async (lines) => { const upd = {}; a2Unset(upd, 'flags.world.a2.torpor'); await actor.update(upd); try { await a2zSet(actor, 'torpor', false) } catch (e) { /* state already off */ } await a2nCard(actor, `${actor.name} rises from torpor`, lines) }
-  const wakeNotes = [`Waking from torpor: ${path.name} rank modifier ${a2Signed(mod)} (PG p.126).`]
+  const wakeNotes = mod ? [`Waking from torpor: ${path.name} rank modifier ${a2Signed(mod)} (PG p.126).`] : []
+  const asleep = /^(In torpor|Staked|Tied up|Held)\b/
   if (pick === 'enter') {
     await actor.update({ 'flags.world.a2.torpor': { reason: 'voluntary', since: night } })
     await a2nCard(actor, `${actor.name}: voluntary torpor`, [`It may try to rise by will after half the length (${a2Plural(Math.ceil(length / 2), 'night', 'nights')}): 1 Willpower and Stamina + Resolve against ${diff} (PG p.141).`])
@@ -12768,14 +12770,14 @@ async function a2nTorpor (actorLike = null) {
   }
   if (pick === 'fed') {
     if (vitae < 1) { ui.notifications.warn(`${actor.name} has no Vitae: feed it at least 1 first.`); return null }
-    const r = await a2nRoll(actor, { label: `Rise from torpor · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: wakeNotes })
+    const r = await a2nRoll(actor, { label: `Rise from torpor · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: wakeNotes, drop: asleep })
     if (r?.v.win === true) await rise(['Fed and woken (PG p.140).'])
     else if (r) await a2nCard(actor, `${actor.name} stays in torpor`, ['It doesn\'t wake. Feeding it again allows another test.'])
     return r
   }
   if (pick === 'hunter') {
     if (st && !st.hunter && !game.user.isGM) { ui.notifications.warn(`The Unconscious Hunter stirs only once the torpor has run its length (${a2Plural(length - st.elapsed, 'night', 'nights')} to go).`); return null }
-    const r = await a2nRoll(actor, { label: 'Unconscious Hunter · Resolve + Awareness vs Difficulty 3', attributes: ['resolve'], skills: ['awareness'], extra: mod, difficulty: 3, notes: wakeNotes })
+    const r = await a2nRoll(actor, { label: 'Unconscious Hunter · Resolve + Awareness vs Difficulty 3', attributes: ['resolve'], skills: ['awareness'], extra: mod, difficulty: 3, notes: wakeNotes, drop: asleep })
     if (r?.v.win === true) await a2nCard(actor, `${actor.name}: the Unconscious Hunter`, ['It wakes to feed and at once risks a hunger frenzy (Difficulty = its Hunger dice; the Storyteller may lower it for familiar prey). Without 1 Vitae by the end of the scene it sinks back into torpor (PG p.141).', 'Storyteller: untick Torpor once it has fed, or leave it.'])
     else if (r) await a2nCard(actor, `${actor.name} doesn't stir`, ['The prey passes unnoticed.'])
     return r
@@ -12785,7 +12787,7 @@ async function a2nTorpor (actorLike = null) {
     const wp = a2Int(actor.system?.willpower?.value)
     if (wp < 1) { ui.notifications.warn(`${actor.name} has no Willpower to spend.`); return null }
     await actor.update({ 'system.willpower.value': wp - 1 })
-    const r = await a2nRoll(actor, { label: `Rise by will · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: ['1 Willpower spent (PG p.141).', ...wakeNotes] })
+    const r = await a2nRoll(actor, { label: `Rise by will · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: ['1 Willpower spent (PG p.141).', ...wakeNotes], drop: asleep })
     if (r?.v.win === true) {
       if (vitae < 1) { await a2nCard(actor, `${actor.name} can't rise`, ['The will is there, but it has no Vitae to pay for rising (PG p.141).']); return r }
       await actor.update({ 'system.health.value': vitae - 1 })
@@ -12828,16 +12830,17 @@ async function a2nDiablerie (actorLike = null, victimLike = null) {
   if (setup.viol > 0 && a2Rules(actor)?.humanity) await a2nViolate(actor, setup.viol, 'Attempted diablerie, PG p.66')
   let won = true
   let soul = false
+  let painful = false
   let bargained = false
   let rerolled = false
   for (let i = 1; i <= gV && won; i++) {
-    const vr = await a2nRoll(victim, { label: `${victim.name} clings to its soul (${i} of ${gV}) · Resolve + generation modifier`, attributes: ['resolve'], extra: gV, hunger: false })
+    const vr = await a2nRoll(victim, { label: `${victim.name} clings to its soul (${i} of ${gV}) · Resolve + generation modifier`, attributes: ['resolve'], extra: gV, hunger: false, drop: /^(In torpor|Staked|Tied up|Held)\b/ })
     const opp = a2Int(vr?.v?.successes)
     const r = await a2nRoll(actor, { label: `Diablerie ${i} of ${gV} · ${a2Cap(setup.attr)} + generation modifier vs ${victim.name}`, attributes: [setup.attr], extra: gM, opponent: opp, notes: ['Ties go to the victim (PG p.66).'] })
     if (!r) { won = false; break }
     let v = r.v
     while (v.win !== true) {
-      if (v.painful) { soul = true; won = false; break }
+      if (v.painful) { soul = true; painful = true; won = false; break }
       const wp = a2Int(actor.system?.willpower?.value)
       const choice = await foundry.applications.api.DialogV2.wait({
         window: { title: `Diablerie ${i} of ${gV}: not won` },
@@ -12870,7 +12873,7 @@ async function a2nDiablerie (actorLike = null, victimLike = null) {
   const lines = []
   if (!won) {
     lines.push(`${victim.name} meets Final Death. Its soul slips away and is lost: ${actor.name} gains nothing (PG p.66).`)
-    if (soul) lines.push(`A painful failure: the soul of ${victim.name} hides within ${actor.name}. At its next frenzy the soul takes control for the rest of that night; after three such nights without a purging ritual it rules for good (PG p.66).`)
+    if (soul) lines.push(`${painful ? 'A painful failure' : "The Beast's Bargain was struck all the same"}: the soul of ${victim.name} hides within ${actor.name}. At its next frenzy the soul takes control for the rest of that night; after three such nights without a purging ritual it rules for good (PG p.66).`)
     if (Object.keys(upd).length) await actor.update(upd)
     await a2nCard(actor, `Diablerie fails: ${actor.name}`, lines)
     return { won: false, soul }
@@ -13099,7 +13102,7 @@ const A2D_KEYS = [
   { key: 'rank', label: 'Humanity rank' },
   { key: 'violations', label: 'violations' }
 ]
-const A2D_ACT = { action: 'Action', minorAction: 'Minor', minor: 'Minor', reaction: 'Reaction', free: 'Free', passive: 'Passive', downtime: 'Downtime', none: '' }
+const A2D_ACT = { action: 'Action', minorAction: 'Minor', minor: 'Minor', reaction: 'Reaction', prolonged: 'Prolonged', free: 'Free', passive: 'Passive', downtime: 'Downtime', none: '' }
 
 // ---- pure rules ----
 // What changed between two snapshots. → [{ key, label, from, to, all }]
@@ -13149,7 +13152,7 @@ function a2dCoteriePlus (resources = [], { index = null, name = '', kind = 'soci
   return { resources: list, line: `A new shared Resource for the coterie: ${n}, 1 dot.` }
 }
 // Is this power card one the module left to the Storyteller?
-function a2dNeedsCall (c = {}) { return Boolean(c.why) && !(c.self?.length) && !(c.fxTarget?.length) && !(c.fxSelfWin?.length) && !(c.manual?.length) }
+function a2dNeedsCall (c = {}) { return Boolean(c.why) && !(c.self?.length) } // the same cards that say "Not automated"
 
 // ---- helpers ----
 const a2dState = { hooked: false, snap: new Map(), log: [], seq: 0, logApp: null }
@@ -13177,7 +13180,7 @@ async function a2dPowers (actorLike = null) {
   let last = null
   for (const [i, p] of powers.entries()) {
     const disc = p.system?.disciplineType ?? ''
-    if (disc !== last) { rows.push(`<tr class="a2d-head"><th colspan="5">${a2Esc(a2TraitLabel('Disciplines', disc))} ${'●'.repeat(a2Clamp(a2Int(actor.system?.disciplines?.[disc]?.value), 0, 10))}</th></tr>`); last = disc }
+    if (disc !== last) { rows.push(`<tr class="a2d-head"><th colspan="5">${a2Esc(a2TraitLabel('Disciplines', disc))} ${'●'.repeat(a2Clamp(a2Int(actor.system?.vampire?.disciplines?.[disc]?.effective ?? actor.system?.vampire?.disciplines?.[disc]?.value), 0, 10))}</th></tr>`); last = disc }
     const costs = a2xItemCosts(p.system, p.flags)
     const short = actor.type === 'npc' ? [] : a2xCostShortfall(costs, have, { vitae: rules ? rules.vitae : true })
     const cost = [costs.health ? `${costs.health} Vitae` : '', costs.willpower ? `${costs.willpower} Willpower` : ''].filter(Boolean).join(', ') || 'free'
@@ -13197,7 +13200,7 @@ async function a2dPowers (actorLike = null) {
     window: { title: `Powers: ${actor.name}`, resizable: true },
     position: { width: 620 },
     content: `<div class="a2d-dialog"><p class="hint">Vitae ${have.health} · Willpower ${have.willpower}${frenzy ? ` · in a ${a2Esc(frenzy.type)} frenzy` : ''}. Greyed: it can't be paid for right now.
-      <select name="filter"><option value="">all</option><option value="action">actions</option><option value="minorAction">minor actions</option><option value="reaction">reactions</option></select></p>
+      <select name="filter"><option value="">all</option><option value="action">actions</option><option value="minorAction">minor actions</option><option value="reaction">reactions</option><option value="prolonged">prolonged</option></select></p>
       <div class="a2d-scroll"><table class="a2d-table"><tr><th>Power</th><th class="c">Takes</th><th class="c">Cost</th><th></th></tr>${rows.join('')}</table></div></div>`,
     buttons: [{ action: 'close', label: 'Close' }],
     rejectClose: false,
@@ -13231,6 +13234,7 @@ function a2dRenderCall (message, root) {
   let note = ''
   try { const spec = item ? a2pFindSpec(item, a2pState.data ?? {}) : null; note = (spec?.fx ?? []).map((f) => f.note).filter(Boolean).join(' ') } catch (e) { /* no table */ }
   const lines = [`Left to you: ${c.why}.`]
+  if ((c.fxTarget ?? []).length || (c.fxSelfWin ?? []).length) lines.push('The part with numbers is handled above; the rest is your call.')
   if (note) lines.push(`Guide: ${note}.`)
   lines.push(c.noRoll ? 'Used without a roll.' : `The roll: ${a2Plural(a2Int(c.successes), 'success', 'successes')}${c.win === false ? ', a failure' : c.margin ? `, margin ${c.margin}` : ''}.`)
   if (c.opposeText) lines.push(`It is resisted with ${c.opposeText}.`)
