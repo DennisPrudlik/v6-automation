@@ -335,11 +335,11 @@ const A2_SETTING = {
 const A2_HUNGER = 'Hunger'
 const A2_CREATURES = ['vampire', 'ghoul', 'mortal', 'animal', 'other']
 // What each creature gets under Alpha 2. Ghouls are mortals with 5 Vitae and
-// no Hunger dice (PG 102-103, 136); mortals and animals have no Vitae; only
+// no Hunger dice (PG 102-103, 136), and Blood Surge at the neonate tier (PG p.114); mortals and animals have no Vitae; only
 // vampires (and Duskborn) have a generation modifier and Humanity (PG 28, 50, 99).
 const A2_CREATURE_RULES = {
   vampire: { vitae: true, hunger: true, surge: true, endurance: true, humanity: true, baneful: true, mendPerTurn: 'twice the generation modifier' },
-  ghoul: { vitae: true, hunger: false, surge: false, endurance: false, humanity: false, baneful: false, mendPerTurn: '1' },
+  ghoul: { vitae: true, hunger: false, surge: true, endurance: false, humanity: false, baneful: false, mendPerTurn: '1' },
   mortal: { vitae: false, hunger: false, surge: false, endurance: false, humanity: false, baneful: false },
   animal: { vitae: false, hunger: false, surge: false, endurance: false, humanity: false, baneful: false },
   other: { vitae: false, hunger: false, surge: false, endurance: false, humanity: false, baneful: true }
@@ -3632,7 +3632,7 @@ const A2T_TIERS = {
   ancilla: { label: 'Ancilla', maxDots: 7, maxDiscipline: 7, surgeAttr: 4, surgeDisc: 7 },
   elder: { label: 'Elder', maxDots: 8, maxDiscipline: 8, surgeAttr: 6, surgeDisc: 8 },
   methuselah: { label: 'Methuselah (house)', maxDots: 10, maxDiscipline: 10, surgeAttr: 8, surgeDisc: 10 },
-  ghoul: { label: 'Ghoul', maxDots: 5, maxDiscipline: 3, surgeAttr: 0, surgeDisc: 0 },
+  ghoul: { label: 'Ghoul', maxDots: 5, maxDiscipline: 3, surgeAttr: 2, surgeDisc: 3 }, // neonate tier (PG p.114); Discipline maximum 3 is our house row
   mortal: { label: 'Mortal', maxDots: 5, maxDiscipline: 0, surgeAttr: 0, surgeDisc: 0 }
 }
 
@@ -4340,7 +4340,7 @@ function a2tSurgeTargets (actor, tier) {
 
 async function a2tBloodSurge (actor) {
   if (!actor?.isOwner) return null
-  if (!a2Rules(actor)?.surge || !actor.system?.canBloodSurge) { ui.notifications.warn(`${actor.name} can't use Blood Surge (PG p.137: vampires and Duskborn).`); return null }
+  if (!a2Rules(actor)?.surge || !actor.system?.canBloodSurge) { ui.notifications.warn(`${actor.name} can't use Blood Surge: it has no Vitae to burn (PG p.137).`); return null }
   const vitae = a2Int(actor.system.health?.value)
   if (vitae < 1) { ui.notifications.warn(`${actor.name} has no Vitae for a Blood Surge.`); return null }
   const tier = a2tActorTier(actor)
@@ -10188,7 +10188,7 @@ function a2vCommand (text) {
   return { cmd, arg }
 }
 function a2vChat (text) {
-  if (!a2vOn()) return true
+  if (!a2Enabled()) return true
   const c = a2vCommand(text)
   if (!c) return true
   const A = globalThis.V6Alpha2 ?? {}
@@ -10199,7 +10199,7 @@ function a2vChat (text) {
       case 'help': ChatMessage.create({ content: `<div class="a2v-result"><p><strong>V6 chat commands</strong> (with or without "/v6 " in front)</p><ul>${A2V_HELP.map(([a, b]) => `<li><code>${a}</code>: ${b}</li>`).join('')}</ul></div>`, whisper: [game.user.id] }); break
       case 'test': { const t = a2vParsePool(c.arg); if (!t) ui.notifications.warn('Use it like: /test wits+awareness 3'); else a2lRollTest(t, {}) ; break }
       case 'req': { if (!gm()) break; const t = a2vParsePool(c.arg); a2lRequestDialog(t ? { test: t } : {}); break }
-      case 'act': a2vOpen(actor); break
+      case 'act': if (a2vOn()) a2vOpen(actor); else ui.notifications.info('The action menu is switched off in the module settings.'); break
       case 'states': a2zOpen(actor); break
       case 'feed': A.tools?.feed?.(actor); break
       case 'surge': A.tools?.bloodSurge?.(actor); break
@@ -10277,7 +10277,8 @@ function a2vTracking (actor) {
 function a2vRenderSheet (app, element) {
   try {
     const actor = app?.document ?? app?.actor
-    if (!a2vOn() || actor?.documentName !== 'Actor' || !actor.isOwner || !(a2Rules(actor) || actor.type === 'npc')) return
+    if (!a2Enabled() || actor?.documentName !== 'Actor' || !actor.isOwner || !(a2Rules(actor) || actor.type === 'npc')) return
+    const menuOn = a2vOn()
     const root = element instanceof HTMLElement ? element : element?.[0]
     const tab = root?.querySelector('section.actions-section, section.tab[data-tab="actions"]')
     if (!tab || tab.querySelector('.a2v-sheet')) return
@@ -10286,18 +10287,19 @@ function a2vRenderSheet (app, element) {
     const groups = [...new Set(A2V_MOVES.map((m) => m.group))]
     const box = document.createElement('section')
     box.className = 'a2v-sheet'
-    box.innerHTML = '<header><span>V6 tools</span><a data-a2v-menu title="Open the action menu as a window"><i class="fa-solid fa-up-right-from-square"></i></a></header>'
+    box.innerHTML = `<header><span>V6 tools</span>${menuOn ? '<a data-a2v-menu title="Open the action menu as a window"><i class="fa-solid fa-up-right-from-square"></i></a>' : ''}</header>`
     // without the filled lists below (alpha2-acts), the actions sit here as buttons
-    if (!(typeof a2qOn === 'function' && a2qOn() && actor.items.some((i) => i.type === 'action' && i.flags?.world?.a2act))) { // eslint-disable-line no-undef
+    if (menuOn && !(typeof a2qOn === 'function' && a2qOn() && actor.items.some((i) => i.type === 'action' && i.flags?.world?.a2act))) { // eslint-disable-line no-undef
       box.insertAdjacentHTML('beforeend', `<p class="a2v-sheet-hint">Target a token first (hover it, press T) for anything aimed at someone.</p>${groups.map((g) => { const list = A2V_MOVES.filter((m) => m.group === g && usable(m)); return list.length ? `<div class="a2v-sheet-row"><label>${g}</label><div>${list.map((m) => `<button type="button" data-a2v-move="${m.id}" title="${a2Esc(`${m.pool ? m.pool + '. ' : ''}${m.hint ?? ''}`)}"><i class="fa-solid ${m.icon}"></i> ${a2Esc(m.label)}</button>`).join('')}</div></div>` : '' }).join('')}`)
     }
     // the tools from the token controls, and what the module is tracking for this character
     const A = globalThis.V6Alpha2 ?? {}
     const nightOn = Boolean(A.night) && a2eGet('humanityFlow', true) !== false
+    const storyOn = a2eGet('story', true) !== false
     const tools = [
       ['States', 'fa-person-falling', () => a2zOpen(actor), true],
       ['Feed', 'fa-droplet', () => A.tools?.feed?.(actor), vamp],
-      ['Blood Surge', 'fa-bolt', () => A.tools?.bloodSurge?.(actor), vamp],
+      ['Blood Surge', 'fa-bolt', () => A.tools?.bloodSurge?.(actor), Boolean(a2Rules(actor)?.surge)],
       ['Frenzy test', 'fa-face-angry', () => a2xFrenzyTest(actor, {}), vamp],
       ['Powers', 'fa-bolt-lightning', () => A.desk?.powers?.(actor), Boolean(A.desk) && actor.items.some((i) => i.type === 'discipline')],
       ['Humanity', 'fa-scale-balanced', () => A.night?.humanity?.(actor), nightOn && Boolean(a2Rules(actor)?.humanity)],
@@ -10305,8 +10307,8 @@ function a2vRenderSheet (app, element) {
       ['Torpor', 'fa-bed', () => A.night?.torpor?.(actor), nightOn && vamp],
       ['Limbs', 'fa-bone', () => A.fight?.limbs?.(actor), Boolean(A.fight) && actor.type === 'vampire'],
       ['Spend XP', 'fa-star', () => A.tools?.spendXP?.(actor), true],
-      ['Blood Bonds', 'fa-link', () => A.story?.bonds?.(actor), true],
-      ['Downtime', 'fa-moon', () => A.story?.downtime?.(actor), true],
+      ['Blood Bonds', 'fa-link', () => A.story?.bonds?.(actor), storyOn],
+      ['Downtime', 'fa-moon', () => A.story?.downtime?.(actor), storyOn],
       ['Coterie', 'fa-people-roof', () => A.table?.coterie?.(), true],
       ['Boons', 'fa-handshake', () => A.desk?.boons?.(), Boolean(A.desk)],
       ['Creation', 'fa-wand-magic-sparkles', () => A.create?.(actor), game.user.isGM || (typeof a2cBlank === 'function' && a2cBlank(actor))], // eslint-disable-line no-undef
@@ -10342,8 +10344,8 @@ async function a2MovesBoot () {
     Hooks.on('renderActorSheetV2', a2vRenderSheet)
     Hooks.on('getSceneControlButtons', (controls) => {
       const tools = controls?.tokens?.tools
-      if (!tools || !a2vOn()) return
-      tools['v6a2-actions'] = { name: 'v6a2-actions', title: 'Actions (attacks, wrestling, team actions)', icon: 'fa-solid fa-hand-fist', order: 105, button: true, onChange: () => a2vOpen() }
+      if (!tools || !a2Enabled()) return
+      if (a2vOn()) tools['v6a2-actions'] = { name: 'v6a2-actions', title: 'Actions (attacks, wrestling, team actions)', icon: 'fa-solid fa-hand-fist', order: 105, button: true, onChange: () => a2vOpen() }
       tools['v6a2-states'] = { name: 'v6a2-states', title: 'States (surprised, on the ground, burning, cover…)', icon: 'fa-solid fa-list-check', order: 106, button: true, onChange: () => a2zOpen() }
     })
     try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
@@ -10478,6 +10480,7 @@ function a2yBondDice (stage, role, { social = false, contested = false, attack =
 
 const a2yState = { hooked: false, pending: new Map(), seen: new Set() }
 function a2yOn () { return a2Enabled() && a2eGet('story', true) !== false }
+function a2yGate () { if (a2yOn()) return true; ui.notifications?.info('Social conflict, tasks, bonds and downtime are switched off in the module settings.'); return false }
 function a2yActor () { return globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null }
 function a2yEff (actor, kind, key) { const v = actor?.system?.[kind]?.[key]; return a2Int(v?.effective ?? v?.value) }
 function a2yBestPool (actor, pools) { return [...pools].sort((x, y) => (a2yEff(actor, 'attributes', y[0]) + a2yEff(actor, 'skills', y[1])) - (a2yEff(actor, 'attributes', x[0]) + a2yEff(actor, 'skills', x[1])))[0] }
@@ -10488,6 +10491,7 @@ function a2yTier (actor) { try { return a2Creature(actor) === 'vampire' ? a2cTie
 function a2ySocial () { const s = a2eGet('social', null); return s && s.id ? s : null }
 async function a2ySocialSave (s) { return game.settings.set(a2eNs(), a2eKey('social'), s) }
 async function a2ySocialStart () {
+  if (!a2yGate()) return null
   if (!game.user.isGM) { ui.notifications.warn('The Storyteller starts a social conflict.'); return null }
   const res = await foundry.applications.api.DialogV2.prompt({
     window: { title: 'Social conflict' },
@@ -10568,6 +10572,7 @@ function a2ySocialRender (message, root) {
 
 // ---- prolonged tasks ----
 async function a2yTaskStart (preset = {}) {
+  if (!a2yGate()) return null
   if (!game.user.isGM) { ui.notifications.warn('The Storyteller sets up a prolonged task.'); return null }
   const attrs = typeof A2L_ATTRS !== 'undefined' ? A2L_ATTRS : []
   const skills = typeof A2L_SKILLS !== 'undefined' ? A2L_SKILLS : []
@@ -10680,6 +10685,7 @@ function a2yBondMods (actor, foe, roll) {
   return null
 }
 async function a2yBondsOpen (actorLike = null) {
+  if (!a2yGate()) return null
   const actor = actorLike?.documentName === 'Actor' ? actorLike : a2yActor()
   if (!actor) { ui.notifications.warn('Select a token first.'); return null }
   if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
@@ -10718,6 +10724,7 @@ async function a2yNightBonds (actors, night) {
 
 // ---- downtime ----
 async function a2yDowntime (actorLike = null) {
+  if (!a2yGate()) return null
   const actor = actorLike?.documentName === 'Actor' ? actorLike : a2yActor()
   if (!actor) { ui.notifications.warn('Select your token first.'); return null }
   if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
