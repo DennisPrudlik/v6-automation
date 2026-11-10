@@ -11908,7 +11908,68 @@ globalThis.a2ActsBoot ??= a2ActsBoot
 // if you prefer, straight into the world. Re-running updates what it made
 // before (matched by a hidden key) instead of duplicating it.
 // ---------------------------------------------------------------------------
-/* global game, ui, foundry, Folder, Item, Actor, JournalEntry, Scene, CONFIG, Image, File */
+/* global game, ui, foundry, Folder, Item, Actor, JournalEntry, Scene, CONFIG, CONST, Image, File */
+
+// ---- journal pages, the same way for every import ---------------------------
+// A bundle built before a layout fix would bring the old pages back. So every
+// import puts journal pages through the same rules the bundle builder uses:
+// one form for the per-Discipline page names, no first heading that only
+// repeats the page name, and headings that start at h2.
+const V6I_ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', hellip: '…', eacute: 'é', egrave: 'è', agrave: 'à', uuml: 'ü', ouml: 'ö', auml: 'ä', szlig: 'ß', ccedil: 'ç', ntilde: 'ñ' }
+function v6iUnescape (s) {
+  s = String(s ?? '')
+  if (typeof document !== 'undefined' && document.createElement) { const t = document.createElement('textarea'); t.innerHTML = s; return t.value }
+  return s.replace(/&#(\d+);/g, (m, n) => String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi, (m, n) => String.fromCodePoint(parseInt(n, 16))).replace(/&([a-z]+);/gi, (m, n) => V6I_ENT[n] ?? m)
+}
+function v6iEscape (s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' }[c])) }
+function v6iNormTitle (t) {
+  t = v6iUnescape(String(t ?? '').replace(/<[^>]+>/g, '')).toLowerCase()
+  t = t.replace(/^\s*(?:\d+[.)]|chapter\s+\w+\s*[:.-])\s*/, '').replace(/\s*\(v6\)\s*$/, '')
+  return t.replace(/[^a-z0-9]+/g, ' ').trim()
+}
+// 'Fortitude: Elder Powers', 'Elder Powers — Fortitude' → 'Elder Powers: Fortitude'
+function v6iPageTitle (name) {
+  const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1).toLowerCase()
+  let m = String(name ?? '').match(/^(.*?)\s*(?::|—|-)\s*(elder|ported) powers$/i)
+  if (m) return `${cap(m[2])} Powers: ${m[1].trim()}`
+  m = String(name ?? '').match(/^(Elder|Ported) Powers\s*(?:—|:|-)\s*(.+)$/i)
+  if (m) return `${cap(m[1])} Powers: ${m[2].trim()}`
+  return name
+}
+function v6iTidyPage (content, name) {
+  let c = String(content ?? '').replace(/^\s+/, '')
+  name = String(name ?? '')
+  const m = c.match(/^<(h[1-6])[^>]*>([\s\S]*?)<\/\1>\s*/)
+  if (m) {
+    const h = v6iNormTitle(m[2]); const n = v6iNormTitle(name)
+    const [short, long] = h.length <= n.length ? [h, n] : [n, h]
+    const rawH = v6iUnescape(m[2].replace(/<[^>]+>/g, '')).trim()
+    const low = rawH.toLowerCase(); const lname = name.toLowerCase()
+    if (h && n && (h === n || (long.includes(short) && short.length >= Math.max(4, long.length * 0.6)))) c = c.slice(m[0].length)
+    else if (lname && (low.startsWith(lname) || low.endsWith(lname))) {
+      const at = low.indexOf(lname)
+      let extra = (rawH.slice(0, at) + ' ' + rawH.slice(at + name.length)).replace(/^[\s:–—-]+|[\s:–—-]+$/g, '').trim()
+      if (extra.length < 4 || /\b(?:of|the|a|an|and|to|for|in|on)$/i.test(extra)) extra = ''
+      c = (extra ? `<p><em>${v6iEscape(extra)}</em></p>\n` : '') + c.slice(m[0].length)
+    } else if (m[1] === 'h1') c = `<p><em>${m[2].trim()}</em></p>\n` + c.slice(m[0].length)
+  }
+  const levels = [...c.matchAll(/<h([1-6])\b/g)].map((x) => Number(x[1]))
+  if (levels.length && Math.min(...levels) !== 2) {
+    const shift = 2 - Math.min(...levels)
+    c = c.replace(/<(\/?)h([1-6])\b/g, (x, sl, lv) => `<${sl}h${Math.min(6, Math.max(2, Number(lv) + shift))}`)
+  }
+  return c
+}
+// The pages of one journal, tidied; a journal made only of per-Discipline pages is put in A to Z order.
+function v6iPages (pages) {
+  const out = (pages ?? []).map((p) => {
+    if ((p.type ?? 'text') !== 'text' || typeof p.text?.content !== 'string') return p
+    const name = v6iPageTitle(p.name)
+    return { ...p, name, text: { ...p.text, content: v6iTidyPage(v6iTidyPage(p.text.content, p.name), name) } }
+  })
+  if (out.length >= 4 && out.every((p) => /^(?:Elder|Ported) Powers: /.test(p.name ?? ''))) out.sort((a, b) => String(a.name).localeCompare(String(b.name)))
+  return out
+}
 
 async function runV6Importer (opts = {}) {
   const FLAG = 'v6key'
@@ -12042,7 +12103,9 @@ async function runV6Importer (opts = {}) {
     const meta = (e) => ({ ...withFlags(e), folder: e.folder ? folderIds[e.folder] ?? null : null })
 
     const items = byKey(game.items); const newItems = []; const upd = []
-    for (const e of data.items ?? []) { const d = meta(e); const ex = items.get(e.key); if (ex) upd.push({ _id: ex.id, ...d }); else newItems.push(d) }
+    // rules items are for everyone to look up: players can see them unless the bundle says otherwise
+    const seen = (d) => ({ ...d, ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER, ...(d.ownership ?? {}) } })
+    for (const e of data.items ?? []) { const d = seen(meta(e)); const ex = items.get(e.key); if (ex) upd.push({ _id: ex.id, ...d }); else newItems.push(d) }
     for (const c of chunk(newItems, 100)) await Item.createDocuments(c)
     for (const c of chunk(upd, 100)) await Item.updateDocuments(c, { recursive: false, diff: false })
     if (data.items?.length) note(`${data.name}: ${newItems.length} items created, ${upd.length} updated.`)
@@ -12060,7 +12123,7 @@ async function runV6Importer (opts = {}) {
     const journals = byKey(game.journal); let jc = 0; let ju = 0
     for (const e of data.journals ?? []) {
       const d = meta(e); const ex = journals.get(e.key)
-      d.pages = (d.pages ?? []).map((p, i) => ({ sort: (i + 1) * 100, ...p }))
+      d.pages = v6iPages(d.pages).map((p, i) => ({ ...p, sort: (i + 1) * 100 }))
       if (ex) { const pages = d.pages; delete d.pages; await ex.update(d); await ex.deleteEmbeddedDocuments('JournalEntryPage', ex.pages.map((p) => p.id)); await ex.createEmbeddedDocuments('JournalEntryPage', pages); ju++ } else { await JournalEntry.create(d); jc++ }
     }
     if (data.journals?.length) note(`${data.name}: ${jc} journals created, ${ju} updated.`)
@@ -12090,14 +12153,14 @@ async function runV6Importer (opts = {}) {
     for (const f of data.folders ?? []) fid[f.key] = stableId(f.key)
     const folders = (data.folders ?? []).map((f, i) => ({ _id: fid[f.key], name: f.name, type: f.type, folder: f.parent ? fid[f.parent] ?? null : null, sorting: 'a', sort: (i + 1) * 100, color: null, flags: { world: { [FLAG]: f.key } } }))
     const doc = (e) => ({ ...withFlags(e), _id: stableId(e.key), folder: e.folder ? fid[e.folder] ?? null : null })
-    const items = (data.items ?? []).map(doc)
+    const items = (data.items ?? []).map(doc).map((d) => ({ ...d, ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER, ...(d.ownership ?? {}) } }))
     const actors = (data.actors ?? []).map((e) => {
       const d = doc(e)
       d.items = (d.items ?? []).map((it, i) => ({ ...it, _id: stableId(`${e.key}:item:${i}`) }))
       if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
       return d
     })
-    const journal = (data.journals ?? []).map((e) => { const d = doc(e); d.pages = (d.pages ?? []).map((p, i) => ({ ...p, _id: stableId(`${e.key}:page:${i}`), sort: (i + 1) * 100 })); return d })
+    const journal = (data.journals ?? []).map((e) => { const d = doc(e); d.pages = v6iPages(d.pages).map((p, i) => ({ ...p, _id: stableId(`${e.key}:page:${i}`), sort: (i + 1) * 100 })); return d })
     const scenes = []
     for (const e of data.scenes ?? []) scenes.push({ ...(await sceneData(e, e.folder ? fid[e.folder] ?? null : null)), _id: stableId(e.key) })
     const img = scenes.find((s) => s.thumb)?.thumb ?? 'icons/svg/book.svg'
