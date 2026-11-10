@@ -357,7 +357,8 @@ const A2_ALPHA1_RANK = { 1: 1, 2: 3, 3: 5, 4: 6, 5: 8, 6: 9, 7: 10 }
 const a2State = { pendingVs: new Map(), pendingPreset: new Map(), localVs: new Map(), RollDialog: null, booting: null }
 
 // ---- pure helpers (no Foundry globals; unit-tested in test/alpha2.test.mjs) ----
-function a2Int (v, d = 0) { const n = Math.floor(Number(v)); return Number.isFinite(n) ? n : d }
+// nothing there (null, undefined, an empty field) is the default, not 0
+function a2Int (v, d = 0) { if (v === null || v === undefined || v === '') return d; const n = Math.floor(Number(v)); return Number.isFinite(n) ? n : d }
 function a2Clamp (v, lo, hi) { return Math.min(Math.max(v, lo), Math.max(lo, hi)) }
 function a2Half (n) { return Math.max(0, Math.ceil(a2Int(n) / 2)) }
 function a2Esc (s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
@@ -1041,6 +1042,7 @@ function a2AdjustContext (res, args, WOD6eTest) {
 
 function a2InjectControls (RD, dialog, { actor, item } = {}) {
   const el = dialog?.element
+  if (el && actor && typeof a2uClaim === 'function') a2uClaim(actor, dialog.id) // eslint-disable-line no-undef
   if (!el || !actor || el.querySelector('.a2-controls')) return
   const header = el.querySelector('.roll-dialog-header')
   if (!header) return
@@ -2551,7 +2553,10 @@ function a2xDecorateBlock (message, roll, i, block) {
   const info = a2xAttackInfo(message, roll)
   // A power whose own card deals its damage gets no second button here (Draining Darkness).
   const byPowerCard = info?.item?.type === 'discipline' && typeof a2pHandlesDamage === 'function' && a2pHandlesDamage(info.item) // eslint-disable-line no-undef
-  if (info && !byPowerCard && (game.user.isGM || owner) && (v.win !== false || act.bargain)) {
+  // a wrestling move, a feed or a trick resolves on its own card: no weapon damage to apply here
+  const moveKind = message.flags?.world?.a2def?.move?.effect?.kind
+  const byMove = Boolean(moveKind) && !['stake', 'behead'].includes(moveKind)
+  if (info && !byPowerCard && !byMove && (game.user.isGM || owner) && (v.win !== false || act.bargain)) {
     btn('fa-solid fa-burst', 'Apply damage', `Weapon damage + margin to the targeted tokens, or the selected ones (PG p.116). ${info.label}.`, () => a2xPromptCardDamage(message, i)).dataset.a2x = 'damage'
   }
   if (bar.childElementCount) block.append(bar)
@@ -5859,7 +5864,8 @@ const A2P_SETTINGS = {
 const a2pState = { data: null, loading: null, lastRoll: new Map(), hooked: false, socket: false, ns: null, parsed: new Map(), prompting: new Set() }
 
 // ---- pure helpers (no Foundry globals; unit-tested in test/powers.test.mjs) ----
-function a2pInt (v, d = 0) { const n = Math.floor(Number(v)); return Number.isFinite(n) ? n : d }
+// nothing there (null, undefined, an empty field) is the default, not 0
+function a2pInt (v, d = 0) { if (v === null || v === undefined || v === '') return d; const n = Math.floor(Number(v)); return Number.isFinite(n) ? n : d }
 function a2pEsc (s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
 function a2pSigned (n) { return n > 0 ? `+${n}` : n < 0 ? `−${-n}` : '0' }
 function a2pPlural (n, one, many) { return `${n} ${n === 1 ? one : many}` }
@@ -7686,7 +7692,47 @@ function a2oOptions (def, actor) {
   return def.move.defences.map((d) => ({ key: d.key, label: d.label, text: d.text, test: { attributes: d.attributes ?? [], skills: d.skills ?? [], disciplines: [] }, pool: (d.attributes ?? []).reduce((t, k) => t + eff(`system.attributes.${k}`), 0) + (d.skills ?? []).reduce((t, k) => t + eff(`system.skills.${k}`), 0) })).sort((a, b) => b.pool - a.pool)
 }
 // alpha2-moves: the next roll of this actor is this move.
-function a2oSetMove (actor, move) { if (actor?.uuid) a2oState.moves.set(actor.uuid, { ...move, at: Date.now() }) }
+function a2oSetMove (actor, move) {
+  if (!actor?.uuid) return null
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  a2oState.moves.set(actor.uuid, { ...move, at: Date.now(), token })
+  return token
+}
+// Something noted for "the next roll" belongs to the roll dialog that was just opened: when that
+// dialog goes away, drop() runs a few seconds later, after a roll made from it has reached the chat.
+// So a cancelled dialog leaves nothing behind for the next, unrelated roll. before: the open apps' ids.
+async function a2eDialogGuard (before, drop) {
+  let app = null
+  for (let i = 0; i < 40 && !app; i++) {
+    await a2eSleep(100)
+    app = [...foundry.applications.instances.entries()].find(([id, x]) => !before.has(id) && x.rendered && x.element?.querySelector?.('button[data-action="roll"]'))?.[1] ?? null
+  }
+  if (!app) { drop(); return }
+  for (let i = 0; i < 3600 && app.rendered; i++) await a2eSleep(250)
+  await a2eSleep(6000)
+  drop()
+}
+// The next roll of this actor is no attack, whatever its pool (a Parry rolled with nothing to parry).
+function a2oPlainNext (actor) {
+  if (!actor?.uuid) return
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  a2oState.plain.set(actor.uuid, token)
+  a2eDialogGuard(new Set(foundry.applications.instances.keys()), () => { if (a2oState.plain.get(actor.uuid) === token) a2oState.plain.delete(actor.uuid) }).catch(() => {})
+}
+// The newest attack on this actor that still waits for its defence, if any.
+function a2oPendingAttack (actor) {
+  if (!actor?.uuid) return null
+  const now = Date.now()
+  return game.messages.contents.slice(-40).reverse().find((m) => {
+    const def = m.flags?.world?.a2def
+    if (!def || now - a2Int(m.timestamp) > 600000) return false
+    const t = (def.targets ?? []).find((x) => x.uuid === actor.uuid)
+    return Boolean(t) && !t.helpless && !a2oDefenceOf(m.id, actor.uuid)
+  }) ?? null
+}
+function a2oMoveGuard (actor, token, before) {
+  return a2eDialogGuard(before, () => { if (a2oState.moves.get(actor.uuid)?.token === token) a2oState.moves.delete(actor.uuid) })
+}
 function a2oOn () { return a2Enabled() && a2eGet('oppose', true) !== false }
 function a2oRoll (message) {
   const i = (message?.rolls ?? []).findIndex((r) => r?.options?.a2?.built)
@@ -7712,7 +7758,10 @@ async function a2oOnCreate (message, options, userId) {
       const targets = [...(game.user.targets ?? [])].map((t) => t.actor).filter((a) => a && a.uuid !== attacker?.uuid)
       let move = attacker ? a2oState.moves.get(attacker.uuid) : null
       if (move) { a2oState.moves.delete(attacker.uuid); if (Date.now() - move.at > 180000 || a2.vsMessage) move = null }
-      const wants = move
+      const plain = attacker ? a2oState.plain.delete(attacker.uuid) : false
+      const wants = plain
+        ? false
+        : move
         ? targets.length > 0 && !(a2Int(r.roll.options.difficulty) > 0)
         : a2oWants({ built: true, isDefence: Boolean(a2.vsMessage), frenzy: Boolean(a2.frenzyTest), difficulty: r.roll.options.difficulty, opponent: a2.opponent, kind: info?.kind ?? null, hasOppose: Boolean(a2.oppose), targets: targets.length })
       if (wants) {
@@ -7734,7 +7783,7 @@ async function a2oOnCreate (message, options, userId) {
 }
 
 // 2 and 3. Everyone sees the flag arrive: the GM rolls for its NPCs, players are told.
-const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve(), moves: new Map() }
+const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve(), moves: new Map(), plain: new Map() }
 function a2oOnUpdate (message, change) {
   try {
     if (!a2oOn() || !change?.flags?.world?.a2def) return
@@ -8002,12 +8051,26 @@ function a2uHint (actor, hint) {
   if (!actor?.uuid) return
   a2uState.hints.set(actor.uuid, { ...hint, at: Date.now() })
 }
+// A hint is for one roll dialog: the first dialog opened for the actor after the hint claims it,
+// and once that dialog is gone the hint no longer counts (a Dodge must not colour the next attack).
+function a2uClaim (actor, appId) {
+  const h = actor?.uuid ? a2uState.hints.get(actor.uuid) : null
+  if (!h || !appId) return
+  if (!h.app) h.app = appId
+  else if (h.app !== appId) a2uState.hints.delete(actor.uuid)
+}
+function a2uFresh (actor) {
+  const h = actor?.uuid ? a2uState.hints.get(actor.uuid) : null
+  if (!h || Date.now() - h.at > 120000) return null
+  if (h.app) { const app = globalThis.foundry?.applications?.instances?.get?.(h.app); if (!app || app.rendered === false) return null }
+  return h
+}
 function a2uContext (actor) {
-  const h = a2uState.hints.get(actor.uuid)
-  const hint = h && Date.now() - h.at < 120000 ? h : {}
+  const hint = a2uFresh(actor) ?? {}
   const ctx = { frenzy: hint.frenzy ?? null, resist: hint.resist ?? [], hunt: Boolean(hint.hunt), target: null, inCombat: false }
   try {
-    const t = [...(game.user?.targets ?? [])].map((x) => x.actor).find((a) => a && a.uuid !== actor.uuid) ?? (hint.against ? a2FromUuid(hint.against) : null)
+    // whoever this roll was named against comes first: the roller's own targets may be someone else
+    const t = (hint.against ? a2FromUuid(hint.against) : null) ?? [...(game.user?.targets ?? [])].map((x) => x.actor).find((a) => a && a.uuid !== actor.uuid)
     if (t) {
       const c = a2Creature(t)
       ctx.target = { creature: c === 'npc' ? 'mortal' : c, clan: t.items?.find?.((i) => i.type === 'clan')?.name ?? t.system?.vampire?.clan?.name ?? '' }
@@ -8323,7 +8386,11 @@ function a2lMyActor () {
 async function a2lRollTest (test, { actor = null, label = '', request = null } = {}) {
   actor ??= a2lMyActor()
   if (!actor) { ui.notifications.warn(game.user.isGM ? 'Select the token that rolls first. Shift-click asks the players instead.' : 'Select your token first, or have the Storyteller assign your character.'); return null }
-  if (request) a2lState.pendingReq.set(actor.uuid, { id: request, at: Date.now() })
+  if (request) {
+    const at = Date.now()
+    a2lState.pendingReq.set(actor.uuid, { id: request, at })
+    a2eDialogGuard(new Set(foundry.applications.instances.keys()), () => { if (a2lState.pendingReq.get(actor.uuid)?.at === at) a2lState.pendingReq.delete(actor.uuid) }).catch(() => {})
+  }
   const t = { attributes: test.attributes ?? [], skills: test.skills ?? [], disciplines: test.disciplines ?? [] }
   if (test.difficulty !== undefined && test.difficulty !== null) t.difficulty = a2Int(test.difficulty)
   return a2eOpenRoll(actor, t)
@@ -9393,7 +9460,7 @@ function a2zCompute ({ self = {}, foe = null, roll = {} } = {}) {
   }
   const fits = (e, side) => {
     if (e.only && e.only !== (side === 'self' ? roll.foeUuid : roll.selfUuid)) return false
-    if (side === 'self') return e.when === 'own-test' || (e.when === 'own-contested' && roll.contested) || (e.when === 'own-attack' && roll.attack)
+    if (side === 'self') return e.when === 'own-test' || (e.when === 'own-contested' && roll.contested) || (e.when === 'own-attack' && roll.attack) || (e.when === 'own-ranged' && roll.attack === 'ranged')
     return (e.when === 'foe-any' && roll.contested) || (e.when === 'foe-attack' && roll.attack) || (e.when === 'foe-defence' && roll.defence)
   }
   for (const e of self.edges ?? []) if (fits(e, 'self')) { add(a2Int(e.dice), e.label); out.used.push({ who: 'self', id: e.id }) }
@@ -9434,10 +9501,10 @@ function a2zMods (actor, t) {
   const attributes = (t?.attributes ?? []).map(key)
   const skills = (t?.skills ?? []).map(key)
   const ctx = typeof a2uContext === 'function' ? a2uContext(actor) : {}
-  const hint = (typeof a2uState !== 'undefined' && a2uState.hints.get(actor.uuid)) || {}
-  const fresh = hint.at && Date.now() - hint.at < 120000
+  const hint = (typeof a2uFresh === 'function' && a2uFresh(actor)) || {}
+  const fresh = Boolean(hint.at)
   const defence = Boolean(fresh && hint.defence)
-  const foeActor = [...(game.user?.targets ?? [])].map((x) => x.actor).find((a) => a && a.uuid !== actor.uuid) ?? (fresh && hint.against ? a2FromUuid(hint.against) : null)
+  const foeActor = (fresh && hint.against ? a2FromUuid(hint.against) : null) ?? [...(game.user?.targets ?? [])].map((x) => x.actor).find((a) => a && a.uuid !== actor.uuid) ?? null
   const attack = defence ? null : skills.includes('shooting') ? 'ranged' : skills.includes('fighting') ? 'melee' : null
   const res = a2zCompute({
     self: a2zSide(actor),
@@ -9832,7 +9899,10 @@ async function a2vRun (actor, id) {
   if (move.target && !target) { ui.notifications.warn(`${move.label}: target a token first (T).`); return null }
   if (move.needs && target && !a2zHas(target, move.needs)) ui.notifications.info(`${move.label} is for a target you hold. Rolling anyway.`)
   if (move.instant) return a2vInstant(actor, move, target)
-  if (move.effect || move.defences) a2oSetMove(actor, { id: move.id, label: move.label, melee: Boolean(move.melee), defences: move.defences ?? null, effect: move.effect ?? null })
+  const before = new Set(foundry.applications.instances.keys())
+  const token = move.effect || move.defences ? a2oSetMove(actor, { id: move.id, label: move.label, melee: Boolean(move.melee), defences: move.defences ?? null, effect: move.effect ?? null }) : null
+  if (token) a2oMoveGuard(actor, token, before).catch(() => {})
+  else a2oState.moves.delete(actor.uuid)
   const test = { attributes: [...move.test.attributes], skills: [...move.test.skills], disciplines: [] }
   if (move.modifier) test.modifier = { valueSource: 'flat', value: Math.abs(move.modifier), mode: move.modifier < 0 ? 'subtract' : 'add' }
   if (typeof a2uHint === 'function' && target) a2uHint(actor, { against: target.uuid })
@@ -9848,7 +9918,7 @@ async function a2vInstant (actor, move, target) {
       return a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> assists <strong>${a2Esc(target.name)}</strong>: +1 die on its next test (PG p.110).</p>`, actor)
     }
     case 'aim':
-      await a2zAddEdge(actor, { label: 'Steady aim', dice: 1, when: 'own-attack', from: actor.uuid, combatantId: null })
+      await a2zAddEdge(actor, { label: 'Steady aim', dice: 1, when: 'own-ranged', from: actor.uuid, combatantId: null })
       return a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> steadies the aim: +1 die on the next ranged attack, for the movement (PG p.109).</p>`, actor)
     case 'prone': {
       const on = !a2zHas(actor, 'prone')
@@ -11632,6 +11702,13 @@ async function a2qRun (actor, item) {
     else if (f.ref === 'bonds') await A.story?.bonds?.(actor)
     return true
   }
+  if (f?.ref === 'dodge' || f?.ref === 'parry') {
+    // answer the attack that is waiting, with everything a defence gets; without one it is a plain roll
+    const attack = a2oPendingAttack(actor)
+    if (attack) { await a2oDefend(attack, actor, f.ref); return true }
+    ui.notifications.info(`No attack on ${actor.name} is waiting for a defence: rolling ${f.ref === 'parry' ? 'Dexterity + Fighting' : 'Dexterity + Athletics'} as a plain test.`)
+    a2oPlainNext(actor)
+  }
   const t = a2qTest(item)
   if (f?.kind === 'social') {
     const s = A2Y_APPROACHES.find((x) => `soc-${x.id}` === f.ref)
@@ -11685,7 +11762,9 @@ function a2qRenderSheet (app, element) {
       }, true)
     }
     // any sheet that is opened gets the base actions it lacks, once per session
-    if (a2qFits(actor) && actor.isOwner && !actor.pack && !a2qState.filled.has(actor.id)) {
+    // one client does it: the Storyteller when one is online, otherwise whoever opened the sheet
+    const mine = game.users?.activeGM ? game.users.activeGM.isSelf : true
+    if (mine && a2qFits(actor) && actor.isOwner && !actor.pack && !a2qState.filled.has(actor.id)) {
       a2qState.filled.add(actor.id)
       if (a2qMissing(a2qCatalog(), a2qHave(actor), { vampire: a2Creature(actor) === 'vampire' }).length) a2qSync(actor).catch((e) => console.error('V6 Automation | action lists', e))
     }
@@ -11726,7 +11805,7 @@ async function a2ActsBoot () {
   if (!a2qState.hooked) {
     a2qState.hooked = true
     Hooks.on('renderActorSheetV2', a2qRenderSheet)
-    Hooks.on('createActor', (actor, options, userId) => { if (userId === game.user.id && a2qOn() && a2qFits(actor) && !actor.pack) a2qSync(actor).catch(() => {}) })
+    Hooks.on('createActor', (actor, options, userId) => { if ((game.users?.activeGM ? game.users.activeGM.isSelf : userId === game.user.id) && a2qOn() && a2qFits(actor) && !actor.pack) a2qSync(actor).catch(() => {}) })
     Hooks.on('updateActor', (actor, changes) => { if (changes?.ownership && game.users?.activeGM?.isSelf && a2qOn() && a2qFits(actor) && actor.hasPlayerOwner) a2qSync(actor).catch(() => {}) })
     const style = document.createElement('style')
     style.id = 'v6a-acts-style'
