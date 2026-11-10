@@ -8680,7 +8680,8 @@ function a2kHooks () {
   Hooks.on('renderChatMessageHTML', (message, html) => { try { a2kRenderChat(message, html) } catch (e) { console.error('V6 Automation | turn card', e) } })
   // a reaction ticked off: redraw that card for everyone who sees it
   Hooks.on('updateCombatant', (c, changes) => {
-    const id = changes?.flags?.world?.a2k?.card
+    // the change only lists what differs (often just "used"), so take the card from the combatant
+    const id = changes?.flags?.world?.a2k ? c.flags?.world?.a2k?.card : null
     const m = id ? game.messages.get(id) : null
     if (m) ui.chat?.updateMessage?.(m)
   })
