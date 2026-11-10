@@ -2557,6 +2557,11 @@ function a2xVerdict (message, roll) {
   return { opp, v: a2RollVerdict(roll, opp ? { successes: opp.successes, tieWin: opp.compare.win } : null) }
 }
 
+// Did the other side of a contested test strike a Beast's Bargain? Its failure is then a basic win (PG p.98).
+function a2xOppBargain (opp) {
+  try { return Boolean(opp && a2xAct(opp.message, (opp.message.rolls ?? []).indexOf(opp.roll)).bargain) } catch (e) { return false }
+}
+
 function a2xDecorateBlock (message, roll, i, block) {
   const a2 = roll.options.a2
   const act = a2xAct(message, i)
@@ -2623,7 +2628,7 @@ function a2xDecorateBlock (message, roll, i, block) {
   // a wrestling move, a feed or a trick resolves on its own card: no weapon damage to apply here
   const moveKind = message.flags?.world?.a2def?.move?.effect?.kind
   const byMove = Boolean(moveKind) && (!['stake', 'behead'].includes(moveKind) || message.flags?.world?.a2def?.settled === true)
-  if (info && !byPowerCard && !byMove && (game.user.isGM || owner) && (v.win !== false || act.bargain)) {
+  if (info && !byPowerCard && !byMove && (game.user.isGM || owner) && (v.win !== false || act.bargain) && !a2xOppBargain(opp)) {
     btn('fa-solid fa-burst', 'Apply damage', `Weapon damage + margin to the targeted tokens, or the selected ones (PG p.116). ${info.label}.`, () => a2xPromptCardDamage(message, i)).dataset.a2x = 'damage'
   }
   if (bar.childElementCount) block.append(bar)
@@ -2744,10 +2749,10 @@ async function a2xOnSocket (data, senderId) {
 // One answer per card at a time. A second click on Reroll, Beast's Bargain or Apply damage while
 // the first window is still open would open it again, and both answers would count (two
 // Willpower for one reroll, the damage twice). The second call is dropped instead.
-const a2xBusy = new Set()
+const a2xBusy = new Map()
 async function a2xOnce (key, fn) {
-  if (a2xBusy.has(key)) return null
-  a2xBusy.add(key)
+  if (Date.now() - (a2xBusy.get(key) ?? 0) < 120000) return null // a window left open for two minutes no longer blocks
+  a2xBusy.set(key, Date.now())
   try { return await fn() } finally { a2xBusy.delete(key) }
 }
 function a2xCardKey (messageOrId) { return `card:${a2xMessage(messageOrId)?.id ?? String(messageOrId)}` }
@@ -3413,6 +3418,7 @@ async function a2xPromptCardDamageNow (message, i) {
   const act = a2xAct(message, i)
   const { v } = a2xVerdict(message, roll)
   if (v.win === false && !act.bargain) { v6aNote.info('The attack failed: no damage (PG p.116).'); return null }
+  if (a2xOppBargain(a2xVerdict(message, roll).opp)) { v6aNote.info("The defender's Beast's Bargain turned its failure into a win: the attack misses, no damage (PG p.98)."); return null }
   const margin = act.bargain ? 0 : v.win === true ? Math.max(0, a2Int(v.margin)) : a2Int(v.successes)
   const marginNote = act.bargain ? "Beast's Bargain: a basic win has no margin (PG p.19)." : v.win === true ? '' : 'No defence roll is linked, so the margin is all your successes. If the target defended, use Compare first (PG p.116, p.120).'
   const tg = a2xCardTargets(message, roll, info.attacker)
@@ -6758,6 +6764,7 @@ async function a2pActivate (item, { roll = null, messageId = null, targets = nul
   if (repeat) fx = spec.repeat?.fx ? a2pActiveFx({ fx: spec.repeat.fx }, vars0.dots, act.choice) : fx.filter((f) => a2pSide(f) === 'target')
   const selfNow = []
   const selfOnWin = []
+  const selfSkipped = [] // needed a won test and the test failed: they land if a reroll wins after all
   const targetFx = []
   const manual = []
   // The power is active once paid for, whatever its test shows, unless an
@@ -6767,8 +6774,7 @@ async function a2pActivate (item, { roll = null, messageId = null, targets = nul
     if (when === 'manual' && f.kind !== 'damage') { manual.push(f); continue }
     if (a2pSide(f) === 'target') targetFx.push(f)
     else if (when === 'win' && contested) selfOnWin.push(f)
-    else if (when === 'win' && v?.win === false) continue
-    else selfNow.push(f)
+    else if (when === 'win' && v?.win === false) { selfSkipped.push(f); continue } else selfNow.push(f)
   }
   // Targets: the user's targeted tokens, without the caster.
   const tlist = (targets ?? a2pCurrentTargets()).filter((t) => t.uuid && t.uuid !== actor.uuid)
@@ -6816,6 +6822,7 @@ async function a2pActivate (item, { roll = null, messageId = null, targets = nul
   // Target parts: stored on the card so later resolution can build them.
   card.fxTarget = targetFx
   card.fxSelfWin = selfOnWin
+  card.fxSelfSkipped = selfSkipped
   card.vars = vars
   card.actData = act
   for (const [i, t] of tlist.entries()) {
@@ -6906,7 +6913,9 @@ function a2pCardBody (message) {
     else if (t.status === 'none') txt = 'no effect on targets'
     else txt = t.status
     rows.push(`<div class="a2p-line a2p-target" data-uuid="${a2pEsc(t.uuid)}"><em>${a2pEsc(t.name)}</em>: ${a2pEsc(txt)}</div>`)
+    if (t.note) rows.push(`<div class="a2p-line a2p-note">${a2pEsc(t.note)}</div>`)
   }
+  if (c.rollChanged) rows.push(`<div class="a2p-line a2p-note">${a2pEsc(c.rollChanged)}</div>`)
   if (c.ended) rows.push('<div class="a2p-line a2p-note">Ended.</div>')
   return rows.join('')
 }
@@ -7283,6 +7292,99 @@ function a2pOnUpdateMessage (message, changes) {
   if (!a2pOn()) return
   const other = changes?.flags?.world?.a2vs
   if (other) a2pResolveFromRolls(other, message).catch((e) => console.error('V6 Automation | powers', e))
+  // a roll that a power card was built on changed afterwards (a Willpower reroll, a Beast's Bargain)
+  if (changes?.rolls || foundry.utils.hasProperty(changes ?? {}, 'flags.world.a2.act')) {
+    const vs = (message.rolls ?? []).map((r) => r?.options?.a2?.vsMessage).find(Boolean)
+    a2pState.changed = (a2pState.changed ?? Promise.resolve()).then(() => (vs ? a2pOppChanged(vs, message) : a2pRollChanged(message))).catch((e) => console.error('V6 Automation | power, looked at again', e))
+  }
+}
+function a2pProcessor (card) { return game.users?.activeGM ? a2pIsActiveGM() : (card.author ?? card.user)?.id === game.user.id }
+function a2pHasBargain (message, roll) {
+  try { return typeof a2xAct === 'function' && Boolean(a2xAct(message, (message.rolls ?? []).indexOf(roll)).bargain) } catch (e) { return false } // eslint-disable-line no-undef
+}
+// The power's own test changed. The card shows the new result; effects that waited for a won test
+// land now; a target that had resisted a flat Difficulty or a roll on the table is looked at again.
+// What was already applied and scales with the roll stays as it is, and the card says so.
+async function a2pRollChanged (rollMsg) {
+  const roll = rollMsg?.rolls?.find((r) => r?.options?.a2?.built)
+  if (!roll) return
+  const v = roll.a2Verdict ?? (typeof a2RollVerdict === 'function' ? a2RollVerdict(roll) : null) // eslint-disable-line no-undef
+  if (!v) return
+  const bargain = a2pHasBargain(rollMsg, roll)
+  const successes = a2pInt(v.successes)
+  const win = bargain ? true : v.win
+  const margin = bargain ? 0 : Math.max(0, a2pInt(v.margin ?? v.successes))
+  for (const msg of (game.messages?.contents ?? []).slice(-120).filter((m) => m.flags?.world?.a2p?.rollMessageId === rollMsg.id)) {
+    if (!a2pProcessor(msg)) continue
+    let card = foundry.utils.deepClone(msg.flags.world.a2p)
+    if (card.ended || card.noRoll) continue
+    if (a2pInt(card.successes) === successes && card.win === win && a2pInt(card.margin) === margin) continue
+    const was = a2pInt(card.successes)
+    const applied = Boolean(card.self?.length) || (card.targets ?? []).some((t) => t.status === 'applied')
+    card.successes = successes
+    card.win = win
+    card.margin = margin
+    card.vars = { ...(card.vars ?? {}), successes, margin }
+    if (applied && was !== successes) card.rollChanged = `The roll changed after the power took effect (${was} → ${a2pPlural(successes, 'success', 'successes')}). What was already applied stands as first rolled: if it scales with the roll, end the power and use it again, or adjust it by hand.`
+    // self effects that needed a won test
+    if (card.fxSelfSkipped?.length && win !== false) {
+      const caster = a2pFrom(card.casterUuid)
+      if (caster) {
+        const sp = a2pBuildPart({ ...card.actData }, card.fxSelfSkipped, { side: 'self', holder: caster, vars: card.vars, choice: card.choice, autoDamage: a2pSetting('autoDamage') })
+        const conditions = sp.conditions.filter((c) => c.system.effects.length).map((c) => { c.flags.world.a2.activePower.main = false; c.flags.world.a2.activePower.statuses = []; return c })
+        const r = await a2pRoute(caster, { ...sp, statuses: [], conditions, power: card.power })
+        card.queue ??= []
+        if (r.entry) card.queue.push(r.entry)
+        card.self = [...(card.self ?? []), ...sp.lines]
+        card.manual = [...(card.manual ?? []), ...sp.instant.filter((x) => x.manual).map((x) => ({ ...x, holderUuid: caster.uuid, holderName: caster.name }))]
+      }
+      card.fxSelfSkipped = []
+    }
+    // targets that had resisted
+    const again = []
+    for (const t of card.targets ?? []) {
+      if (t.status !== 'lost') continue
+      if (v.mode === 'difficulty') { if (win === true) again.push([t.uuid, margin]) } else {
+        const opp = (game.messages?.contents ?? []).slice(-120).find((m) => m.rolls?.some((r) => r?.options?.a2?.vsMessage === rollMsg.id) && a2pFrom(t.uuid) && ChatMessage.getSpeakerActor?.(m.speaker)?.uuid === a2pFrom(t.uuid).uuid)
+        const or = opp?.rolls?.find((r) => r?.options?.a2?.built)
+        if (!or || a2pHasBargain(opp, or)) continue
+        // eslint-disable-next-line no-undef
+        const cmp = typeof a2Compare === 'function' ? a2Compare({ successes: roll.total, attr: roll.options.a2.attr }, { successes: or.total, attr: or.options.a2.attr }, true) : { margin: a2pInt(roll.total) - a2pInt(or.total), win: a2pInt(roll.total) > a2pInt(or.total) }
+        if (bargain || cmp.win) again.push([t.uuid, bargain ? 0 : Math.max(0, cmp.margin)])
+      }
+    }
+    for (const [uuid] of again) { const t = card.targets.find((x) => x.uuid === uuid); t.status = 'pending'; t.how = 'after the reroll' }
+    await a2pUpdateCard(msg, card)
+    for (const [uuid, m] of again) await a2pResolve(msg, uuid, true, m)
+  }
+}
+// The roll that resisted a power changed. A target the power already took hold of can't be let go
+// by the module (the effect may have done its work): the card tells the Storyteller.
+async function a2pOppChanged (powerMsgId, oppMsg) {
+  const powerMsg = game.messages?.get(powerMsgId)
+  const pr = powerMsg?.rolls?.find((r) => r?.options?.a2?.built)
+  const or = oppMsg?.rolls?.find((r) => r?.options?.a2?.built)
+  if (!pr || !or) return
+  const speaker = ChatMessage.getSpeakerActor?.(oppMsg.speaker)
+  for (const msg of (game.messages?.contents ?? []).slice(-120).filter((m) => m.flags?.world?.a2p?.rollMessageId === powerMsgId)) {
+    if (!a2pProcessor(msg)) continue
+    const card = foundry.utils.deepClone(msg.flags.world.a2p)
+    const t = (card.targets ?? []).find((x) => x.uuid === speaker?.uuid) ?? (card.targets ?? []).find((x) => a2pFrom(x.uuid)?.id === speaker?.id)
+    if (!t || card.ended) continue
+    // eslint-disable-next-line no-undef
+    const cmp = typeof a2Compare === 'function' ? a2Compare({ successes: pr.total, attr: pr.options.a2.attr }, { successes: or.total, attr: or.options.a2.attr }, true) : { margin: a2pInt(pr.total) - a2pInt(or.total), win: a2pInt(pr.total) > a2pInt(or.total) }
+    const holds = a2pHasBargain(oppMsg, or) || (!cmp.win && !a2pHasBargain(powerMsg, pr))
+    if (t.status === 'applied' && holds) {
+      const note = `${t.name}'s resistance changed and now holds (${a2pInt(or.total)} against ${a2pInt(pr.total)}). The effect is still on: Storyteller, take it off by hand if it should not have landed.`
+      if (t.note === note) continue
+      t.note = note
+      await a2pUpdateCard(msg, card)
+    } else if (t.status === 'lost' && !holds) {
+      t.status = 'pending'; t.how = 'after the reroll'
+      await a2pUpdateCard(msg, card)
+      await a2pResolve(msg, t.uuid, true, Math.max(0, cmp.margin))
+    }
+  }
 }
 // The card whose power roll is `powerMsgId` meets the opposing roll in `oppMsg`.
 async function a2pResolveFromRolls (powerMsgId, oppMsg) {
@@ -7928,7 +8030,7 @@ function a2oPowerAuto (message) {
 }
 
 // 2 and 3. Everyone sees the flag arrive: the GM rolls for its NPCs, players are told.
-const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve(), moves: new Map(), plain: new Map() }
+const a2oState = { hooked: false, seen: new Set(), queue: Promise.resolve(), moves: new Map(), plain: new Map(), busy: new Map() }
 function a2oOnUpdate (message, change) {
   try {
     if (!a2oOn() || !change?.flags?.world?.a2def) return
@@ -7952,7 +8054,14 @@ function a2oOnUpdate (message, change) {
   } catch (e) { console.error('V6 Automation | opposed test', e) }
 }
 
-async function a2oDefend (message, actor, key = null, { auto = false } = {}) {
+// One defence window per attack and defender: a second press while it is open is dropped.
+async function a2oDefend (message, actor, key = null, opts = {}) {
+  const lock = `defend:${message?.id}:${actor?.uuid}`
+  if (Date.now() - (a2oState.busy.get(lock) ?? 0) < 120000) return null // a window left open for two minutes no longer blocks
+  a2oState.busy.set(lock, Date.now())
+  try { return await a2oDefendNow(message, actor, key, opts) } finally { a2oState.busy.delete(lock) }
+}
+async function a2oDefendNow (message, actor, key = null, { auto = false } = {}) {
   const def = message?.flags?.world?.a2def
   const r = a2oRoll(message)
   if (!def || !r || !actor?.isOwner) return null
@@ -9815,6 +9924,7 @@ async function a2zOpen (actorLike = null) {
   if (!res) return null
   for (const [id, v] of Object.entries(res.states)) {
     const d = A2Z_BY_ID[id]
+    if (id === 'torpor' && !v.on && res.states.staked?.on) continue // a stake means torpor: ticking Staked alone doesn't untick it again
     if (v.on !== a2zHas(actor, id) || (v.on && d.levels && v.level !== a2zLevel(actor, id))) await a2zSet(actor, id, v.on, { level: v.level })
   }
   if (res.drop.length) await a2zDropEdges(actor, res.drop)
@@ -10131,47 +10241,91 @@ async function a2vInstant (actor, move, target) {
 }
 
 // The Storyteller's client settles a move once the resistance is in (or the target can't resist).
-async function a2vResolve (attack, defender) {
+// again: one of the two rolls changed after that (a Willpower reroll, a Beast's Bargain). The
+// outcome is worked out anew: a miss that became a hit is applied in full, a state or an edge
+// that no longer holds is taken back, and for damage or Vitae that already went in the card
+// tells the Storyteller what to put right by hand.
+async function a2vResolve (attack, defender, { again = false } = {}) {
   const def = attack?.flags?.world?.a2def
   const effect = def?.move?.effect
   const r = a2oRoll(attack)
-  if (!effect || !r || !defender || def.resolved) return null
+  if (!effect || !r || !defender) return null
+  if (def.resolved && !again) return null
+  const prev = again ? (def.done ?? null) : null
+  if (again && (!def.resolved || !prev)) return null // not settled yet, or settled before this was kept: leave it
   const attacker = a2FromUuid(def.attackerUuid)
   const helpless = (def.targets ?? []).find((t) => t.uuid === defender.uuid)?.helpless
   let win, margin
   if (helpless) { win = a2Int(r.roll.total) > 0 || effect.kind === 'feed'; margin = a2Int(r.roll.total) } else {
-    const { v } = a2xVerdict(attack, r.roll)
-    win = v.win === true
-    margin = Math.max(0, a2Int(v.margin))
+    const { v, opp } = a2xVerdict(attack, r.roll)
+    const mine = Boolean(a2xAct(attack, r.index).bargain) // the attacker's failure became a basic win, margin 0 (PG p.98)
+    const theirs = opp ? Boolean(a2xAct(opp.message, (opp.message.rolls ?? []).indexOf(opp.roll)).bargain) : false // the defender's did
+    win = theirs ? false : (v.win === true || mine)
+    margin = win && v.win === true && !mine ? Math.max(0, a2Int(v.margin)) : 0
   }
+  if (prev && prev.win === win && a2Int(prev.margin) === margin) return null // nothing changed
   const vit = attacker?.system?.health
   const out = a2vOutcome(effect, { win, margin, attacker: { name: attacker?.name, strength: a2vEff(attacker, 'strength'), stamina: a2vEff(attacker, 'stamina'), missing: vit ? a2Int(vit.max) - a2Int(vit.value) : 0 }, target: { name: defender.name, vampire: a2Creature(defender) === 'vampire', blood: a2Creature(defender) === 'vampire' ? a2Int(defender.system?.health?.value) : null } })
-  await attack.update({ 'flags.world.a2def.resolved': true, 'flags.world.a2def.settled': !out.button }) // settled: nothing left to apply by hand
+  const had = { damage: a2Int(prev?.damage), vitae: a2Int(prev?.vitae) }
+  const done = { win, margin, set: out.set, edge: prev?.edge ?? null, edgeDice: prev?.edgeDice ?? null, damage: had.damage, vitae: had.vitae, shared: Boolean(prev?.shared) }
+  await attack.update({ 'flags.world.a2def.resolved': true, 'flags.world.a2def.settled': !out.button, 'flags.world.a2def.done': done }) // settled: nothing left to apply by hand
+  const notes = []
   try {
-    for (const s of out.set) await a2zSet(s.who === 'self' ? attacker : defender, s.state, s.on)
-    if (out.edge) await a2zAddEdge(defender, { ...out.edge, from: attacker?.uuid ?? null, combatantId: a2vCombatantId(attacker) })
-    if (out.damage) {
+    const who = (s) => (s.who === 'self' ? attacker : defender)
+    const same = (x, y) => x.who === y.who && x.state === y.state && x.on === y.on
+    // what the first result set and the new one doesn't: back as it was
+    for (const s of (prev?.set ?? []).filter((x) => !out.set.some((y) => same(x, y)))) {
+      await a2zSet(who(s), s.state, !s.on)
+      if (s.state === 'staked' && s.on) { const t = who(s)?.flags?.world?.a2?.torpor; if ((!t || t.reason === 'staked') && a2zHas(who(s), 'torpor')) await a2zSet(who(s), 'torpor', false) } // the torpor the stake brought
+    }
+    for (const s of out.set.filter((x) => !(prev?.set ?? []).some((y) => same(x, y)))) await a2zSet(who(s), s.state, s.on)
+    const dice = out.edge ? a2Int(out.edge.dice) : null
+    if (done.edge && dice !== done.edgeDice) { await a2zDropEdges(defender, [done.edge]); done.edge = null; done.edgeDice = null }
+    if (out.edge && !done.edge) { const e = await a2zAddEdge(defender, { ...out.edge, from: attacker?.uuid ?? null, combatantId: a2vCombatantId(attacker) }); done.edge = e?.id ?? null; done.edgeDice = dice }
+    if (out.damage && !had.damage) {
       // a flaw found on the target adds to this damage too (PG p.111)
       const flaw = a2zEdges(defender).filter((e) => e.when === 'foe-damage').reduce((t, e) => t + a2Int(e.dice), 0)
       if (flaw) { out.damage += flaw; out.text += ` Flaw found: +${flaw}.` }
-    }
-    if (out.damage) await a2xApplyDamage([defender], { amount: out.damage, margin: 0, source: def.move.label, attackerUuid: attacker?.uuid ?? null, bodyAttack: true, messageId: attack.id, rollIndex: r.index })
-    if (out.vitae && attacker) {
+      await a2xApplyDamage([defender], { amount: out.damage, margin: 0, source: def.move.label, attackerUuid: attacker?.uuid ?? null, bodyAttack: true, messageId: attack.id, rollIndex: r.index })
+      done.damage = out.damage
+    } else if (prev && a2Int(out.damage) !== had.damage) notes.push(`${had.damage} damage went in on the first result; it would now be ${a2Int(out.damage)}. Storyteller: put it right by hand (the Automation log can take the first back).`)
+    if (out.vitae && attacker && !had.vitae) {
       await attacker.update({ 'system.health.value': Math.min(a2Int(vit.max), a2Int(vit.value) + out.vitae) })
       if (a2Creature(defender) === 'vampire') {
         await defender.update({ 'system.health.value': Math.max(0, a2Int(defender.system.health.value) - out.vitae) })
         if (typeof a2yDrink === 'function') await a2yDrink(attacker, defender) // eslint-disable-line no-undef
       }
-    }
-    if (effect.kind === 'coordinate' && win && attacker) {
-      const mine = game.combat?.started ? game.combat.combatants.filter((c) => c.actor && c.actor.uuid !== attacker.uuid && c.token?.disposition === game.combat.combatants.find((x) => x.actor?.uuid === attacker.uuid)?.token?.disposition).map((c) => c.actor) : []
-      const share = a2vShare(margin + 1, mine.length)
-      for (let i = 0; i < mine.length; i++) if (share[i]) await a2zAddEdge(mine[i], { label: `Coordinated by ${attacker.name}`, dice: share[i], when: 'own-test', from: attacker.uuid, combatantId: a2vCombatantId(attacker) })
-      out.text += mine.length ? ` ${mine.map((a, i) => (share[i] ? `${a.name} +${share[i]}` : '')).filter(Boolean).join(', ')}.` : ' No allies in the fight to give them to: hand them out by hand.'
+      done.vitae = out.vitae
+    } else if (prev && a2Int(out.vitae) !== had.vitae) notes.push(`${had.vitae} Vitae was taken on the first result; it would now be ${a2Int(out.vitae)}. Storyteller: put it right by hand.`)
+    if (effect.kind === 'coordinate' && attacker) {
+      if (done.shared) notes.push('The dice for the allies were handed out on the first result: change them in States.')
+      else if (win) {
+        const mine = game.combat?.started ? game.combat.combatants.filter((c) => c.actor && c.actor.uuid !== attacker.uuid && c.token?.disposition === game.combat.combatants.find((x) => x.actor?.uuid === attacker.uuid)?.token?.disposition).map((c) => c.actor) : []
+        const share = a2vShare(margin + 1, mine.length)
+        for (let i = 0; i < mine.length; i++) if (share[i]) await a2zAddEdge(mine[i], { label: `Coordinated by ${attacker.name}`, dice: share[i], when: 'own-test', from: attacker.uuid, combatantId: a2vCombatantId(attacker) })
+        out.text += mine.length ? ` ${mine.map((a, i) => (share[i] ? `${a.name} +${share[i]}` : '')).filter(Boolean).join(', ')}.` : ' No allies in the fight to give them to: hand them out by hand.'
+        done.shared = mine.length > 0
+      }
     }
   } catch (e) { console.error('V6 Automation | move', e); out.text += ' (Part of this could not be applied: see the console.)' }
-  if (out.text) await a2vSay(`<p><strong>${a2Esc(def.move.label)}:</strong> ${a2Esc(out.text)}</p>`, attacker)
+  try { await attack.update({ 'flags.world.a2def.done': done }) } catch (e) { console.error('V6 Automation | move record', e) }
+  const text = [prev ? `The roll changed after this was settled. ${out.text}` : out.text, ...notes].filter(Boolean).join(' ')
+  if (text) await a2vSay(`<p><strong>${a2Esc(def.move.label)}:</strong> ${a2Esc(text)}</p>`, attacker)
   return out
+}
+// A settled move whose rolls change afterwards (the attack's or the resistance's) is looked at again.
+function a2vOnUpdateMessage (message, changes) {
+  try {
+    if (!a2Enabled() || !a2xIsGM()) return
+    if (!changes?.rolls && !foundry.utils.hasProperty(changes ?? {}, 'flags.world.a2.act')) return
+    const vs = (message.rolls ?? []).map((r) => r?.options?.a2?.vsMessage).find(Boolean)
+    const attack = message.flags?.world?.a2def ? message : (vs ? game.messages.get(vs) : null)
+    const def = attack?.flags?.world?.a2def
+    if (!def?.resolved || !def.done || !def.move?.effect) return
+    const defender = a2FromUuid(def.targets?.[0]?.uuid)
+    if (!defender) return
+    a2oState.queue = a2oState.queue.then(() => a2vResolve(attack, defender, { again: true })).catch((e) => console.error('V6 Automation | move, looked at again', e))
+  } catch (e) { console.error('V6 Automation | move, looked at again', e) }
 }
 
 // ---- the window ----
@@ -10390,6 +10544,7 @@ async function a2MovesBoot () {
     Hooks.on('chatMessage', (log, text) => a2vChat(text))
     for (const h of ['updateSetting', 'createSetting']) Hooks.on(h, (setting) => { try { if (String(setting?.key ?? '').startsWith(`${a2eNs()}.`)) ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn */ } })
     Hooks.on('renderActorSheetV2', a2vRenderSheet)
+    Hooks.on('updateChatMessage', a2vOnUpdateMessage)
     Hooks.on('getSceneControlButtons', (controls) => {
       const tools = controls?.tokens?.tools
       if (!tools || !a2Enabled()) return
@@ -10572,7 +10727,13 @@ async function a2ySocialSpeak (side, approachId, cardRound) {
   a2yState.pending.set(actor.uuid, { kind: 'social', id: s.id, round: s.round, side, approach: ap.label, at: Date.now() })
   return a2eOpenRoll(actor, { attributes: [pool[0]], skills: [pool[1]], disciplines: [] })
 }
+// One closing at a time: with the tie question still open, a second press would count the round twice.
 async function a2ySocialClose () {
+  if (a2yState.closing) return null
+  a2yState.closing = true
+  try { return await a2ySocialCloseNow() } finally { a2yState.closing = false }
+}
+async function a2ySocialCloseNow () {
   const s = a2ySocial()
   if (!s || s.done || !game.user.isGM) return null
   const totals = a2ySocialTotals(s, s.round)
@@ -10677,6 +10838,7 @@ function a2yOnCreate (message, options, userId) {
 }
 async function a2yOnUpdate (message, change) {
   try {
+    if (!change?.flags?.world?.a2yOf && change?.rolls && message.flags?.world?.a2yOf && a2xIsGM()) return a2yRollChanged(message)
     const p = change?.flags?.world?.a2yOf
     if (!p || !a2xIsGM() || a2yState.seen.has(message.id)) return
     a2yState.seen.add(message.id)
@@ -10687,15 +10849,41 @@ async function a2yOnUpdate (message, change) {
     if (p.kind === 'social') {
       const s = a2ySocial()
       if (!s || s.id !== p.id || s.done || s.round !== p.round) return
-      s.log.push({ round: p.round, side: p.side, uuid: p.uuid, name: p.name, approach: p.approach, successes })
+      s.log.push({ round: p.round, side: p.side, uuid: p.uuid, name: p.name, approach: p.approach, successes, mid: message.id })
       await a2ySocialSave(s)
     } else if (p.kind === 'task') {
       const card = game.messages.get(p.id)
       const t = card?.flags?.world?.a2task
       if (!t || a2yTaskState(t).state !== 'open') return
-      await card.update({ 'flags.world.a2task.rolls': [...t.rolls, { uuid: p.uuid, name: p.name, successes, ended: Boolean(v.painful || v.bestial) }] })
+      await card.update({ 'flags.world.a2task.rolls': [...t.rolls, { uuid: p.uuid, name: p.name, successes, ended: Boolean(v.painful || v.bestial), mid: message.id }] })
     }
   } catch (e) { console.error('V6 Automation | story roll', e) }
+}
+
+// A roll that was counted changed afterwards (a Willpower reroll): its line on the conflict or the
+// task follows, as long as that round is still open. The Storyteller's client does it.
+async function a2yRollChanged (message) {
+  const p = message.flags?.world?.a2yOf
+  const roll = message.rolls?.find((r) => r?.options?.a2?.built)
+  if (!p || !roll) return
+  const v = a2RollVerdict(roll)
+  const successes = a2Int(v.successes ?? roll.total)
+  if (p.kind === 'social') {
+    const s = a2ySocial()
+    if (!s || s.id !== p.id || s.done || s.round !== p.round) return
+    const e = s.log.find((x) => x.mid === message.id)
+    if (!e || a2Int(e.successes) === successes) return
+    e.successes = successes
+    await a2ySocialSave(s)
+  } else if (p.kind === 'task') {
+    const card = game.messages.get(p.id)
+    const t = card?.flags?.world?.a2task
+    const i = (t?.rolls ?? []).findIndex((x) => x.mid === message.id)
+    if (i < 0) return
+    const ended = Boolean(v.painful || v.bestial)
+    if (a2Int(t.rolls[i].successes) === successes && Boolean(t.rolls[i].ended) === ended) return
+    await card.update({ 'flags.world.a2task.rolls': t.rolls.map((x, j) => (j === i ? { ...x, successes, ended } : x)) })
+  }
 }
 
 // ---- Blood Bonds ----
@@ -10814,7 +11002,9 @@ async function a2yDowntime (actorLike = null) {
       await item.update({ 'system.dots.value': dotsOf(item) - n }); await to.update({ 'system.dots.value': dotsOf(to) + n }); line = `${n} ${n === 1 ? 'dot' : 'dots'} moved from ${item.name} to ${to.name}.`
     } else if (def.res === 'recover') {
       if (!item) { v6aNote.warn('Pick the Resource to restore.'); return null }
-      const n = Math.min(2, res.dots, 5 - dotsOf(item)); await item.update({ 'system.dots.value': dotsOf(item) + n }); line = `${item.name}: ${n} spent ${n === 1 ? 'dot' : 'dots'} restored (now ${dotsOf(item)}).`
+      const n = Math.min(2, res.dots, 5 - dotsOf(item))
+      if (n < 1) { v6aNote.warn(`${item.name} is at 5 dots: there is nothing to restore.`); return null }
+      await item.update({ 'system.dots.value': dotsOf(item) + n }); line = `${item.name}: ${n} spent ${n === 1 ? 'dot' : 'dots'} restored (now ${dotsOf(item)}).`
     } else if (def.res === 'spend') {
       if (!item || dotsOf(item) < 3) { v6aNote.warn('Repairing the Masquerade costs 3 dots of one Resource. For several Resources (4 dots), lower them by hand.'); return null }
       await item.update({ 'system.dots.value': dotsOf(item) - 3 }); line = `${item.name} spends 3 dots (now ${dotsOf(item)}): the Masquerade Tracker goes down by 1.`
@@ -10834,7 +11024,9 @@ async function a2yDowntimeReset () {
 }
 
 // ---- complications on a painful failure ----
-async function a2yComplication (message) {
+async function a2yComplication (message) { return typeof a2xOnce === 'function' ? a2xOnce(`complication:${message?.id}`, () => a2yComplicationNow(message)) : a2yComplicationNow(message) } // eslint-disable-line no-undef
+async function a2yComplicationNow (message) {
+  if (message?.flags?.world?.a2comp) return null // already told
   const actor = a2xSpeaker(message)
   if (!actor) return null
   const pick = await foundry.applications.api.DialogV2.wait({
@@ -11698,7 +11890,7 @@ function a2rRerollAll (json, values) {
   return { json: out, n: dice.length }
 }
 
-const a2rState = { hooked: false, seen: new Set() }
+const a2rState = { hooked: false, seen: new Set(), given: new Set() }
 function a2rNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
 
 // Called from the damage pipeline (alpha2-actions) before Endurance. → { absorbed, note } or null
@@ -11717,11 +11909,14 @@ async function a2rAegis (actor, total, o) {
 }
 function a2rHasPact (actor) { return Boolean(actor?.flags?.world?.a2?.pactRa) }
 
-async function a2rOnPower (message) {
+// again: the power card changed afterwards (its test was rerolled and now wins): a Haruspex that
+// gave nothing the first time gives its rerolls now.
+async function a2rOnPower (message, { again = false } = {}) {
   const c = message.flags?.world?.a2p
-  if (!c || c.repeat || !a2xIsGM() || a2rState.seen.has(message.id)) return
+  if (!c || c.repeat || !a2xIsGM()) return
   const name = String(c.power ?? '')
   if (!/^(?:Blood Aegis|Haruspex|Pact with Ra)$/.test(name)) return
+  if (again) { if (name !== 'Haruspex' || a2rState.given.has(message.id)) return } else if (a2rState.seen.has(message.id)) return
   a2rState.seen.add(message.id)
   const actor = a2FromUuid(c.casterUuid)
   if (!actor) return
@@ -11734,6 +11929,7 @@ async function a2rOnPower (message) {
     try { const r = game.messages.get(c.rollMessageId)?.rolls?.find((x) => x?.options?.a2?.built); crit = Boolean(r && a2RollVerdict(r).critical) } catch (e) { /* no roll */ }
     const uses = a2rHaruspexUses({ win: c.win === true, critical: crit })
     if (!uses) return
+    a2rState.given.add(message.id)
     await actor.update({ 'flags.world.a2.haruspex': { uses, night: a2rNight() } })
     await ChatMessage.create({ content: `<div class="a2r-line"><p><strong>Haruspex:</strong> ${a2Esc(actor.name)} holds ${uses} free ${uses === 1 ? 'reroll' : 'rerolls'} until sunrise. The button is on its roll cards.</p></div>`, speaker: ChatMessage.getSpeaker({ actor }) })
   } else if (name === 'Pact with Ra') {
@@ -11816,6 +12012,7 @@ async function a2TrackBoot () {
   if (!a2rState.hooked) {
     a2rState.hooked = true
     Hooks.on('createChatMessage', (m) => { a2rOnPower(m).catch((e) => console.error('V6 Automation | tracked power', e)) })
+    Hooks.on('updateChatMessage', (m, changes) => { if (changes?.flags?.world?.a2p && a2rState.seen.has(m.id)) a2rOnPower(m, { again: true }).catch((e) => console.error('V6 Automation | tracked power', e)) })
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2rRenderChat(message, html) } catch (e) { console.error('V6 Automation | tracked power card', e) } })
     Hooks.on('updateActor', (actor, changes) => {
       const a2 = changes?.flags?.world?.a2
@@ -12623,7 +12820,7 @@ function a2nGhoulDue ({ fed = null, night = 1, interval = 30 } = {}) {
 }
 
 // ---- helpers ----
-const a2nState = { hooked: false }
+const a2nState = { hooked: false, follow: new Map() }
 function a2nOn () { return a2Enabled() && a2eGet('humanityFlow', true) !== false }
 function a2nGate () { if (a2nOn()) return true; v6aNote.info('The Humanity, day and torpor windows are switched off in the module settings.'); return false }
 function a2nNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
@@ -12681,6 +12878,33 @@ async function a2nRoll (actor, { label = 'Test', attributes = [], skills = [], e
   const message = await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor }, messageMode ? { messageMode } : {})
   return { roll, v: roll.a2Verdict ?? a2RollVerdict(roll), message }
 }
+// These tests act on their result at once. If the roll changes afterwards (a Willpower reroll, a
+// Beast's Bargain), settle runs again with the new result, on the client that made the test.
+//  settle(now, before): { win, successes }; before is null the first time.
+async function a2nFollow (res, settle) {
+  if (!res) return null
+  const first = { win: res.v?.win === true, successes: a2Int(res.v?.successes) }
+  await settle(first, null)
+  if (res.message?.id) {
+    a2nState.follow.set(res.message.id, { v: first, settle, queue: Promise.resolve() })
+    for (const k of [...a2nState.follow.keys()].slice(0, -40)) a2nState.follow.delete(k) // the last forty are enough
+  }
+  return res
+}
+function a2nOnUpdateMessage (message, changes) {
+  try {
+    const f = a2nState.follow.get(message?.id)
+    if (!f || (!changes?.rolls && !foundry.utils.hasProperty(changes ?? {}, 'flags.world.a2.act'))) return
+    const i = a2xFirstA2Roll(message)
+    if (i < 0) return
+    const { v } = a2xVerdict(message, message.rolls[i])
+    const now = { win: v.win === true || Boolean(a2xAct(message, i).bargain), successes: a2Int(v.successes) }
+    if (now.win === f.v.win && now.successes === f.v.successes) return
+    const before = f.v
+    f.v = now
+    f.queue = f.queue.then(() => f.settle(now, before)).catch((e) => console.error('V6 Automation | test, looked at again', e))
+  } catch (e) { console.error('V6 Automation | test, looked at again', e) }
+}
 async function a2nCard (actor, title, lines, { whisper = true } = {}) {
   const data = { speaker: actor ? ChatMessage.getSpeaker({ actor }) : { alias: 'Storyteller' }, content: `<div class="wod6e chat-card a2-note a2n-note"><h4 class="chat-card-name">${a2Esc(title)}</h4><ul>${lines.filter(Boolean).map((l) => `<li>${a2Esc(l)}</li>`).join('')}</ul></div>` }
   if (whisper) data.whisper = actor ? a2nOwners(actor) : game.users.filter((u) => u.isGM).map((u) => u.id)
@@ -12710,11 +12934,21 @@ async function a2nJustify (actor) {
   await actor.update({ 'system.willpower.value': wp - 1, 'flags.world.a2.justifyNight': night })
   const r = await a2nRoll(actor, { label: `Justify · Self-Control (Composure ${a2nVal(actor, 'attributes', 'composure')} + Resolve ${a2nVal(actor, 'attributes', 'resolve')}) vs Difficulty ${hum.rank}`, attributes: ['composure', 'resolve'], difficulty: hum.rank, notes: ['Justify: 1 Willpower spent. Each success erases a slash; a failure is −2 dice on every test until the next night (PG p.127).'] })
   if (!r) return null
-  const out = a2nJustifyOutcome({ win: r.v.win === true, successes: r.v.successes, violations: hum.violations })
   const path = a2PathInfo(actor)
-  if (out.erase) await a2WriteHumanity(actor, a2HumanityErase(a2ActorHumanity(actor), out.erase))
-  if (out.penalty) { try { await a2zSet(actor, 'justify', true) } catch (e) { console.error('V6 Automation | justify state', e) } }
-  await a2nCard(actor, `${actor.name}: Justify`, [out.penalty ? 'The excuses ring hollow: nothing is erased, and every test takes −2 dice until the next night (PG p.127).' : `${a2Plural(out.erase, 'slash', 'slashes')} erased: ${path.name} ${hum.rank}, ${hum.violations - out.erase} left.`, 'If the roll is changed afterwards (a Willpower reroll), set the slashes by hand on the sheet.'])
+  let erased = 0
+  let out = null
+  await a2nFollow(r, async (now, before) => {
+    out = a2nJustifyOutcome({ win: now.win, successes: now.successes, violations: hum.violations })
+    const more = Math.min(out.erase - erased, a2ActorHumanity(actor).violations)
+    if (more > 0) { await a2WriteHumanity(actor, a2HumanityErase(a2ActorHumanity(actor), more)); erased += more }
+    try {
+      if (out.penalty && !before) await a2zSet(actor, 'justify', true)
+      else if (!out.penalty && before && !before.win && a2zHas(actor, 'justify')) await a2zSet(actor, 'justify', false) // the reroll won: the −2 goes
+    } catch (e) { console.error('V6 Automation | justify state', e) }
+    if (before && more <= 0 && !(now.win && !before.win)) return // nothing new to tell
+    const left = a2ActorHumanity(actor).violations
+    await a2nCard(actor, `${actor.name}: Justify`, [before ? 'The roll changed.' : '', out.penalty ? 'The excuses ring hollow: nothing is erased, and every test takes −2 dice until the next night (PG p.127).' : `${a2Plural(erased, 'slash', 'slashes')} erased: ${path.name} ${hum.rank}, ${left} left.`])
+  })
   return out
 }
 async function a2nRaise (actor) {
@@ -12824,11 +13058,13 @@ async function a2nDay (actorLike = null) {
   const key = stay ? 'resolve' : 'wits'
   const r = await a2nRoll(actor, { label: `${stay ? 'Stay awake' : 'Wake up'} · ${a2Cap(key)} ${a2nVal(actor, 'attributes', key)} vs Difficulty ${diff}`, attributes: [key], difficulty: diff, skipDay: true, notes: [`A flat ${a2Cap(key)} test against 2 + the generation modifier (PG p.147).`] })
   if (!r) return null
-  const win = r.v.win === true
-  await a2zSet(actor, 'day', win)
-  await actor.update({ 'flags.world.a2.dayHours': win ? (stay ? hours + 1 : 0) : 0 })
-  await a2nCard(actor, `${actor.name}: ${stay ? 'staying awake' : 'disturbed in daysleep'}`, [win ? (stay ? `Awake for another hour (${hours + 1} so far), at −${2 * g} dice on everything else. Test again in an hour.` : `Awake for up to an hour, at −${2 * g} dice. Staying up longer takes the Resolve test.`) : (stay ? 'The sun wins: it falls into daysleep where it stands.' : 'It sleeps on.')])
-  return r
+  return a2nFollow(r, async (now, before) => {
+    if (before && (before.win || !now.win)) return // only a failure that became a success changes anything
+    const win = now.win
+    await a2zSet(actor, 'day', win)
+    await actor.update({ 'flags.world.a2.dayHours': win ? (stay ? hours + 1 : 0) : 0 })
+    await a2nCard(actor, `${actor.name}: ${stay ? 'staying awake' : 'disturbed in daysleep'}`, [before ? 'The roll changed.' : '', win ? (stay ? `Awake for another hour (${hours + 1} so far), at −${2 * g} dice on everything else. Test again in an hour.` : `Awake for up to an hour, at −${2 * g} dice. Staying up longer takes the Resolve test.`) : (stay ? 'The sun wins: it falls into daysleep where it stands.' : 'It sleeps on.')])
+  })
 }
 
 // ---- the sunrise clock ----
@@ -12897,16 +13133,20 @@ async function a2nTorpor (actorLike = null) {
   if (pick === 'fed') {
     if (vitae < 1) { v6aNote.warn(`${actor.name} has no Vitae: feed it at least 1 first.`); return null }
     const r = await a2nRoll(actor, { label: `Rise from torpor · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: wakeNotes, drop: asleep })
-    if (r?.v.win === true) await rise(['Fed and woken (PG p.140).'])
-    else if (r) await a2nCard(actor, `${actor.name} stays in torpor`, ['It doesn\'t wake. Feeding it again allows another test.'])
-    return r
+    return a2nFollow(r, async (now, before) => {
+      if (before && (before.win || !now.win)) return
+      if (now.win) await rise([before ? 'The roll changed: fed and woken (PG p.140).' : 'Fed and woken (PG p.140).'])
+      else await a2nCard(actor, `${actor.name} stays in torpor`, ['It doesn\'t wake. Feeding it again allows another test.'])
+    })
   }
   if (pick === 'hunter') {
     if (st && !st.hunter && !game.user.isGM) { v6aNote.warn(`The Unconscious Hunter stirs only once the torpor has run its length (${a2Plural(length - st.elapsed, 'night', 'nights')} to go).`); return null }
     const r = await a2nRoll(actor, { label: 'Unconscious Hunter · Resolve + Awareness vs Difficulty 3', attributes: ['resolve'], skills: ['awareness'], extra: mod, difficulty: 3, notes: wakeNotes, drop: asleep })
-    if (r?.v.win === true) await a2nCard(actor, `${actor.name}: the Unconscious Hunter`, ['It wakes to feed and at once risks a hunger frenzy (Difficulty = its Hunger dice; the Storyteller may lower it for familiar prey). Without 1 Vitae by the end of the scene it sinks back into torpor (PG p.141).', 'Storyteller: untick Torpor once it has fed, or leave it.'])
-    else if (r) await a2nCard(actor, `${actor.name} doesn't stir`, ['The prey passes unnoticed.'])
-    return r
+    return a2nFollow(r, async (now, before) => {
+      if (before && (before.win || !now.win)) return
+      if (now.win) await a2nCard(actor, `${actor.name}: the Unconscious Hunter`, ['It wakes to feed and at once risks a hunger frenzy (Difficulty = its Hunger dice; the Storyteller may lower it for familiar prey). Without 1 Vitae by the end of the scene it sinks back into torpor (PG p.141).', 'Storyteller: untick Torpor once it has fed, or leave it.'])
+      else await a2nCard(actor, `${actor.name} doesn't stir`, ['The prey passes unnoticed.'])
+    })
   }
   if (pick === 'will') {
     if (st && !st.voluntary && !game.user.isGM) { v6aNote.warn('Rising by will is possible only after half the torpor\'s length has passed (PG p.141).'); return null }
@@ -12914,12 +13154,15 @@ async function a2nTorpor (actorLike = null) {
     if (wp < 1) { v6aNote.warn(`${actor.name} has no Willpower to spend.`); return null }
     await actor.update({ 'system.willpower.value': wp - 1 })
     const r = await a2nRoll(actor, { label: `Rise by will · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: ['1 Willpower spent (PG p.141).', ...wakeNotes], drop: asleep })
-    if (r?.v.win === true) {
-      if (vitae < 1) { await a2nCard(actor, `${actor.name} can't rise`, ['The will is there, but it has no Vitae to pay for rising (PG p.141).']); return r }
-      await actor.update({ 'system.health.value': vitae - 1 })
-      await rise(['It rises by its own will: 1 Vitae paid (PG p.141).'])
-    } else if (r) await a2nCard(actor, `${actor.name} stays in torpor`, ['It can try again at the start of the next night.'])
-    return r
+    return a2nFollow(r, async (now, before) => {
+      if (before && (before.win || !now.win)) return
+      if (now.win) {
+        const have = a2Int(actor.system?.health?.value)
+        if (have < 1) { await a2nCard(actor, `${actor.name} can't rise`, ['The will is there, but it has no Vitae to pay for rising (PG p.141).']); return }
+        await actor.update({ 'system.health.value': have - 1 })
+        await rise([before ? 'The roll changed: it rises by its own will, 1 Vitae paid (PG p.141).' : 'It rises by its own will: 1 Vitae paid (PG p.141).'])
+      } else await a2nCard(actor, `${actor.name} stays in torpor`, ['It can try again at the start of the next night.'])
+    })
   }
   return null
 }
@@ -13190,6 +13433,7 @@ async function a2NightBoot () {
     a2nState.hooked = true
     Hooks.on('v6a2NewNight', (ev) => { a2nOnNewNight(ev).catch((e) => console.error('V6 Automation | night', e)) })
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2nRenderChat(message, html) } catch (e) { console.error('V6 Automation | sunrise card', e) } })
+    Hooks.on('updateChatMessage', a2nOnUpdateMessage)
     Hooks.on('updateActor', (actor, changes) => {
       try {
         if (!a2xIsGM() || !a2nOn()) return
