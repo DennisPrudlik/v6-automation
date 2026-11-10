@@ -35,6 +35,7 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **States:** surprised, on the ground, held, tied up, staked, torpor, burning, in sunlight, awake by day, cover, a hurt limb, blissful and failed Justify are token statuses that add or take dice by themselves. Fire and sunlight deal their damage at the start of the turn, with Put out and the fear frenzy test on the card.
 - **Action menu:** the fist tool opens every combat action: attacks, called shot, stake, decapitate, wrestling (grab, crush, tie up, escape), feed attack, coordinate, demoralize, distract, find flaw, assist, steady aim, cover. Each rolls the right contest and applies the result; one-off edges are used up by the roll they fit.
 - **Chat commands:** `/test wits+awareness 3`, `/req`, `/act`, `/states`, `/feed`, `/frenzy`, `/night` and more; `/v6 help` lists them.
+- **Nightfall look:** one dark look with a blood-red edge and gold display headings for the chat log (dice as tiles, verdicts as banners), journals and the module's windows. Client setting, can be switched off.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.
