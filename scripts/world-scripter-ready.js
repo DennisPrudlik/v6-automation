@@ -866,8 +866,25 @@ function a2PatchRollDialog (RD, WOD6eTest) {
     }
     return res
   }
+  // Foundry 14 drops the template's own <form> tag when the roll window is built, and with it
+  // the test's modifier, action and category: an item's or an action's dice modifier (a called
+  // shot's −2, a feed attack's +2, a power's own bonus) was lost on every roll. Remember what
+  // the window was opened with and put it back on the form the system reads.
+  const init = RD._prepareInitialData
+  RD._prepareInitialData = function (args = {}) {
+    const data = init.call(this, args)
+    try { if (args?.actor?.uuid) (a2State.inits ??= new Map()).set(args.actor.uuid, { itemModifier: a2Int(data?.itemModifier), action: data?.action ?? null, category: data?.category ?? null, at: Date.now() }) } catch (e) { /* keep rolling */ }
+    return data
+  }
+  const preview = RD._updatePreview
+  RD._updatePreview = function (element, actor) {
+    const out = preview.call(this, element, actor)
+    try { a2ShowNotes(element, actor) } catch (e) { /* the preview is a convenience */ }
+    return out
+  }
   const listen = RD._activateListeners
   RD._activateListeners = function (dialog, opts = {}) {
+    try { a2RestoreFormData(dialog, opts?.actor) } catch (e) { console.error('V6 Alpha 2 | roll form', e) }
     const out = listen.call(this, dialog, opts)
     if (a2Enabled()) {
       try { a2InjectControls(this, dialog, opts) } catch (e) { console.error('V6 Alpha 2 | roll dialog', e) }
@@ -1046,11 +1063,34 @@ function a2AdjustContext (res, args, WOD6eTest) {
     npc: Boolean(a2NpcInfo(actor)),
     trueFaith: useTF ? tfRank : 0
   }
+  a2State.lastNotes = { actor: actor.uuid, notes: [...notes] }
   t.dicePoolText = a2PoolText(plan, {
     cap: t.a2.cap,
     difficulty: t.difficulty,
     rolling: (s) => game.i18n.format('WOD6E.ROLL.RollingString', { string: s })
   })
+}
+
+function a2RestoreFormData (dialog, actor) {
+  const li = actor?.uuid ? a2State.inits?.get(actor.uuid) : null
+  if (actor?.uuid) a2State.inits?.delete(actor.uuid)
+  const root = dialog?.element
+  const form = root?.matches?.('form') ? root : root?.querySelector?.('form')
+  if (!form || !li || Date.now() - li.at > 20000) return
+  if (form.dataset.itemModifier === undefined) form.dataset.itemModifier = String(li.itemModifier)
+  if (li.action && !form.dataset.testAction) form.dataset.testAction = String(li.action)
+  if (li.category && !form.dataset.testCategory) form.dataset.testCategory = String(li.category)
+}
+// Under the pool, the reasons it is what it is (impairment, states, distance, frenzy).
+function a2ShowNotes (element, actor) {
+  const box = element?.querySelector?.('.a2-controls')
+  const n = a2State.lastNotes
+  if (!box || !actor) return
+  let list = box.parentElement.querySelector('.a2-preview-notes')
+  const notes = n && n.actor === actor.uuid ? n.notes : []
+  if (!notes.length) { list?.remove(); return }
+  if (!list) { list = document.createElement('ul'); list.className = 'a2-preview-notes'; box.after(list) }
+  list.innerHTML = notes.map((l) => `<li>${a2Esc(l)}</li>`).join('')
 }
 
 function a2InjectControls (RD, dialog, { actor, item } = {}) {
@@ -1689,6 +1729,9 @@ function a2InjectStyles () {
 .roll-dialog .a2-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 6px 0 4px; font-size: 13px; }
 .roll-dialog .a2-controls label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .roll-dialog .a2-controls input[type=number] { width: 3.5em; }
+.a2-preview-notes { list-style: none; margin: 2px 0 6px; padding: 0; font-size: 12px; opacity: 0.9; }
+.a2-preview-notes li { padding-left: 1.1em; text-indent: -1.1em; }
+.a2-preview-notes li::before { content: '› '; color: var(--v6-gold, #c9a45c); }
 .roll-dialog .a2-controls .a2-oppose { flex-basis: 100%; font-style: italic; }
 .chat-message .a2-result { margin-top: 6px; padding: 6px 8px; border-left: 4px solid #777; background: rgba(0,0,0,0.05); font-size: 13px; }
 .chat-message .a2-result.a2-win, .chat-message .a2-result.a2-critical { border-left-color: #2e7d32; }
@@ -12011,7 +12054,7 @@ const A2F_LIMITS = { m: [2, 15, 50, 100], ft: [5, 45, 150, 300] } // PG p.108
 const A2F_MOVE_MODE = { melee: 'melee', called: 'melee', stake: 'melee', behead: 'melee', shoot: 'ranged', calledR: 'ranged', throw: 'thrown' }
 const A2F_LIMBS = ['arm', 'hand', 'leg', 'foot', 'eye', 'wing or tail']
 const A2F_INJURY = {
-  1: { name: 'hurt', text: '−1 die on tests that use it, until it is mended' },
+  1: { name: 'hurt', text: 'hurt: −1 die on tests that use it, until it is mended' },
   2: { name: 'mangled', text: 'mangled: −2 dice on tests that use it, until it is mended' },
   3: { name: 'mangled', text: 'mangled: −3 dice on tests that use it, until it is mended' },
   4: { name: 'disabled', text: 'mangled and disabled: tests that rely on it fail until it is mended' },
@@ -13347,6 +13390,20 @@ function a2dFloat (actor, changes) {
     }
   } catch (e) { console.error('V6 Automation | floating text', e) }
 }
+// Which tracks an update wrote to. A track it didn't touch can't have changed by it (a snapshot
+// taken before the world finished preparing its actors would otherwise show ghosts).
+function a2dTouched (type, changes = {}) {
+  const out = new Set()
+  const f = changes?.flags?.world?.a2
+  const sys = changes?.system
+  if (type === 'npc') { if (sys?.health) out.add('health') } else {
+    if (f && typeof f === 'object' && 'health' in f) { out.add('health'); out.add('baneful') }
+    if (sys?.health) out.add('vitae')
+  }
+  if (sys?.willpower) out.add('willpower')
+  if (sys?.vampire?.humanity || sys?.vampire?.nature) { out.add('rank'); out.add('violations') }
+  return out
+}
 function a2dOnUpdateActor (actor, changes, options, userId) {
   try {
     if (!a2Enabled()) return
@@ -13355,7 +13412,8 @@ function a2dOnUpdateActor (actor, changes, options, userId) {
     const before = a2dState.snap.get(actor.uuid) ?? null
     a2dState.snap.set(actor.uuid, after)
     if (!before) return
-    const diff = a2dDiff(before, after)
+    const touched = a2dTouched(actor.type, changes)
+    const diff = a2dDiff(before, after).filter((c) => touched.has(c.key))
     if (!diff.length) return
     a2dFloat(actor, diff)
     if (!game.user.isGM || !a2dOn('autoLog')) return
@@ -13475,6 +13533,7 @@ async function a2DeskBoot () {
   if (!a2dState.hooked) {
     a2dState.hooked = true
     a2dSnapAll()
+    setTimeout(() => { try { a2dState.snap.clear(); a2dSnapAll() } catch (e) { /* next change takes a fresh one */ } }, 4000) // once the Alpha 2 values are in
     Hooks.on('updateActor', a2dOnUpdateActor)
     Hooks.on('createActor', (actor) => { const s = a2dSnap(actor); if (s) a2dState.snap.set(actor.uuid, s) })
     Hooks.on('canvasReady', () => { try { a2dSnapAll() } catch (e) { /* no canvas */ } })
@@ -13489,7 +13548,7 @@ async function a2DeskBoot () {
     for (const ch of A2X_SOCKETS) { try { game.socket?.on?.(ch, a2dOnSocket) } catch (e) { console.warn('V6 Automation | desk socket', ch, e) } }
     try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
   }
-  api.desk = { booted: true, powers: a2dPowers, boons: a2dBoonsOpen, log: a2dLogOpen, undo: a2dUndo, entries: () => a2dState.log.map((e) => ({ ...e })), command: a2dCommand, rules: { diff: a2dDiff, line: a2dLine, floatText: a2dFloatText, boonAdd: a2dBoonAdd, boonSettle: a2dBoonSettle, boonVisible: a2dBoonVisible, coteriePlus: a2dCoteriePlus, needsCall: a2dNeedsCall } }
+  api.desk = { booted: true, powers: a2dPowers, boons: a2dBoonsOpen, log: a2dLogOpen, undo: a2dUndo, entries: () => a2dState.log.map((e) => ({ ...e })), command: a2dCommand, rules: { diff: a2dDiff, line: a2dLine, floatText: a2dFloatText, touched: a2dTouched, boonAdd: a2dBoonAdd, boonSettle: a2dBoonSettle, boonVisible: a2dBoonVisible, coteriePlus: a2dCoteriePlus, needsCall: a2dNeedsCall } }
   console.log('V6 Automation | powers window, Storyteller calls, boons and the log loaded')
   return true
 }
