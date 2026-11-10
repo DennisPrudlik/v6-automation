@@ -11524,6 +11524,7 @@ globalThis.a2TrackBoot ??= a2TrackBoot
 // and makes a click on one do it: an attack opens the roll against your target, a social
 // approach rolls your best pool, a downtime action opens the downtime window.
 // Shift-click still posts the item to chat, the book icon still opens it.
+// A new character gets them when it is made, any other when its sheet is first opened.
 // Any other action item with an Attribute in its test becomes clickable the same way.
 // The actions also live in the world compendium "V6 Actions (Alpha 2)", which the magnifying
 // glass on each list searches.
@@ -11578,7 +11579,7 @@ function a2qMissing (catalog, have, { vampire = true } = {}) {
   return catalog.filter((c) => !set.has(c.ref) && (vampire || !c.vampire))
 }
 
-const a2qState = { hooked: false, busy: new Set() }
+const a2qState = { hooked: false, busy: new Set(), filled: new Set() }
 function a2qOn () { return a2Enabled() && a2eGet('sheetActions', true) !== false }
 function a2qHave (actor) { return actor.items.filter((i) => i.type === 'action' && i.flags?.world?.a2act?.ref).map((i) => i.flags.world.a2act.ref) }
 function a2qFits (actor) { return actor?.documentName === 'Actor' && actor.type !== 'npc' && Boolean(a2Rules(actor)) }
@@ -11681,14 +11682,10 @@ function a2qRenderSheet (app, element) {
         a2qRun(actor, item).catch((e) => console.error('V6 Automation | sheet action', e))
       }, true)
     }
-    // the header of the V6 block offers the fill when something is missing
-    const head = tab.querySelector('.a2v-sheet header')
-    if (head && !head.querySelector('[data-a2q-fill]') && a2qFits(actor) && actor.isOwner && a2qMissing(a2qCatalog(), a2qHave(actor), { vampire: a2Creature(actor) === 'vampire' }).length) {
-      const a = document.createElement('a')
-      a.dataset.a2qFill = '1'
-      a.innerHTML = '<i class="fa-solid fa-list-check"></i> Fill the action lists'
-      a.addEventListener('click', (ev) => { ev.preventDefault(); a2qSync(actor, { quiet: false }) })
-      head.insertBefore(a, head.lastElementChild)
+    // any sheet that is opened gets the base actions it lacks, once per session
+    if (a2qFits(actor) && actor.isOwner && !actor.pack && !a2qState.filled.has(actor.id)) {
+      a2qState.filled.add(actor.id)
+      if (a2qMissing(a2qCatalog(), a2qHave(actor), { vampire: a2Creature(actor) === 'vampire' }).length) a2qSync(actor).catch((e) => console.error('V6 Automation | action lists', e))
     }
   } catch (e) { console.error('V6 Automation | sheet actions', e) }
 }
@@ -11727,6 +11724,7 @@ async function a2ActsBoot () {
   if (!a2qState.hooked) {
     a2qState.hooked = true
     Hooks.on('renderActorSheetV2', a2qRenderSheet)
+    Hooks.on('createActor', (actor, options, userId) => { if (userId === game.user.id && a2qOn() && a2qFits(actor) && !actor.pack) a2qSync(actor).catch(() => {}) })
     Hooks.on('updateActor', (actor, changes) => { if (changes?.ownership && game.users?.activeGM?.isSelf && a2qOn() && a2qFits(actor) && actor.hasPlayerOwner) a2qSync(actor).catch(() => {}) })
     const style = document.createElement('style')
     style.id = 'v6a-acts-style'
