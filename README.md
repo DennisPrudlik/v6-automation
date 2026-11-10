@@ -41,6 +41,12 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Blood Bonds:** drinks are logged per donor (feed attacks do it by themselves), stages form over three nights and weaken at New Night; the stage comes off the thrall's rolls against the master and adds to the master's Social rolls on the thrall.
 - **Downtime:** the seven downtime actions; the Resource ones move the dots and Repair the Masquerade lowers the tracker.
 - **Complications:** a painful failure's card gets a Complication button; Expose Vulnerability and Suffer Harm are applied.
+- **Storyteller dashboard:** every player character and scene token in one live window: Health, Vitae, Hunger, Willpower, Humanity, states, bonds, XP, with the night clock and Masquerade Tracker.
+- **Tokens:** new tokens get Health and Vitae bars; a mortal at 0 Health is marked defeated; torpor shows as a state.
+- **Coterie page:** domain, haven, shared Resources, and each member's Resources and herd.
+- **NPC maker:** kind, category and three pools make a full sheet by the Storyteller Packet's rules, with a token ready to drop.
+- **Group hunt, Vaulderie and vinculum, session recap** (a journal page written from the chat log), and a **reaction menu** on the turn card (reaction powers, Blood Surge).
+- **Sheets** share the Nightfall look.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.

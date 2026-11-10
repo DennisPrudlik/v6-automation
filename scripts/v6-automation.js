@@ -642,7 +642,8 @@ function a2ActorHunger (actor) {
   return a2HungerFromVitae(actor.system?.health?.value, a2ActorVitaeTotal(actor))
 }
 function a2ActorHealth (actor) {
-  const max = a2NpcInfo(actor)?.minion ? 1 : a2HealthMax(actor.system?.attributes?.stamina?.value)
+  const npc = a2NpcInfo(actor)
+  const max = npc?.minion ? 1 : a2Int(npc?.healthMax) > 0 ? a2Int(npc.healthMax) : a2HealthMax(actor.system?.attributes?.stamina?.value) // a made NPC keeps the Health from the ST Packet's table
   const f = actor.flags?.world?.a2?.health ?? {}
   const baneful = a2Clamp(a2Int(f.baneful), 0, max)
   const value = a2Clamp(f.value === undefined || f.value === null ? max : a2Int(f.value), 0, max - baneful)
@@ -1792,7 +1793,8 @@ async function a2Boot () {
       ['states', globalThis.a2StatesBoot ?? (typeof a2StatesBoot === 'function' ? a2StatesBoot : null)],
       ['moves', globalThis.a2MovesBoot ?? (typeof a2MovesBoot === 'function' ? a2MovesBoot : null)],
       ['theme', globalThis.a2ThemeBoot ?? (typeof a2ThemeBoot === 'function' ? a2ThemeBoot : null)],
-      ['story', globalThis.a2StoryBoot ?? (typeof a2StoryBoot === 'function' ? a2StoryBoot : null)]]) {
+      ['story', globalThis.a2StoryBoot ?? (typeof a2StoryBoot === 'function' ? a2StoryBoot : null)],
+      ['table tools', globalThis.a2TableBoot ?? (typeof a2TableBoot === 'function' ? a2TableBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -8635,7 +8637,12 @@ function a2kRenderChat (message, html) {
     b.type = 'button'
     b.textContent = 'Use a reaction'
     b.disabled = used >= t.reactions
-    b.addEventListener('click', async (ev) => { ev.preventDefault(); await c.update({ 'flags.world.a2k': { card: message.id, used: used + 1 } }) })
+    b.addEventListener('click', async (ev) => {
+      ev.preventDefault()
+      // what the reaction is (alpha2-table); cancelled means nothing is ticked
+      if (typeof a2wReaction === 'function' && !(await a2wReaction(c.actor))) return // eslint-disable-line no-undef
+      await c.update({ 'flags.world.a2k': { card: message.id, used: used + 1 } })
+    })
     row.append(b)
     if (used > 0) {
       const u = document.createElement('a')
@@ -8906,11 +8913,11 @@ function a2cContent (actor, lib) {
   <section data-step="1">
     <div class="a2c-grid">
       <label>Name <input type="text" name="name" value="${a2Esc(actor.name)}"></label>
-      <label>Concept <input type="text" name="concept" placeholder="Burned-out paramedic, turned on shift"></label>
+      <label>Concept or archetype <input type="text" name="concept" placeholder="Burned-out paramedic, turned on shift"></label>
       <label>You are a <select name="creature"><option value="vampire">Vampire</option><option value="duskborn">Duskborn</option><option value="ghoul">Ghoul</option></select></label>
       <label title="Normally set by the Storyteller (PG p.26-28). It decides the tier.">Generation <select name="generation">${[16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4].map((g) => `<option value="${g}" ${g === gen ? 'selected' : ''}>${g}th</option>`).join('')}</select></label>
-      <label>Born (year) <input type="number" name="born" step="1" placeholder="1988"></label>
-      <label>Embraced (year) <input type="number" name="embraced" step="1" placeholder="2019"></label>
+      <label>Actual age <input type="number" name="born" min="0" step="1" placeholder="76"></label>
+      <label>Date of Embrace <input type="text" name="embraced" placeholder="Autumn 1979"></label>
       <label>Apparent age <input type="number" name="apparentAge" min="0" step="1" placeholder="31"></label>
       <label title="The decade you still feel at home in (PG p.56-59).">Nostalgic decade <input type="text" name="decade" placeholder="1990s"></label>
       <label><span><span data-a2c="sire-word">Sire</span>'s name</span> <input type="text" name="sireName"></label>
@@ -9122,8 +9129,16 @@ function a2cBuild (state, lib) {
   const hp = state.attrs.stamina + 5
   update['flags.world.a2.health'] = { value: hp, max: hp }
   update['flags.world.a2.creation'] = { v: 1, concept: state.concept, born: state.born || null, embraced: state.embraced || null, apparentAge: state.apparentAge || null, decade: state.decade, sireName: state.sireName, sireType: state.sireType, sireDisc: state.sireDisc, extraDiscs: state.extraDiscs.filter(Boolean), tier: f.key }
-  const year = (v) => (a2Int(v) ? String(a2Int(v)) : '')
-  const facts = [state.concept && `<strong>Concept:</strong> ${a2Esc(state.concept)}`, year(state.born) && `<strong>Born:</strong> ${year(state.born)}`, year(state.embraced) && `<strong>${state.creature === 'ghoul' ? 'First fed' : 'Embraced'}:</strong> ${year(state.embraced)}`, a2Int(state.apparentAge) && `<strong>Apparent age:</strong> ${a2Int(state.apparentAge)}`, state.decade && `<strong>Nostalgic decade:</strong> ${a2Esc(state.decade)}`, (state.sireName || state.sireType) && `<strong>${state.creature === 'ghoul' ? 'Master' : 'Sire'}:</strong> ${a2Esc(state.sireName || 'unnamed')} (${a2Esc(String(state.sireType).toLowerCase())})`].filter(Boolean)
+  // the sheet's own header fields
+  if (a2Int(state.apparentAge) > 0) update['system.age.apparent'] = a2Int(state.apparentAge)
+  if (a2Int(state.born) > 0) update['system.age.actual'] = a2Int(state.born)
+  update['system.archetype'] = state.concept ?? ''
+  if (state.creature !== 'ghoul') {
+    update['system.vampire.date.embrace'] = String(state.embraced ?? '')
+    update['system.vampire.date.nostalgic'] = state.decade ?? ''
+    update['system.vampire.sire.character.name'] = state.sireName ?? ''
+  }
+  const facts = [(state.sireName || state.sireType) && `<strong>${state.creature === 'ghoul' ? 'Master' : 'Sire'}:</strong> ${a2Esc(state.sireName || 'unnamed')} (${a2Esc(String(state.sireType).toLowerCase())})`, state.creature === 'ghoul' && state.embraced && `<strong>First fed:</strong> ${a2Esc(String(state.embraced))}`].filter(Boolean)
   update.biographyFacts = facts.length ? `<p>${facts.join(' · ')}</p>` : ''
   const items = []
   const take = (map, name) => { const it = map.get(name); if (!it) return; const o = typeof it.toObject === 'function' ? it.toObject() : foundry.utils.deepClone(it); delete o._id; delete o.folder; delete o.ownership; delete o.sort; items.push(o) }
@@ -9421,6 +9436,8 @@ function a2zMods (actor, t) {
   // a Blood Bond between the two (alpha2-story)
   const bond = typeof a2yBondMods === 'function' ? a2yBondMods(actor, foeActor, { attributes, skills, disciplines: (t?.disciplines ?? []).map(key), attack, contested: Boolean(foeActor) }) : null // eslint-disable-line no-undef
   if (bond) { res.dice += bond.dice; res.notes.push(bond.note) }
+  const vinc = typeof a2wVinculumMods === 'function' ? a2wVinculumMods(actor, foeActor, { attack, contested: Boolean(foeActor) }) : null // eslint-disable-line no-undef
+  if (vinc) { res.dice += vinc.dice; res.notes.push(vinc.note) }
   a2zState.last.set(actor.uuid, { at: Date.now(), used: res.used.map((u) => ({ uuid: u.who === 'self' ? actor.uuid : foeActor?.uuid, id: u.id })).filter((u) => u.uuid) })
   return res.dice || res.notes.length ? res : null
 }
@@ -9923,7 +9940,9 @@ const A2V_HELP = [
   ['/night, /scene, /award, /masquerade', 'Storyteller: New Night, End Scene, Award XP, Masquerade Tracker'],
   ['/create', 'character creation for the selected or assigned character'],
   ['/social, /task', 'Storyteller: start a social conflict or a prolonged task'],
-  ['/bonds, /downtime', 'Blood Bonds and downtime actions for the selected token (/v6 downtime reset: Storyteller)']
+  ['/bonds, /downtime', 'Blood Bonds and downtime actions for the selected token (/v6 downtime reset: Storyteller)'],
+  ['/coterie', 'the coterie page: domain, haven, shared Resources, members'],
+  ['/dash, /npc, /hunt, /vaulderie, /recap', 'Storyteller: dashboard, NPC maker, group hunt, Vaulderie, session recap']
 ]
 function a2vCommand (text) {
   // typed into Foundry's chat box, the text arrives as HTML: "<p>/test wits+awareness 3</p>"
@@ -9932,10 +9951,10 @@ function a2vCommand (text) {
   if (!m) return null
   const cmd = m[2].toLowerCase()
   const arg = m[3].trim()
-  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help', 'social', 'task', 'bonds', 'downtime']
+  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help', 'social', 'task', 'bonds', 'downtime', 'dash', 'coterie', 'npc', 'hunt', 'vaulderie', 'recap']
   if (!known.includes(cmd)) return null
   // without the "/v6" prefix only the unambiguous ones are ours
-  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade', 'social', 'task', 'bonds', 'downtime'].includes(cmd)) return null
+  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade', 'social', 'task', 'bonds', 'downtime', 'dash', 'coterie', 'npc', 'hunt', 'vaulderie', 'recap'].includes(cmd)) return null
   return { cmd, arg }
 }
 function a2vChat (text) {
@@ -9964,6 +9983,12 @@ function a2vChat (text) {
       case 'social': if (gm()) A.story?.social?.(); break
       case 'task': if (gm()) A.story?.task?.(); break
       case 'bonds': A.story?.bonds?.(actor); break
+      case 'dash': if (gm()) A.table?.dashboard?.(); break
+      case 'coterie': A.table?.coterie?.(); break
+      case 'npc': if (gm()) A.table?.npc?.(); break
+      case 'hunt': if (gm()) A.table?.hunt?.(); break
+      case 'vaulderie': if (gm()) A.table?.vaulderie?.(); break
+      case 'recap': if (gm()) A.table?.recap?.(); break
       case 'downtime': if (c.arg.toLowerCase() === 'reset') { if (gm()) A.story?.downtimeReset?.() } else A.story?.downtime?.(actor); break
     }
   } catch (e) { console.error('V6 Automation | chat command', e) }
@@ -10016,7 +10041,7 @@ globalThis.a2MovesBoot ??= a2MovesBoot
 // One look for the chat log and the module's windows: dark panels, a blood-red edge, gold
 // display headings, dice as tiles (successes gold, tens red), verdicts as banners.
 // Setting (client): theme = nightfall | off. Generated from alpha2-theme.css.
-const A2H_CSS = "/* V6 Automation: the Nightfall look for chat cards and the module's windows. */\nbody.v6-theme {\n  --v6-ink: #e9e0d2;\n  --v6-dim: #a3978a;\n  --v6-gold: #d2aa5a;\n  --v6-blood: #a31621;\n  --v6-blood-hi: #d0303c;\n  --v6-panel: #171113;\n  --v6-panel-2: #21171a;\n  --v6-line: #43292e;\n  --v6-display: \"Modesto Condensed\", \"Palatino Linotype\", \"Book Antiqua\", Georgia, serif;\n}\n\n/* ---- chat cards ---- */\nbody.v6-theme .chat-log li.chat-message,\nbody.v6-theme #chat-notifications li.chat-message {\n  background: linear-gradient(165deg, var(--v6-panel-2) 0%, var(--v6-panel) 70%);\n  border: 1px solid var(--v6-line);\n  border-left: 3px solid var(--v6-blood);\n  border-radius: 6px;\n  color: var(--v6-ink);\n  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55), inset 0 0 32px rgba(163, 22, 33, 0.07);\n  padding: 8px 10px 9px;\n}\nbody.v6-theme .chat-log li.chat-message.whisper { border-left-color: #6b4fa0; background: linear-gradient(165deg, #1d1826 0%, #131018 70%); }\nbody.v6-theme .chat-log li.chat-message.blind { border-left-color: #4a6d8c; }\nbody.v6-theme li.chat-message .message-header { color: var(--v6-dim); border-bottom: 1px solid var(--v6-line); padding-bottom: 4px; margin-bottom: 6px; }\nbody.v6-theme li.chat-message .message-header .message-sender { font-family: var(--v6-display); font-size: 17px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--v6-gold); text-shadow: 0 1px 0 #000; }\nbody.v6-theme li.chat-message .message-header .message-metadata,\nbody.v6-theme li.chat-message .message-header .message-metadata a,\nbody.v6-theme li.chat-message .message-header .whisper-to { color: var(--v6-dim); font-size: 11px; }\nbody.v6-theme li.chat-message .message-header .flavor-text { color: #cfc3b3; font-style: italic; font-size: 13px; }\nbody.v6-theme li.chat-message .message-content { color: var(--v6-ink); }\nbody.v6-theme li.chat-message .message-content a:not(.v6-roll):not(.content-link):not(.inline-roll) { color: var(--v6-gold); }\nbody.v6-theme li.chat-message .message-content h1,\nbody.v6-theme li.chat-message .message-content h2,\nbody.v6-theme li.chat-message .message-content h3,\nbody.v6-theme li.chat-message .message-content h4:not(.dice-total) {\n  font-family: var(--v6-display); font-size: 18px; line-height: 1.2; font-weight: 400; letter-spacing: 0.03em; color: var(--v6-gold);\n  border: 0; border-bottom: 1px solid var(--v6-blood); margin: 0 0 6px; padding: 0 0 3px;\n}\nbody.v6-theme li.chat-message .message-content p { margin: 0 0 4px; }\nbody.v6-theme li.chat-message .message-content ul { margin: 2px 0 6px; padding-left: 16px; }\nbody.v6-theme li.chat-message .message-content li { color: #d6ccbd; }\nbody.v6-theme li.chat-message .message-content code { background: #0c090a; color: var(--v6-gold); border: 1px solid var(--v6-line); border-radius: 3px; padding: 0 4px; }\nbody.v6-theme li.chat-message .content-link,\nbody.v6-theme li.chat-message .inline-roll { background: #0f0b0c; border: 1px solid var(--v6-line); color: var(--v6-ink); }\n\n/* the roll itself */\nbody.v6-theme li.chat-message .dice-roll .dice-formula { background: #0f0b0c; border: 1px solid var(--v6-line); border-radius: 4px; color: var(--v6-dim); font-size: 12px; box-shadow: none; }\nbody.v6-theme li.chat-message .dice-roll .dice-tooltip { color: var(--v6-ink); }\nbody.v6-theme li.chat-message .dice-roll .dice-tooltip .dice-rolls .roll { color: #111; }\nbody.v6-theme li.chat-message .dice-roll .dice-total {\n  background: radial-gradient(ellipse at center, rgba(163, 22, 33, 0.28) 0%, rgba(15, 11, 12, 0.9) 75%);\n  border: 1px solid var(--v6-blood); border-radius: 4px; color: #fff3da;\n  font-family: var(--v6-display); font-size: 28px; line-height: 1.35; font-weight: 400; text-shadow: 0 0 10px rgba(208, 48, 60, 0.7); box-shadow: none; margin: 4px 0;\n}\nbody.v6-theme li.chat-message .a2-dice { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }\nbody.v6-theme li.chat-message .a2-die {\n  display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 4px;\n  background: #0f0b0c; border: 1px solid #4b3a3d; border-radius: 4px; color: #8f8379; font-weight: 600; font-size: 12px;\n}\nbody.v6-theme li.chat-message .a2-die.a2-succ { background: #1d1a12; border-color: var(--v6-gold); color: #f3dca6; }\nbody.v6-theme li.chat-message .a2-die.a2-crit { background: var(--v6-blood); border-color: #f0c9a0; color: #fff; box-shadow: 0 0 8px rgba(208, 48, 60, 0.8); }\nbody.v6-theme li.chat-message .a2-die.a2-hunger { border-style: double; border-width: 3px; border-color: var(--v6-blood-hi); }\nbody.v6-theme li.chat-message .a2-die.a2-hunger.a2-one,\nbody.v6-theme li.chat-message .a2-die.a2-beast { background: #2a0508; border-color: var(--v6-blood-hi); color: #ff8d95; }\nbody.v6-theme li.chat-message .a2-result { background: none; border: 0; padding: 0; }\nbody.v6-theme li.chat-message .a2-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 4px 0; padding: 4px 8px; border-radius: 4px; background: #0f0b0c; border-left: 3px solid var(--v6-dim); }\nbody.v6-theme li.chat-message .a2-verdict strong { font-family: var(--v6-display); font-size: 18px; font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; color: var(--v6-ink); }\nbody.v6-theme li.chat-message .a2-verdict span { color: var(--v6-dim); font-size: 12px; }\nbody.v6-theme li.chat-message .a2-win .a2-verdict { border-left-color: var(--v6-gold); }\nbody.v6-theme li.chat-message .a2-win .a2-verdict strong { color: var(--v6-gold); }\nbody.v6-theme li.chat-message .a2-critical .a2-verdict { border-left-color: #f3dca6; box-shadow: inset 0 0 14px rgba(210, 170, 90, 0.18); }\nbody.v6-theme li.chat-message .a2-critical .a2-verdict strong { color: #ffe9b0; text-shadow: 0 0 8px rgba(210, 170, 90, 0.6); }\nbody.v6-theme li.chat-message .a2-fail .a2-verdict strong,\nbody.v6-theme li.chat-message .a2-tie .a2-verdict strong { color: #b9ada0; }\nbody.v6-theme li.chat-message .a2-painful .a2-verdict,\nbody.v6-theme li.chat-message .a2-bestial .a2-verdict { border-left-color: var(--v6-blood-hi); background: #1f0a0c; }\nbody.v6-theme li.chat-message .a2-painful .a2-verdict strong,\nbody.v6-theme li.chat-message .a2-bestial .a2-verdict strong { color: #ff6b76; text-shadow: 0 0 8px rgba(208, 48, 60, 0.6); }\nbody.v6-theme li.chat-message .a2-notes,\nbody.v6-theme li.chat-message .a2x-note,\nbody.v6-theme li.chat-message .a2-note { list-style: none; margin: 4px 0; padding: 0 0 0 8px; border-left: 1px solid var(--v6-line); color: var(--v6-dim); font-size: 12px; background: none; }\nbody.v6-theme li.chat-message .a2-notes li { color: var(--v6-dim); margin: 1px 0; }\nbody.v6-theme li.chat-message .a2x-line { color: #d6ccbd; font-size: 12.5px; border-top: 1px dashed var(--v6-line); padding-top: 4px; margin-top: 4px; }\nbody.v6-theme li.chat-message .a2o-defence { border-top: 1px dashed var(--v6-line); }\n\n/* buttons on cards */\nbody.v6-theme li.chat-message .message-content button {\n  background: linear-gradient(180deg, #33201f 0%, #24171a 100%); border: 1px solid #6b3a3c; border-radius: 4px; color: var(--v6-ink);\n  font-size: 12.5px; min-height: 26px; cursor: pointer; transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;\n}\nbody.v6-theme li.chat-message .message-content button:hover:not(:disabled) { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; box-shadow: 0 0 8px rgba(208, 48, 60, 0.6); }\nbody.v6-theme li.chat-message .message-content button:disabled { opacity: 0.4; cursor: default; }\nbody.v6-theme li.chat-message .message-content button i { color: var(--v6-gold); margin-right: 3px; }\nbody.v6-theme li.chat-message .message-content button:hover:not(:disabled) i { color: #fff; }\nbody.v6-theme li.chat-message .a2-actions, body.v6-theme li.chat-message .a2x-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }\nbody.v6-theme li.chat-message .a2-actions button, body.v6-theme li.chat-message .a2x-actions button { flex: 1 1 auto; }\n\n/* the module's own cards */\nbody.v6-theme li.chat-message .a2k-react span { color: var(--v6-gold); letter-spacing: 2px; }\nbody.v6-theme li.chat-message .a2k-react a { color: var(--v6-dim); }\nbody.v6-theme li.chat-message .a2l-row span { color: #d6ccbd; }\nbody.v6-theme li.chat-message a.v6-roll { border-color: var(--v6-blood); background: rgba(163, 22, 33, 0.18); color: var(--v6-ink); }\n\n/* ---- the module's windows ---- */\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]),\nbody.v6-theme .application.v6-window {\n  background: linear-gradient(170deg, #1e1518 0%, #110d0e 100%);\n  border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px;\n  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px #000;\n  color: var(--v6-ink);\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .window-header {\n  background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line);\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .window-title {\n  font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; text-shadow: 0 1px 0 #000;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) fieldset { border: 1px solid var(--v6-line); border-radius: 6px; background: rgba(0, 0, 0, 0.22); }\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) legend,\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) h4 {\n  font-family: var(--v6-display); font-size: 17px; font-weight: 400; letter-spacing: 0.06em; text-transform: uppercase; color: var(--v6-gold); border: 0;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) button {\n  background: linear-gradient(180deg, #2c1d1f 0%, #1f1517 100%); border: 1px solid #5d3437; color: var(--v6-ink); transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) button:hover:not(:disabled) {\n  background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; box-shadow: 0 0 10px rgba(208, 48, 60, 0.55);\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .form-footer button[data-action=\"ok\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .form-footer button.default {\n  border-color: var(--v6-gold); font-family: var(--v6-display); font-size: 17px; letter-spacing: 0.08em; text-transform: uppercase;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input[type=\"text\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input[type=\"number\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input[type=\"search\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) select {\n  background: #0d0a0b; border: 1px solid var(--v6-line); color: var(--v6-ink); border-radius: 4px;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input:focus,\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) select:focus { border-color: var(--v6-gold); box-shadow: 0 0 6px rgba(210, 170, 90, 0.4); outline: 0; }\nbody.v6-theme .a2v-grid button i { color: var(--v6-gold); font-size: 15px; }\nbody.v6-theme .a2v-grid button:hover:not(:disabled) i { color: #fff; }\nbody.v6-theme .a2v-grid button span { font-weight: 600; }\nbody.v6-theme .a2c-nav a.on { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; }\nbody.v6-theme .a2c-nav a b { color: var(--v6-gold); }\nbody.v6-theme .a2c-nav a.on b { color: #fff; }\nbody.v6-theme .a2c-hint, body.v6-theme .a2c-info, body.v6-theme .a2c-frame { border-left-color: var(--v6-blood); background: rgba(163, 22, 33, 0.08); }\n\nbody.v6-theme li.chat-message .a2k-react { flex-wrap: wrap; }\nbody.v6-theme li.chat-message .a2k-react span { white-space: nowrap; flex: 1 1 100%; }\nbody.v6-theme li.chat-message .a2k-react button { flex: 1 1 0; }\nbody.v6-theme .a2z-state small { color: var(--v6-dim); }\n\n/* the Masquerade Tracker and other module windows that are not dialogs */\nbody.v6-theme .application.a2t-masq-app { background: linear-gradient(170deg, #1e1518 0%, #110d0e 100%); border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px; color: var(--v6-ink); }\nbody.v6-theme .application.a2t-masq-app .window-header { background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.a2t-masq-app .window-title { font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; }\n\n/* ---- journals ---- */\nbody.v6-theme .application.journal-sheet {\n  background: linear-gradient(170deg, #1e1518 0%, #0f0b0c 100%);\n  border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px;\n  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px #000; color: var(--v6-ink);\n}\nbody.v6-theme .application.journal-sheet > .window-header { background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.journal-sheet > .window-header .window-title { font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; text-shadow: 0 1px 0 #000; }\nbody.v6-theme .application.journal-sheet .journal-sidebar { background: #0e0a0b; border-right: 1px solid var(--v6-line); color: var(--v6-dim); }\nbody.v6-theme .application.journal-sheet .journal-sidebar search input { background: #171113; border: 1px solid var(--v6-line); color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page > .page-heading { color: #c3b7a8; border: 0; border-left: 2px solid transparent; padding-left: 8px; transition: color 0.12s, border-color 0.12s, background 0.12s; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page > .page-heading:hover { color: #fff3da; background: rgba(163, 22, 33, 0.14); border-left-color: var(--v6-blood); text-shadow: none; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page.active > .page-heading { color: var(--v6-gold); background: rgba(163, 22, 33, 0.2); border-left-color: var(--v6-blood-hi); font-weight: 600; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page > .page-heading .page-number { color: var(--v6-blood-hi); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc ol.headings li { color: var(--v6-dim); font-size: 12px; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc ol.headings li:hover { color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .action-buttons button { background: #1f1517; border: 1px solid #5d3437; color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .action-buttons button:hover { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; }\nbody.v6-theme .application.journal-sheet .journal-entry-content { background: radial-gradient(ellipse at 50% 0%, #241a1d 0%, #151012 55%, #100c0d 100%); color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-header { border-bottom: 0; }\nbody.v6-theme .application.journal-sheet .journal-header input.title {\n  font-family: var(--v6-display); font-size: 24px; height: auto; letter-spacing: 0.05em; text-transform: uppercase; text-align: center; text-overflow: ellipsis; color: #f6e7c3;\n  background: linear-gradient(90deg, transparent 0%, rgba(163, 22, 33, 0.45) 20%, rgba(163, 22, 33, 0.45) 80%, transparent 100%);\n  border: 0; border-top: 1px solid rgba(210, 170, 90, 0.5); border-bottom: 1px solid rgba(210, 170, 90, 0.5); border-radius: 0; text-shadow: 0 2px 6px #000; padding: 6px 12px;\n}\nbody.v6-theme .application.journal-sheet .journal-entry-page { color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-page-header h1,\nbody.v6-theme .application.journal-sheet .journal-page-header h2,\nbody.v6-theme .application.journal-sheet .journal-page-header h3 {\n  font-family: var(--v6-display); font-weight: 400; font-size: 32px; letter-spacing: 0.04em; color: var(--v6-gold); text-shadow: 0 2px 4px #000;\n  border: 0; border-bottom: 3px double var(--v6-blood); padding-bottom: 6px; margin-bottom: 14px;\n}\nbody.v6-theme .application.journal-sheet .journal-page-content { color: #ddd3c4; font-size: 14.5px; line-height: 1.65; }\nbody.v6-theme .application.journal-sheet .journal-page-content h1,\nbody.v6-theme .application.journal-sheet .journal-page-content h2,\nbody.v6-theme .application.journal-sheet .journal-page-content [data-v6-level=\"2\"] {\n  font-family: var(--v6-display); font-weight: 400; font-size: 25px; letter-spacing: 0.04em; color: #ecd096; text-shadow: 0 1px 3px #000;\n  border: 0; border-bottom: 1px solid var(--v6-blood); padding-bottom: 3px; margin: 1.4em 0 0.5em;\n}\nbody.v6-theme .application.journal-sheet .journal-page-content h3,\nbody.v6-theme .application.journal-sheet .journal-page-content [data-v6-level=\"3\"] { font-family: var(--v6-display); font-weight: 400; font-size: 20px; letter-spacing: 0.04em; color: #d98a8f; border: 0; margin: 1.2em 0 0.35em; }\nbody.v6-theme .application.journal-sheet .journal-page-content h4,\nbody.v6-theme .application.journal-sheet .journal-page-content [data-v6-level=\"4\"] { font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--v6-gold); border: 0; margin: 1.1em 0 0.3em; }\nbody.v6-theme .application.journal-sheet .journal-page-content .v6-subtitle { color: var(--v6-dim); font-family: inherit; font-size: 15px; font-style: italic; text-transform: none; letter-spacing: 0; border: 0; text-shadow: none; }\nbody.v6-theme .application.journal-sheet .journal-page-content strong { color: #f6ecd8; }\nbody.v6-theme .application.journal-sheet .journal-page-content em { color: #e2d6c4; }\nbody.v6-theme .application.journal-sheet .journal-page-content a:not(.v6-roll):not(.content-link):not(.inline-roll) { color: var(--v6-gold); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.content-link,\nbody.v6-theme .application.journal-sheet .journal-page-content a.inline-roll { background: #0f0b0c; border: 1px solid #5d3437; color: #f1e3c4; border-radius: 4px; padding: 0 5px; }\nbody.v6-theme .application.journal-sheet .journal-page-content a.content-link:hover { border-color: var(--v6-gold); text-shadow: none; box-shadow: 0 0 6px rgba(210, 170, 90, 0.4); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.content-link i { color: var(--v6-gold); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.v6-roll { border: 1px solid var(--v6-blood); background: rgba(163, 22, 33, 0.22); color: #fff3da; border-radius: 4px; }\nbody.v6-theme .application.journal-sheet .journal-page-content a.v6-roll:hover { background: var(--v6-blood); box-shadow: 0 0 8px rgba(208, 48, 60, 0.6); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.v6-roll i { color: var(--v6-gold); }\nbody.v6-theme .application.journal-sheet .journal-page-content .v6-table-wrap { border: 1px solid var(--v6-line); border-radius: 6px; background: rgba(0, 0, 0, 0.25); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4); }\nbody.v6-theme .application.journal-sheet .journal-page-content table { border: 0; background: transparent; color: inherit; }\nbody.v6-theme .application.journal-sheet .journal-page-content th { background: linear-gradient(180deg, #6d141c 0%, #4a0e14 100%); color: #f6e7c3; border: 0; border-bottom: 1px solid var(--v6-gold); font-family: var(--v6-display); font-weight: 400; font-size: 16px; letter-spacing: 0.05em; text-shadow: 0 1px 0 #000; }\nbody.v6-theme .application.journal-sheet .journal-page-content td { border: 0; border-top: 1px solid #2e1f22; color: #ddd3c4; }\nbody.v6-theme .application.journal-sheet .journal-page-content tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.03); }\nbody.v6-theme .application.journal-sheet .journal-page-content tbody tr:hover { background: rgba(163, 22, 33, 0.14); }\nbody.v6-theme .application.journal-sheet .journal-page-content td:first-child { color: #f1e3c4; }\nbody.v6-theme .application.journal-sheet .journal-page-content .v6-note { background: linear-gradient(90deg, rgba(163, 22, 33, 0.2) 0%, rgba(163, 22, 33, 0.05) 100%); border: 0; border-left: 3px solid var(--v6-blood-hi); border-radius: 0 6px 6px 0; color: #e6dccd; }\nbody.v6-theme .application.journal-sheet .journal-page-content blockquote { background: rgba(0, 0, 0, 0.3); border: 0; border-left: 3px solid var(--v6-gold); border-radius: 0 6px 6px 0; color: #cfc3b3; font-style: italic; }\nbody.v6-theme .application.journal-sheet .journal-page-content hr { border: 0; height: 1px; margin: 1.6em 15%; background: linear-gradient(90deg, transparent, var(--v6-blood), var(--v6-gold), var(--v6-blood), transparent); }\nbody.v6-theme .application.journal-sheet .journal-page-content img { border: 1px solid var(--v6-line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6); }\nbody.v6-theme .application.journal-sheet .journal-page-content code { background: #0c090a; color: var(--v6-gold); border: 1px solid var(--v6-line); border-radius: 3px; padding: 0 4px; }\nbody.v6-theme .application.journal-sheet .journal-page-content li::marker { color: var(--v6-blood-hi); }\nbody.v6-theme .application.journal-sheet .journal-entry-pages { scrollbar-color: #5d3437 transparent; }\n/* image pages (handouts, maps) */\nbody.v6-theme .application.journal-sheet .journal-entry-page.image figure img { border: 1px solid var(--v6-line); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.7); }\nbody.v6-theme .application.journal-sheet .journal-entry-page.image figcaption { color: var(--v6-dim); font-style: italic; }\n"
+const A2H_CSS = "/* V6 Automation: the Nightfall look for chat cards and the module's windows. */\nbody.v6-theme {\n  --v6-ink: #e9e0d2;\n  --v6-dim: #a3978a;\n  --v6-gold: #d2aa5a;\n  --v6-blood: #a31621;\n  --v6-blood-hi: #d0303c;\n  --v6-panel: #171113;\n  --v6-panel-2: #21171a;\n  --v6-line: #43292e;\n  --v6-display: \"Modesto Condensed\", \"Palatino Linotype\", \"Book Antiqua\", Georgia, serif;\n}\n\n/* ---- chat cards ---- */\nbody.v6-theme .chat-log li.chat-message,\nbody.v6-theme #chat-notifications li.chat-message {\n  background: linear-gradient(165deg, var(--v6-panel-2) 0%, var(--v6-panel) 70%);\n  border: 1px solid var(--v6-line);\n  border-left: 3px solid var(--v6-blood);\n  border-radius: 6px;\n  color: var(--v6-ink);\n  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55), inset 0 0 32px rgba(163, 22, 33, 0.07);\n  padding: 8px 10px 9px;\n}\nbody.v6-theme .chat-log li.chat-message.whisper { border-left-color: #6b4fa0; background: linear-gradient(165deg, #1d1826 0%, #131018 70%); }\nbody.v6-theme .chat-log li.chat-message.blind { border-left-color: #4a6d8c; }\nbody.v6-theme li.chat-message .message-header { color: var(--v6-dim); border-bottom: 1px solid var(--v6-line); padding-bottom: 4px; margin-bottom: 6px; }\nbody.v6-theme li.chat-message .message-header .message-sender { font-family: var(--v6-display); font-size: 17px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--v6-gold); text-shadow: 0 1px 0 #000; }\nbody.v6-theme li.chat-message .message-header .message-metadata,\nbody.v6-theme li.chat-message .message-header .message-metadata a,\nbody.v6-theme li.chat-message .message-header .whisper-to { color: var(--v6-dim); font-size: 11px; }\nbody.v6-theme li.chat-message .message-header .flavor-text { color: #cfc3b3; font-style: italic; font-size: 13px; }\nbody.v6-theme li.chat-message .message-content { color: var(--v6-ink); }\nbody.v6-theme li.chat-message .message-content a:not(.v6-roll):not(.content-link):not(.inline-roll) { color: var(--v6-gold); }\nbody.v6-theme li.chat-message .message-content h1,\nbody.v6-theme li.chat-message .message-content h2,\nbody.v6-theme li.chat-message .message-content h3,\nbody.v6-theme li.chat-message .message-content h4:not(.dice-total) {\n  font-family: var(--v6-display); font-size: 18px; line-height: 1.2; font-weight: 400; letter-spacing: 0.03em; color: var(--v6-gold);\n  border: 0; border-bottom: 1px solid var(--v6-blood); margin: 0 0 6px; padding: 0 0 3px;\n}\nbody.v6-theme li.chat-message .message-content p { margin: 0 0 4px; }\nbody.v6-theme li.chat-message .message-content ul { margin: 2px 0 6px; padding-left: 16px; }\nbody.v6-theme li.chat-message .message-content li { color: #d6ccbd; }\nbody.v6-theme li.chat-message .message-content code { background: #0c090a; color: var(--v6-gold); border: 1px solid var(--v6-line); border-radius: 3px; padding: 0 4px; }\nbody.v6-theme li.chat-message .content-link,\nbody.v6-theme li.chat-message .inline-roll { background: #0f0b0c; border: 1px solid var(--v6-line); color: var(--v6-ink); }\n\n/* the roll itself */\nbody.v6-theme li.chat-message .dice-roll .dice-formula { background: #0f0b0c; border: 1px solid var(--v6-line); border-radius: 4px; color: var(--v6-dim); font-size: 12px; box-shadow: none; }\nbody.v6-theme li.chat-message .dice-roll .dice-tooltip { color: var(--v6-ink); }\nbody.v6-theme li.chat-message .dice-roll .dice-tooltip .dice-rolls .roll { color: #111; }\nbody.v6-theme li.chat-message .dice-roll .dice-total {\n  background: radial-gradient(ellipse at center, rgba(163, 22, 33, 0.28) 0%, rgba(15, 11, 12, 0.9) 75%);\n  border: 1px solid var(--v6-blood); border-radius: 4px; color: #fff3da;\n  font-family: var(--v6-display); font-size: 28px; line-height: 1.35; font-weight: 400; text-shadow: 0 0 10px rgba(208, 48, 60, 0.7); box-shadow: none; margin: 4px 0;\n}\nbody.v6-theme li.chat-message .a2-dice { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }\nbody.v6-theme li.chat-message .a2-die {\n  display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 4px;\n  background: #0f0b0c; border: 1px solid #4b3a3d; border-radius: 4px; color: #8f8379; font-weight: 600; font-size: 12px;\n}\nbody.v6-theme li.chat-message .a2-die.a2-succ { background: #1d1a12; border-color: var(--v6-gold); color: #f3dca6; }\nbody.v6-theme li.chat-message .a2-die.a2-crit { background: var(--v6-blood); border-color: #f0c9a0; color: #fff; box-shadow: 0 0 8px rgba(208, 48, 60, 0.8); }\nbody.v6-theme li.chat-message .a2-die.a2-hunger { border-style: double; border-width: 3px; border-color: var(--v6-blood-hi); }\nbody.v6-theme li.chat-message .a2-die.a2-hunger.a2-one,\nbody.v6-theme li.chat-message .a2-die.a2-beast { background: #2a0508; border-color: var(--v6-blood-hi); color: #ff8d95; }\nbody.v6-theme li.chat-message .a2-result { background: none; border: 0; padding: 0; }\nbody.v6-theme li.chat-message .a2-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 4px 0; padding: 4px 8px; border-radius: 4px; background: #0f0b0c; border-left: 3px solid var(--v6-dim); }\nbody.v6-theme li.chat-message .a2-verdict strong { font-family: var(--v6-display); font-size: 18px; font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; color: var(--v6-ink); }\nbody.v6-theme li.chat-message .a2-verdict span { color: var(--v6-dim); font-size: 12px; }\nbody.v6-theme li.chat-message .a2-win .a2-verdict { border-left-color: var(--v6-gold); }\nbody.v6-theme li.chat-message .a2-win .a2-verdict strong { color: var(--v6-gold); }\nbody.v6-theme li.chat-message .a2-critical .a2-verdict { border-left-color: #f3dca6; box-shadow: inset 0 0 14px rgba(210, 170, 90, 0.18); }\nbody.v6-theme li.chat-message .a2-critical .a2-verdict strong { color: #ffe9b0; text-shadow: 0 0 8px rgba(210, 170, 90, 0.6); }\nbody.v6-theme li.chat-message .a2-fail .a2-verdict strong,\nbody.v6-theme li.chat-message .a2-tie .a2-verdict strong { color: #b9ada0; }\nbody.v6-theme li.chat-message .a2-painful .a2-verdict,\nbody.v6-theme li.chat-message .a2-bestial .a2-verdict { border-left-color: var(--v6-blood-hi); background: #1f0a0c; }\nbody.v6-theme li.chat-message .a2-painful .a2-verdict strong,\nbody.v6-theme li.chat-message .a2-bestial .a2-verdict strong { color: #ff6b76; text-shadow: 0 0 8px rgba(208, 48, 60, 0.6); }\nbody.v6-theme li.chat-message .a2-notes,\nbody.v6-theme li.chat-message .a2x-note,\nbody.v6-theme li.chat-message .a2-note { list-style: none; margin: 4px 0; padding: 0 0 0 8px; border-left: 1px solid var(--v6-line); color: var(--v6-dim); font-size: 12px; background: none; }\nbody.v6-theme li.chat-message .a2-notes li { color: var(--v6-dim); margin: 1px 0; }\nbody.v6-theme li.chat-message .a2x-line { color: #d6ccbd; font-size: 12.5px; border-top: 1px dashed var(--v6-line); padding-top: 4px; margin-top: 4px; }\nbody.v6-theme li.chat-message .a2o-defence { border-top: 1px dashed var(--v6-line); }\n\n/* buttons on cards */\nbody.v6-theme li.chat-message .message-content button {\n  background: linear-gradient(180deg, #33201f 0%, #24171a 100%); border: 1px solid #6b3a3c; border-radius: 4px; color: var(--v6-ink);\n  font-size: 12.5px; min-height: 26px; cursor: pointer; transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;\n}\nbody.v6-theme li.chat-message .message-content button:hover:not(:disabled) { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; box-shadow: 0 0 8px rgba(208, 48, 60, 0.6); }\nbody.v6-theme li.chat-message .message-content button:disabled { opacity: 0.4; cursor: default; }\nbody.v6-theme li.chat-message .message-content button i { color: var(--v6-gold); margin-right: 3px; }\nbody.v6-theme li.chat-message .message-content button:hover:not(:disabled) i { color: #fff; }\nbody.v6-theme li.chat-message .a2-actions, body.v6-theme li.chat-message .a2x-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }\nbody.v6-theme li.chat-message .a2-actions button, body.v6-theme li.chat-message .a2x-actions button { flex: 1 1 auto; }\n\n/* the module's own cards */\nbody.v6-theme li.chat-message .a2k-react span { color: var(--v6-gold); letter-spacing: 2px; }\nbody.v6-theme li.chat-message .a2k-react a { color: var(--v6-dim); }\nbody.v6-theme li.chat-message .a2l-row span { color: #d6ccbd; }\nbody.v6-theme li.chat-message a.v6-roll { border-color: var(--v6-blood); background: rgba(163, 22, 33, 0.18); color: var(--v6-ink); }\n\n/* ---- the module's windows ---- */\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]),\nbody.v6-theme .application.v6-window {\n  background: linear-gradient(170deg, #1e1518 0%, #110d0e 100%);\n  border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px;\n  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px #000;\n  color: var(--v6-ink);\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .window-header {\n  background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line);\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .window-title {\n  font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; text-shadow: 0 1px 0 #000;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) fieldset { border: 1px solid var(--v6-line); border-radius: 6px; background: rgba(0, 0, 0, 0.22); }\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) legend,\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) h4 {\n  font-family: var(--v6-display); font-size: 17px; font-weight: 400; letter-spacing: 0.06em; text-transform: uppercase; color: var(--v6-gold); border: 0;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) button {\n  background: linear-gradient(180deg, #2c1d1f 0%, #1f1517 100%); border: 1px solid #5d3437; color: var(--v6-ink); transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) button:hover:not(:disabled) {\n  background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; box-shadow: 0 0 10px rgba(208, 48, 60, 0.55);\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .form-footer button[data-action=\"ok\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) .form-footer button.default {\n  border-color: var(--v6-gold); font-family: var(--v6-display); font-size: 17px; letter-spacing: 0.08em; text-transform: uppercase;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input[type=\"text\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input[type=\"number\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input[type=\"search\"],\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) select {\n  background: #0d0a0b; border: 1px solid var(--v6-line); color: var(--v6-ink); border-radius: 4px;\n}\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) input:focus,\nbody.v6-theme .application.dialog:has(.a2v-window, .a2z-window, .a2c, .a2l-dialog, [class*=\"a2t-\"], [class*=\"a2x-\"], [class*=\"a2-dialog\"]) select:focus { border-color: var(--v6-gold); box-shadow: 0 0 6px rgba(210, 170, 90, 0.4); outline: 0; }\nbody.v6-theme .a2v-grid button i { color: var(--v6-gold); font-size: 15px; }\nbody.v6-theme .a2v-grid button:hover:not(:disabled) i { color: #fff; }\nbody.v6-theme .a2v-grid button span { font-weight: 600; }\nbody.v6-theme .a2c-nav a.on { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; }\nbody.v6-theme .a2c-nav a b { color: var(--v6-gold); }\nbody.v6-theme .a2c-nav a.on b { color: #fff; }\nbody.v6-theme .a2c-hint, body.v6-theme .a2c-info, body.v6-theme .a2c-frame { border-left-color: var(--v6-blood); background: rgba(163, 22, 33, 0.08); }\n\nbody.v6-theme li.chat-message .a2k-react { flex-wrap: wrap; }\nbody.v6-theme li.chat-message .a2k-react span { white-space: nowrap; flex: 1 1 100%; }\nbody.v6-theme li.chat-message .a2k-react button { flex: 1 1 0; }\nbody.v6-theme .a2z-state small { color: var(--v6-dim); }\n\n/* the Masquerade Tracker and other module windows that are not dialogs */\nbody.v6-theme .application.a2t-masq-app { background: linear-gradient(170deg, #1e1518 0%, #110d0e 100%); border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px; color: var(--v6-ink); }\nbody.v6-theme .application.a2t-masq-app .window-header { background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.a2t-masq-app .window-title { font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; }\n\n/* ---- journals ---- */\nbody.v6-theme .application.journal-sheet {\n  background: linear-gradient(170deg, #1e1518 0%, #0f0b0c 100%);\n  border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px;\n  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px #000; color: var(--v6-ink);\n}\nbody.v6-theme .application.journal-sheet > .window-header { background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.journal-sheet > .window-header .window-title { font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; text-shadow: 0 1px 0 #000; }\nbody.v6-theme .application.journal-sheet .journal-sidebar { background: #0e0a0b; border-right: 1px solid var(--v6-line); color: var(--v6-dim); }\nbody.v6-theme .application.journal-sheet .journal-sidebar search input { background: #171113; border: 1px solid var(--v6-line); color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page > .page-heading { color: #c3b7a8; border: 0; border-left: 2px solid transparent; padding-left: 8px; transition: color 0.12s, border-color 0.12s, background 0.12s; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page > .page-heading:hover { color: #fff3da; background: rgba(163, 22, 33, 0.14); border-left-color: var(--v6-blood); text-shadow: none; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page.active > .page-heading { color: var(--v6-gold); background: rgba(163, 22, 33, 0.2); border-left-color: var(--v6-blood-hi); font-weight: 600; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc li.page > .page-heading .page-number { color: var(--v6-blood-hi); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc ol.headings li { color: var(--v6-dim); font-size: 12px; }\nbody.v6-theme .application.journal-sheet .journal-sidebar .toc ol.headings li:hover { color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .action-buttons button { background: #1f1517; border: 1px solid #5d3437; color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-sidebar .action-buttons button:hover { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; }\nbody.v6-theme .application.journal-sheet .journal-entry-content { background: radial-gradient(ellipse at 50% 0%, #241a1d 0%, #151012 55%, #100c0d 100%); color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-header { border-bottom: 0; }\nbody.v6-theme .application.journal-sheet .journal-header input.title {\n  font-family: var(--v6-display); font-size: 24px; height: auto; letter-spacing: 0.05em; text-transform: uppercase; text-align: center; text-overflow: ellipsis; color: #f6e7c3;\n  background: linear-gradient(90deg, transparent 0%, rgba(163, 22, 33, 0.45) 20%, rgba(163, 22, 33, 0.45) 80%, transparent 100%);\n  border: 0; border-top: 1px solid rgba(210, 170, 90, 0.5); border-bottom: 1px solid rgba(210, 170, 90, 0.5); border-radius: 0; text-shadow: 0 2px 6px #000; padding: 6px 12px;\n}\nbody.v6-theme .application.journal-sheet .journal-entry-page { color: var(--v6-ink); }\nbody.v6-theme .application.journal-sheet .journal-page-header h1,\nbody.v6-theme .application.journal-sheet .journal-page-header h2,\nbody.v6-theme .application.journal-sheet .journal-page-header h3 {\n  font-family: var(--v6-display); font-weight: 400; font-size: 32px; letter-spacing: 0.04em; color: var(--v6-gold); text-shadow: 0 2px 4px #000;\n  border: 0; border-bottom: 3px double var(--v6-blood); padding-bottom: 6px; margin-bottom: 14px;\n}\nbody.v6-theme .application.journal-sheet .journal-page-content { color: #ddd3c4; font-size: 14.5px; line-height: 1.65; }\nbody.v6-theme .application.journal-sheet .journal-page-content h1,\nbody.v6-theme .application.journal-sheet .journal-page-content h2,\nbody.v6-theme .application.journal-sheet .journal-page-content [data-v6-level=\"2\"] {\n  font-family: var(--v6-display); font-weight: 400; font-size: 25px; letter-spacing: 0.04em; color: #ecd096; text-shadow: 0 1px 3px #000;\n  border: 0; border-bottom: 1px solid var(--v6-blood); padding-bottom: 3px; margin: 1.4em 0 0.5em;\n}\nbody.v6-theme .application.journal-sheet .journal-page-content h3,\nbody.v6-theme .application.journal-sheet .journal-page-content [data-v6-level=\"3\"] { font-family: var(--v6-display); font-weight: 400; font-size: 20px; letter-spacing: 0.04em; color: #d98a8f; border: 0; margin: 1.2em 0 0.35em; }\nbody.v6-theme .application.journal-sheet .journal-page-content h4,\nbody.v6-theme .application.journal-sheet .journal-page-content [data-v6-level=\"4\"] { font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--v6-gold); border: 0; margin: 1.1em 0 0.3em; }\nbody.v6-theme .application.journal-sheet .journal-page-content .v6-subtitle { color: var(--v6-dim); font-family: inherit; font-size: 15px; font-style: italic; text-transform: none; letter-spacing: 0; border: 0; text-shadow: none; }\nbody.v6-theme .application.journal-sheet .journal-page-content strong { color: #f6ecd8; }\nbody.v6-theme .application.journal-sheet .journal-page-content em { color: #e2d6c4; }\nbody.v6-theme .application.journal-sheet .journal-page-content a:not(.v6-roll):not(.content-link):not(.inline-roll) { color: var(--v6-gold); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.content-link,\nbody.v6-theme .application.journal-sheet .journal-page-content a.inline-roll { background: #0f0b0c; border: 1px solid #5d3437; color: #f1e3c4; border-radius: 4px; padding: 0 5px; }\nbody.v6-theme .application.journal-sheet .journal-page-content a.content-link:hover { border-color: var(--v6-gold); text-shadow: none; box-shadow: 0 0 6px rgba(210, 170, 90, 0.4); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.content-link i { color: var(--v6-gold); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.v6-roll { border: 1px solid var(--v6-blood); background: rgba(163, 22, 33, 0.22); color: #fff3da; border-radius: 4px; }\nbody.v6-theme .application.journal-sheet .journal-page-content a.v6-roll:hover { background: var(--v6-blood); box-shadow: 0 0 8px rgba(208, 48, 60, 0.6); }\nbody.v6-theme .application.journal-sheet .journal-page-content a.v6-roll i { color: var(--v6-gold); }\nbody.v6-theme .application.journal-sheet .journal-page-content .v6-table-wrap { border: 1px solid var(--v6-line); border-radius: 6px; background: rgba(0, 0, 0, 0.25); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4); }\nbody.v6-theme .application.journal-sheet .journal-page-content table { border: 0; background: transparent; color: inherit; }\nbody.v6-theme .application.journal-sheet .journal-page-content th { background: linear-gradient(180deg, #6d141c 0%, #4a0e14 100%); color: #f6e7c3; border: 0; border-bottom: 1px solid var(--v6-gold); font-family: var(--v6-display); font-weight: 400; font-size: 16px; letter-spacing: 0.05em; text-shadow: 0 1px 0 #000; }\nbody.v6-theme .application.journal-sheet .journal-page-content td { border: 0; border-top: 1px solid #2e1f22; color: #ddd3c4; }\nbody.v6-theme .application.journal-sheet .journal-page-content tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.03); }\nbody.v6-theme .application.journal-sheet .journal-page-content tbody tr:hover { background: rgba(163, 22, 33, 0.14); }\nbody.v6-theme .application.journal-sheet .journal-page-content td:first-child { color: #f1e3c4; }\nbody.v6-theme .application.journal-sheet .journal-page-content .v6-note { background: linear-gradient(90deg, rgba(163, 22, 33, 0.2) 0%, rgba(163, 22, 33, 0.05) 100%); border: 0; border-left: 3px solid var(--v6-blood-hi); border-radius: 0 6px 6px 0; color: #e6dccd; }\nbody.v6-theme .application.journal-sheet .journal-page-content blockquote { background: rgba(0, 0, 0, 0.3); border: 0; border-left: 3px solid var(--v6-gold); border-radius: 0 6px 6px 0; color: #cfc3b3; font-style: italic; }\nbody.v6-theme .application.journal-sheet .journal-page-content hr { border: 0; height: 1px; margin: 1.6em 15%; background: linear-gradient(90deg, transparent, var(--v6-blood), var(--v6-gold), var(--v6-blood), transparent); }\nbody.v6-theme .application.journal-sheet .journal-page-content img { border: 1px solid var(--v6-line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6); }\nbody.v6-theme .application.journal-sheet .journal-page-content code { background: #0c090a; color: var(--v6-gold); border: 1px solid var(--v6-line); border-radius: 3px; padding: 0 4px; }\nbody.v6-theme .application.journal-sheet .journal-page-content li::marker { color: var(--v6-blood-hi); }\nbody.v6-theme .application.journal-sheet .journal-entry-pages { scrollbar-color: #5d3437 transparent; }\n/* image pages (handouts, maps) */\nbody.v6-theme .application.journal-sheet .journal-entry-page.image figure img { border: 1px solid var(--v6-line); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.7); }\nbody.v6-theme .application.journal-sheet .journal-entry-page.image figcaption { color: var(--v6-dim); font-style: italic; }\n\n/* ---- character and item sheets ---- */\nbody.v6-theme .application.sheet.wod6e { background: linear-gradient(170deg, #1e1518 0%, #0f0b0c 100%); border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px #000; color: var(--v6-ink); }\nbody.v6-theme .application.sheet.wod6e > .window-header { background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.sheet.wod6e > .window-header .window-title { font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; text-shadow: 0 1px 0 #000; }\nbody.v6-theme .application.sheet.wod6e > .window-header .window-icon { color: var(--v6-gold); }\nbody.v6-theme .application.sheet.wod6e nav.sheet-tabs { border-bottom: 1px solid var(--v6-line); background: rgba(0, 0, 0, 0.25); }\nbody.v6-theme .application.sheet.wod6e nav.sheet-tabs a { color: #c3b7a8; border-bottom: 2px solid transparent; transition: color 0.12s, border-color 0.12s, background 0.12s; }\nbody.v6-theme .application.sheet.wod6e nav.sheet-tabs a:hover { color: #fff3da; background: rgba(163, 22, 33, 0.14); text-shadow: none; }\nbody.v6-theme .application.sheet.wod6e nav.sheet-tabs a.active { color: var(--v6-gold); border-bottom-color: var(--v6-blood-hi); background: rgba(163, 22, 33, 0.2); text-shadow: none; }\nbody.v6-theme .application.sheet.wod6e nav.sheet-tabs a i { color: var(--v6-blood-hi); }\nbody.v6-theme .application.sheet.wod6e h2, body.v6-theme .application.sheet.wod6e .sheet-section-header { font-family: var(--v6-display); letter-spacing: 0.06em; color: var(--v6-gold); text-shadow: 0 1px 2px #000; }\nbody.v6-theme .application.sheet.wod6e h2 { border-bottom: 1px solid var(--v6-blood); }\nbody.v6-theme .application.sheet.wod6e .sheet-section-header { border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.sheet.wod6e .sheet-section-header a, body.v6-theme .application.sheet.wod6e .sheet-section-header i { color: var(--v6-gold); }\nbody.v6-theme .application.sheet.wod6e input[type=\"text\"], body.v6-theme .application.sheet.wod6e input[type=\"number\"], body.v6-theme .application.sheet.wod6e select { background: #0d0a0b; border: 1px solid var(--v6-line); color: var(--v6-ink); border-radius: 4px; }\nbody.v6-theme .application.sheet.wod6e input:focus, body.v6-theme .application.sheet.wod6e select:focus { border-color: var(--v6-gold); box-shadow: 0 0 6px rgba(210, 170, 90, 0.4); outline: 0; }\nbody.v6-theme .application.sheet.wod6e .a2t-sheet-line a { color: var(--v6-gold); }\nbody.v6-theme .application.sheet.wod6e .a2t-sheet-line a:hover { color: #fff3da; text-shadow: 0 0 6px rgba(210, 170, 90, 0.5); }\nbody.v6-theme .application.sheet.wod6e .sheet-section-list > * { border-bottom: 1px solid rgba(67, 41, 46, 0.6); }\nbody.v6-theme .application.sheet.wod6e .sheet-section-list > *:hover { background: rgba(163, 22, 33, 0.1); }\n/* the module's windows that are not dialogs with a known class */\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) { background: linear-gradient(170deg, #1e1518 0%, #110d0e 100%); border: 1px solid var(--v6-line); border-top: 2px solid var(--v6-blood); border-radius: 8px; color: var(--v6-ink); }\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) .window-header { background: linear-gradient(90deg, rgba(163, 22, 33, 0.55) 0%, rgba(20, 14, 15, 0.2) 70%); border-bottom: 1px solid var(--v6-line); }\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) .window-title { font-family: var(--v6-display); font-size: 19px; letter-spacing: 0.05em; text-transform: uppercase; color: #f1e3c4; }\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) legend, body.v6-theme .a2w-table th { font-family: var(--v6-display); font-weight: 400; font-size: 15px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--v6-gold); }\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) button { background: linear-gradient(180deg, #2c1d1f 0%, #1f1517 100%); border: 1px solid #5d3437; color: var(--v6-ink); }\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) button:hover:not(:disabled) { background: linear-gradient(180deg, #b01c28 0%, #7c121b 100%); border-color: #f0c9a0; color: #fff; }\nbody.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) input[type=\"text\"], body.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) input[type=\"number\"], body.v6-theme .application.dialog:has(.a2w-dash, .a2w-coterie, .a2w-npc, .a2y-dialog) select { background: #0d0a0b; border: 1px solid var(--v6-line); color: var(--v6-ink); border-radius: 4px; }\n"
 function a2hApply () {
   const on = a2eGet('theme', 'nightfall') !== 'off'
   document.body.classList.toggle('v6-theme', on)
@@ -10307,6 +10332,7 @@ function a2yBonds (actor) { const b = actor?.flags?.world?.a2?.bonds; return Arr
 // thrall drinks from master (an actor, or just a name).
 async function a2yDrink (thrall, master, { night = null, quiet = false } = {}) {
   if (!thrall || !master) return null
+  if (typeof a2wVinculum === 'function' && a2wVinculum(thrall)) { if (!quiet) ui.notifications.info(`${thrall.name} is in a vinculum: no Blood Bond can form (PG p.135).`); return null } // eslint-disable-line no-undef
   const name = typeof master === 'string' ? master : master.name
   const uuid = typeof master === 'string' ? null : master.uuid
   const tier = typeof master === 'string' ? 'neonate' : a2yTier(master)
@@ -10552,6 +10578,484 @@ async function a2StoryBoot () {
   return true
 }
 globalThis.a2StoryBoot ??= a2StoryBoot
+
+// ---- the Storyteller's table: dashboard, tokens, coterie, NPC maker, hunts, vinculum, recap, reactions
+// Dashboard   one window with every player character (and the tokens on the scene):
+//             Health, Vitae, Hunger, Willpower, Humanity, states, bonds, XP; the night
+//             clock and the Masquerade Tracker on top. It updates as things change.
+// Tokens      new tokens get a Health bar and a Vitae bar; a mortal at 0 Health is
+//             marked defeated; torpor set by the tools shows as the Torpor state.
+// Coterie     a shared page: name, domain, haven, notes, shared Resources (the
+//             Storyteller edits them), and each member's own Resources and herd.
+// NPC maker   kind, category and three pools make a full sheet by the Storyteller
+//             Packet's rules (ST p.40-51): Attributes at half the pool, Skills to fill
+//             it, Health and Willpower from the table, a token ready to drop.
+// Group hunt  a card with each character's Hunger and a Hunt button for its player.
+// Vaulderie   binds the chosen characters in a vinculum: their Blood Bonds end, new
+//             ones are blocked, and −2 comes off tests against a packmate (PG p.135).
+// Recap       /recap writes what happened since the last one into a journal page.
+// Reactions   "Use a reaction" on a turn card offers the character's reaction powers
+//             and Blood Surge, then ticks the counter.
+//
+// Settings (world): tokenSetup (on), tableTools (on). Data: world settings coterie,
+// recapAt; flags.world.a2.vinculum on a character; flags.world.a2.npc on a made NPC.
+
+const A2W_COMPETENCE = [[2, 'Weak'], [4, 'Average'], [6, 'Good'], [8, 'Expert'], [10, 'Extraordinary']] // ST p.50
+// Starting points only: the pools are the Storyteller's to set.
+const A2W_ROLES = [
+  { id: 'custom', label: 'Custom', p: 4, s: 4, m: 4 },
+  { id: 'bystander', label: 'Bystander', p: 2, s: 3, m: 3 },
+  { id: 'thug', label: 'Thug', p: 5, s: 3, m: 2 },
+  { id: 'officer', label: 'Police officer', p: 5, s: 4, m: 4 },
+  { id: 'detective', label: 'Detective', p: 4, s: 5, m: 6 },
+  { id: 'hunter', label: 'Hunter', p: 6, s: 4, m: 5 },
+  { id: 'socialite', label: 'Socialite', p: 2, s: 7, m: 4 },
+  { id: 'scholar', label: 'Scholar', p: 2, s: 4, m: 7 },
+  { id: 'soldier', label: 'Soldier', p: 7, s: 3, m: 4 },
+  { id: 'animal', label: 'Guard animal', p: 5, s: 2, m: 2 },
+  { id: 'neonate', label: 'Neonate', p: 5, s: 5, m: 4 },
+  { id: 'hound', label: 'Hound or enforcer', p: 7, s: 5, m: 5 },
+  { id: 'primogen', label: 'Elder schemer', p: 6, s: 9, m: 8 }
+]
+const A2W_SKILL_CATS = { physical: ['athletics', 'fighting', 'shooting', 'survival'], social: ['expression', 'persuasion', 'subterfuge'], mental: ['awareness', 'craft', 'investigation', 'knowledge', 'medicine', 'sabotage'] }
+const A2W_ATTR_CATS = { physical: ['strength', 'dexterity', 'stamina'], social: ['charisma', 'manipulation', 'composure'], mental: ['intelligence', 'wits', 'resolve'] }
+
+// ---- pure rules ----
+// The sheet numbers for an NPC built from pools (ST p.42-43, p.50). Pure.
+//  kind: human | ghoul | vampire | animal ; category: minion | minor | standard | major
+function a2wNpcStats ({ kind = 'human', category = 'minor', physical = 4, social = 4, mental = 4 } = {}) {
+  const pools = { physical: a2Clamp(a2Int(physical), 1, 12), social: a2Clamp(a2Int(social), 1, 12), mental: a2Clamp(a2Int(mental), 1, 12) }
+  const attr = {}
+  const skill = {}
+  for (const cat of ['physical', 'social', 'mental']) { attr[cat] = Math.ceil(pools[cat] / 2); skill[cat] = pools[cat] - attr[cat] } // an Attribute is half the pool; the Skill fills it
+  const half = Math.ceil(pools.physical / 2)
+  const health = category === 'minion' ? 1 : kind === 'vampire' ? 5 + half : kind === 'animal' ? pools.physical : 2 + half
+  const willpower = Math.max(pools.social, pools.mental)
+  const competence = (n) => (A2W_COMPETENCE.find(([max]) => n <= max) ?? A2W_COMPETENCE.at(-1))[1]
+  return { pools, attr, skill, health, willpower, discipline: kind === 'vampire' ? ({ minion: 1, minor: 1, standard: 2, major: 3 }[category] ?? 1) : 0, competence: { physical: competence(pools.physical), social: competence(pools.social), mental: competence(pools.mental) } }
+}
+// Default Humanity of a vampire NPC by tier (ST p.41). Pure.
+function a2wNpcHumanity (tier) { return { duskborn: 6, neonate: 6, ancilla: 5, elder: 4, methuselah: 4 }[tier] ?? 6 }
+// How long a vinculum lasts: twice the bond interval of the lowest-generation participant (PG p.136). Pure.
+function a2wVinculumNights (tiers) {
+  const order = ['duskborn', 'neonate', 'ancilla', 'elder', 'methuselah']
+  const top = [...(tiers ?? [])].sort((a, b) => order.indexOf(b) - order.indexOf(a))[0] ?? 'neonate'
+  return 2 * ({ duskborn: 30, neonate: 30, ancilla: 180, elder: 365, methuselah: 36500 }[top] ?? 30)
+}
+// The recap's roll table from verdicts. rows: [{ name, win, critical, painful, bestial }]. Pure.
+function a2wRecapRolls (rows) {
+  const by = new Map()
+  for (const r of rows ?? []) {
+    const x = by.get(r.name) ?? { name: r.name, rolls: 0, wins: 0, criticals: 0, painful: 0, bestial: 0 }
+    x.rolls++; if (r.win) x.wins++; if (r.critical) x.criticals++; if (r.painful) x.painful++; if (r.bestial) x.bestial++
+    by.set(r.name, x)
+  }
+  return [...by.values()].sort((a, b) => b.rolls - a.rolls)
+}
+
+const a2wState = { hooked: false, dash: null, patched: false }
+function a2wOn () { return a2Enabled() && a2eGet('tableTools', true) !== false }
+function a2wPCs () { return [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a.hasPlayerOwner).sort((a, b) => a.name.localeCompare(b.name)) }
+
+// ---- dashboard ----
+function a2wDashRows () {
+  const seen = new Set()
+  const rows = []
+  const add = (actor, group) => { if (!actor || seen.has(actor.uuid)) return; seen.add(actor.uuid); rows.push({ actor, group }) }
+  for (const a of a2wPCs()) add(a, 'Player characters')
+  for (const t of globalThis.canvas?.scene?.tokens ?? []) add(t.actor, 'On this scene')
+  return rows
+}
+function a2wDashHtml () {
+  const A = globalThis.V6Alpha2 ?? {}
+  let clock = { night: 1, session: 1 }
+  let masq = null
+  try { clock = a2tClock() } catch (e) { /* tools off */ }
+  try { const r = a2tMasqState().rank; masq = { rank: r, level: a2tMasqLevel(r)?.name ?? '' } } catch (e) { /* tools off */ }
+  const pips = (v, max, cls = '') => `<span class="a2w-pips ${cls}" title="${v} of ${max}">${'●'.repeat(Math.max(0, v))}${'○'.repeat(Math.max(0, max - v))}</span>`
+  let last = ''
+  const body = a2wDashRows().map(({ actor, group }) => {
+    const c = a2Creature(actor)
+    const rules = a2Rules(actor) ?? {}
+    const h = a2ActorHealth(actor)
+    const vit = actor.system?.health ?? {}
+    const wp = actor.system?.willpower ?? {}
+    const hum = rules.humanity ? a2ActorHumanity(actor) : null
+    const hunger = rules.hunger ? a2ActorHunger(actor) : null
+    const states = (A.states?.list ?? []).filter((s) => A.states.has(actor, s.id)).map((s) => `<img src="${s.img}" title="${a2Esc(s.name)}" width="16" height="16">`).join('')
+    const fz = typeof a2xFrenzyState === 'function' ? a2xFrenzyState(actor) : null
+    const bonds = (actor.flags?.world?.a2?.bonds ?? []).filter((b) => a2Int(b.stage) > 0).map((b) => `${a2Esc(b.name)} ${b.stage}`).join(', ')
+    const vinc = actor.flags?.world?.a2?.vinculum?.mates?.length ? 'vinculum' : ''
+    const xp = actor.hasPlayerOwner && typeof a2tXp === 'function' ? a2tXp(actor).available : null
+    const head = group !== last ? `<tr class="a2w-group"><td colspan="9">${group}</td></tr>` : ''
+    last = group
+    return `${head}<tr data-uuid="${actor.uuid}">
+      <td><a data-open="${actor.uuid}"><strong>${a2Esc(actor.name)}</strong></a><br><small>${a2Esc(c)}${actor.system?.vampire?.clan?.name && c === 'vampire' ? `, ${a2Esc(actor.system.vampire.clan.name)}` : ''}</small></td>
+      <td class="${h.value === 0 ? 'bad' : h.value * 2 <= h.max ? 'warn' : ''}">${h.value}/${h.max}${h.baneful ? ` <small title="baneful">(${h.baneful}b)</small>` : ''}</td>
+      <td>${rules.vitae ? `${a2Int(vit.value)}/${a2Int(vit.max)}` : '–'}</td>
+      <td class="${hunger >= 4 ? 'bad' : hunger >= 3 ? 'warn' : ''}">${hunger === null ? '–' : pips(hunger, 5, 'hunger')}</td>
+      <td class="${a2Int(wp.value) === 0 && a2Int(wp.max) ? 'bad' : ''}">${a2Int(wp.max) ? `${a2Int(wp.value)}/${a2Int(wp.max)}` : '–'}</td>
+      <td>${hum ? `${hum.rank}${hum.violations ? ` <small title="violations">+${hum.violations}v</small>` : ''}` : '–'}</td>
+      <td class="a2w-states">${states}${fz ? `<span class="bad" title="in a frenzy">${a2Esc(fz.type)} frenzy</span>` : ''}${actor.flags?.world?.a2?.torpor ? '<span class="warn">torpor</span>' : ''}</td>
+      <td><small>${bonds}${bonds && vinc ? '; ' : ''}${vinc}</small></td>
+      <td>${xp === null ? '' : xp}</td></tr>`
+  }).join('')
+  return `<div class="a2w-dash"><div class="a2w-top"><span><i class="fa-solid fa-moon"></i> Night ${clock.night}, session ${clock.session}</span>${masq ? `<span><i class="fa-solid fa-masks-theater"></i> Masquerade ${masq.rank}/10: ${a2Esc(masq.level)}</span>` : ''}<span>${game.combat?.started ? `<i class="fa-solid fa-swords"></i> Round ${game.combat.round}: ${a2Esc(game.combat.combatant?.name ?? '')}` : ''}</span></div>
+    <table class="a2w-table"><thead><tr><th>Character</th><th>Health</th><th>Vitae</th><th>Hunger</th><th>Willpower</th><th>Humanity</th><th>States</th><th>Bonds</th><th>XP</th></tr></thead><tbody>${body || '<tr><td colspan="9"><em>No player characters yet, and no tokens on this scene.</em></td></tr>'}</tbody></table></div>`
+}
+function a2wDashRefresh () {
+  const app = a2wState.dash
+  const box = app?.element?.querySelector?.('.a2w-dash')
+  if (!app?.rendered || !box) { a2wState.dash = null; return }
+  box.outerHTML = a2wDashHtml()
+}
+async function a2wDashboard () {
+  if (!game.user.isGM) { ui.notifications.warn('The dashboard is the Storyteller\'s.'); return null }
+  if (a2wState.dash?.rendered) { a2wState.dash.bringToFront?.(); a2wDashRefresh(); return a2wState.dash }
+  foundry.applications.api.DialogV2.wait({
+    window: { title: 'Storyteller dashboard', resizable: true },
+    position: { width: 860 },
+    content: a2wDashHtml(),
+    buttons: [{ action: 'close', label: 'Close' }],
+    modal: false,
+    rejectClose: false,
+    render: (ev, dialog) => {
+      a2wState.dash = dialog
+      dialog.element.addEventListener('click', (e) => { const a = e.target?.closest?.('a[data-open]'); if (a) { e.preventDefault(); a2FromUuid(a.dataset.open)?.sheet?.render(true) } })
+    }
+  }).catch(() => null).finally(() => { a2wState.dash = null })
+  return true
+}
+
+// ---- tokens ----
+function a2wPatchBars () {
+  if (a2wState.patched) return
+  const proto = CONFIG.Token?.documentClass?.prototype
+  if (!proto?.getBarAttribute) return
+  a2wState.patched = true
+  const orig = proto.getBarAttribute
+  // "a2health" is the Alpha 2 Health track, which lives outside the system's own data
+  proto.getBarAttribute = function (barName, opts = {}) {
+    const attr = opts.alternative ?? this[barName]?.attribute
+    if (attr === 'a2health' && this.actor) { const h = a2ActorHealth(this.actor); return { type: 'bar', attribute: 'a2health', value: h.value, max: h.max, editable: false } }
+    return orig.call(this, barName, opts)
+  }
+}
+function a2wTokenHooks () {
+  Hooks.on('preCreateToken', (doc) => {
+    try {
+      if (a2eGet('tokenSetup', true) === false || !a2Enabled() || !doc.actor || doc.actor.type !== 'vampire') return
+      const rules = a2Rules(doc.actor) ?? {}
+      const upd = { displayBars: CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER, bar1: { attribute: 'a2health' } }
+      upd.bar2 = { attribute: rules.vitae ? 'health' : 'willpower' }
+      doc.updateSource(upd)
+    } catch (e) { console.error('V6 Automation | token setup', e) }
+  })
+  Hooks.on('updateActor', (actor, changes) => {
+    try {
+      const a2 = changes?.flags?.world?.a2
+      if (a2 && ('health' in a2)) for (const t of actor.getActiveTokens?.() ?? []) { t.renderFlags?.set?.({ refreshBars: true }); if (!t.renderFlags) t.drawBars?.() }
+      if (a2wState.dash) a2wDashRefresh()
+      if (!a2xIsGM() || !a2Enabled() || a2eGet('tokenSetup', true) === false) return
+      // torpor from the tools shows as the Torpor state
+      if (a2 && 'torpor' in a2 && typeof a2zSet === 'function' && typeof a2zHas === 'function') { const on = Boolean(actor.flags?.world?.a2?.torpor); if (a2zHas(actor, 'torpor') !== on) a2zSet(actor, 'torpor', on) }
+      // a mortal, ghoul or animal at 0 Health is down (ST p.42)
+      if (a2 && 'health' in a2 && actor.type === 'vampire') {
+        const c = a2Creature(actor)
+        if (c !== 'vampire') {
+          const dead = a2ActorHealth(actor).value === 0
+          const id = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
+          if (Boolean(actor.statuses?.has?.(id)) !== dead) actor.toggleStatusEffect(id, { active: dead, overlay: true })
+          const cb = game.combat?.combatants?.find?.((x) => x.actor?.uuid === actor.uuid)
+          if (cb && cb.defeated !== dead) cb.update({ defeated: dead })
+        }
+      }
+    } catch (e) { console.error('V6 Automation | token state', e) }
+  })
+  for (const h of ['updateItem', 'createItem', 'deleteItem', 'createActiveEffect', 'deleteActiveEffect', 'updateCombat', 'deleteCombat', 'createToken', 'deleteToken', 'canvasReady']) Hooks.on(h, () => { if (a2wState.dash) setTimeout(a2wDashRefresh, 50) })
+  Hooks.on('updateSetting', () => { if (a2wState.dash) setTimeout(a2wDashRefresh, 50) })
+}
+
+// ---- coterie ----
+function a2wCoterie () { const c = a2eGet('coterie', null); return { name: '', domain: '', haven: '', notes: '', resources: [], ...(c && typeof c === 'object' ? c : {}) } }
+async function a2wCoterieOpen () {
+  const c = a2wCoterie()
+  const gm = game.user.isGM
+  const ro = gm ? '' : 'disabled'
+  const types = { physicalAssets: 'Physical asset', socialAssets: 'Social asset', wealth: 'Wealth' }
+  const rows = [...c.resources, ...(gm ? [{}, {}] : [])].map((r, i) => `<tr><td><input type="text" name="r${i}.name" value="${a2Esc(r.name ?? '')}" ${ro} placeholder="${gm ? 'Shared Resource' : ''}"></td><td><select name="r${i}.type" ${ro}>${Object.entries(types).map(([k, l]) => `<option value="${k}" ${r.type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td><td class="c"><input type="number" name="r${i}.dots" value="${a2Int(r.dots)}" min="0" max="5" ${ro}></td></tr>`).join('')
+  const members = a2wPCs().map((a) => {
+    const res = a.items.filter((i) => i.type === 'resource').sort((x, y) => a2Int(y.system?.dots?.value) - a2Int(x.system?.dots?.value))
+    let herd = ''
+    try { const h = a2tHerdInfo(a); if (h.dots) herd = ` · herd ${h.dots}` } catch (e) { /* no herd */ }
+    return `<div class="a2w-member"><strong>${a2Esc(a.name)}</strong> <small>${a2Esc(a.system?.vampire?.clan?.name ?? '')}${herd}</small><br><small>${res.map((r) => `${a2Esc(r.name)} ${'●'.repeat(a2Int(r.system?.dots?.value))}`).join(' · ') || 'no Resources'}</small></div>`
+  }).join('') || '<p><em>No player characters yet.</em></p>'
+  const res = await foundry.applications.api.DialogV2.wait({
+    window: { title: c.name ? `Coterie: ${c.name}` : 'Coterie', resizable: true },
+    position: { width: 640 },
+    content: `<div class="a2w-coterie"><div class="a2w-grid2"><label>Name <input type="text" name="name" value="${a2Esc(c.name)}" ${ro}></label><label>Domain <input type="text" name="domain" value="${a2Esc(c.domain)}" ${ro} placeholder="Hackney, east of the canal"></label><label>Haven <input type="text" name="haven" value="${a2Esc(c.haven)}" ${ro}></label><label>Notes <input type="text" name="notes" value="${a2Esc(c.notes)}" ${ro}></label></div>
+      <fieldset><legend>Shared Resources</legend><table class="a2w-table"><tr><th>Resource</th><th>Kind</th><th class="c">Dots</th></tr>${rows || '<tr><td colspan="3"><em>None yet.</em></td></tr>'}</table><p class="a2w-dim">Downtime's Acquire Resources can add a dot to a shared Resource (PG p.113). The Storyteller keeps this list.</p></fieldset>
+      <fieldset><legend>Members</legend>${members}</fieldset></div>`,
+    buttons: gm ? [{ action: 'save', label: 'Save', icon: 'fa-solid fa-floppy-disk', default: true, callback: (ev, button) => { const f = button.form.elements; const out = { name: f.name.value.trim(), domain: f.domain.value.trim(), haven: f.haven.value.trim(), notes: f.notes.value.trim(), resources: [] }; for (let i = 0; f[`r${i}.name`]; i++) { const n = f[`r${i}.name`].value.trim(); const d = a2Clamp(a2Int(f[`r${i}.dots`].value), 0, 5); if (n && d > 0) out.resources.push({ name: n, type: f[`r${i}.type`].value, dots: d }) } return out } }, { action: 'close', label: 'Close' }] : [{ action: 'close', label: 'Close' }],
+    rejectClose: false
+  }).catch(() => null)
+  if (gm && res && typeof res === 'object') { await game.settings.set(a2eNs(), a2eKey('coterie'), res); ui.notifications.info('Coterie saved.') }
+  return res
+}
+
+// ---- NPC maker ----
+async function a2wNpcMaker () {
+  if (!game.user.isGM) { ui.notifications.warn('The Storyteller makes NPCs.'); return null }
+  const clans = [...(game.items ?? [])].filter((i) => i.type === 'clan' && !/archive/i.test(i.folder?.name ?? '')).sort((a, b) => a.name.localeCompare(b.name))
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: 'NPC maker' },
+    position: { width: 560 },
+    content: `<div class="a2w-npc"><p class="a2w-hint">Pools by competence (ST p.50): 1–2 weak, 3–4 average, 5–6 good, 7–8 expert, 9–10 extraordinary. An Attribute is half its pool; the Skills fill the rest (ST p.42).</p>
+      <div class="a2w-grid2"><label>Name <input type="text" name="name" placeholder="Night-shift security guard"></label>
+      <label>Starting point <select name="role">${A2W_ROLES.map((r) => `<option value="${r.id}" data-p="${r.p}" data-s="${r.s}" data-m="${r.m}">${r.label}</option>`).join('')}</select></label>
+      <label>Kind <select name="kind"><option value="human">Human</option><option value="ghoul">Ghoul</option><option value="vampire">Vampire</option><option value="animal">Animal</option></select></label>
+      <label>Category <select name="category"><option value="minion">Minion (Health 1)</option><option value="minor" selected>Minor</option><option value="standard">Standard</option><option value="major">Major</option></select></label>
+      <label>Physical pool <input type="number" name="p" value="4" min="1" max="12"></label><label>Social pool <input type="number" name="s" value="4" min="1" max="12"></label><label>Mental pool <input type="number" name="m" value="4" min="1" max="12"></label>
+      <label>Clan (vampires) <select name="clan"><option value="">none</option>${clans.map((c) => `<option value="${a2Esc(c.name)}">${a2Esc(c.name)}</option>`).join('')}</select></label>
+      <label>Generation (vampires) <select name="gen">${[14, 13, 12, 11, 10, 9, 8, 7, 6].map((g) => `<option value="${g}" ${g === 12 ? 'selected' : ''}>${g}th</option>`).join('')}</select></label>
+      <label>How many <input type="number" name="count" value="1" min="1" max="12"></label></div>
+      <p class="a2w-preview" data-a2w="preview"></p></div>`,
+    ok: { label: 'Make', icon: 'fa-solid fa-user-plus', callback: (ev, button) => { const f = button.form.elements; return { name: f.name.value.trim(), kind: f.kind.value, category: f.category.value, physical: a2Int(f.p.value, 4), social: a2Int(f.s.value, 4), mental: a2Int(f.m.value, 4), clan: f.clan.value, gen: a2Int(f.gen.value, 12), count: a2Clamp(a2Int(f.count.value, 1), 1, 12), role: f.role.selectedOptions?.[0]?.textContent ?? '' } } },
+    rejectClose: false,
+    render: (ev, dialog) => {
+      const root = dialog.element
+      const f = (n) => root.querySelector(`[name="${n}"]`)
+      const show = () => { const st = a2wNpcStats({ kind: f('kind').value, category: f('category').value, physical: f('p').value, social: f('s').value, mental: f('m').value }); root.querySelector('[data-a2w="preview"]').innerHTML = `<strong>Health ${st.health}</strong>, <strong>Willpower ${st.willpower}</strong>. Physical ${st.pools.physical} (${st.competence.physical.toLowerCase()}): Attributes ${st.attr.physical}, Skills ${st.skill.physical}. Social ${st.pools.social} (${st.competence.social.toLowerCase()}): ${st.attr.social} + ${st.skill.social}. Mental ${st.pools.mental} (${st.competence.mental.toLowerCase()}): ${st.attr.mental} + ${st.skill.mental}.${st.discipline ? ` Clan Disciplines at ${st.discipline}.` : ''}` }
+      f('role').addEventListener('change', () => { const o = f('role').selectedOptions[0]; f('p').value = o.dataset.p; f('s').value = o.dataset.s; f('m').value = o.dataset.m; if (o.value === 'animal') f('kind').value = 'animal'; if (['neonate', 'hound', 'primogen'].includes(o.value)) f('kind').value = 'vampire'; show() })
+      root.addEventListener('change', show)
+      root.addEventListener('input', show)
+      show()
+    }
+  }).catch(() => null)
+  if (!res) return null
+  return a2wNpcCreate(res)
+}
+async function a2wNpcCreate (o) {
+  const st = a2wNpcStats(o)
+  const creature = { human: 'mortal', ghoul: 'ghoul', vampire: 'vampire', animal: 'animal' }[o.kind] ?? 'mortal'
+  const system = { attributes: {}, skills: {} }
+  for (const [cat, keys] of Object.entries(A2W_ATTR_CATS)) for (const k of keys) system.attributes[k] = { value: st.attr[cat], max: Math.max(5, st.attr[cat]) }
+  for (const [cat, keys] of Object.entries(A2W_SKILL_CATS)) for (const k of keys) system.skills[k] = { value: st.skill[cat], max: Math.max(5, st.skill[cat]) }
+  system.willpower = { value: st.willpower, max: st.willpower }
+  const items = []
+  let tier = 'neonate'
+  if (creature === 'vampire') {
+    const genMod = a2GenModifier(o.gen)
+    try { tier = a2cTierKey('vampire', o.gen) } catch (e) { /* neonate */ }
+    system.vampire = { generation: { value: o.gen }, humanity: { value: a2wNpcHumanity(tier), max: 10 }, nature: { value: 0 }, clan: { name: o.clan ?? '' }, disciplines: {} }
+    system.health = { value: 5 + 5 * genMod, max: 5 + 5 * genMod }
+    const clan = o.clan ? game.items.find((i) => i.type === 'clan' && i.name === o.clan) : null
+    if (clan) { const d = clan.toObject(); delete d._id; delete d.folder; items.push(d); for (const k of clan.system?.disciplines ?? []) system.vampire.disciplines[k] = { value: st.discipline, visible: true } }
+  } else if (creature === 'ghoul') system.health = { value: 5, max: 5 }
+  let folder = game.folders.find((f) => f.type === 'Actor' && f.name === 'Made NPCs (V6)')
+  folder ??= await Folder.create({ name: 'Made NPCs (V6)', type: 'Actor' })
+  const made = []
+  for (let n = 1; n <= o.count; n++) {
+    const name = `${o.name || o.role || 'NPC'}${o.count > 1 ? ` ${n}` : ''}`
+    const actor = await Actor.create({
+      name, type: 'vampire', folder: folder.id, system,
+      flags: { world: { a2: { creature, tier: creature === 'vampire' ? tier : null, health: { value: st.health, max: st.health, baneful: 0 }, npc: { v: 1, made: true, category: o.category, minion: o.category === 'minion', healthMax: st.health, pools: st.pools } } } },
+      prototypeToken: { name, actorLink: false, disposition: CONST.TOKEN_DISPOSITIONS.HOSTILE, displayName: CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER },
+      items
+    })
+    made.push(actor)
+  }
+  ui.notifications.info(`${made.length === 1 ? made[0].name : `${made.length} NPCs`} made: in the folder "Made NPCs (V6)". Drag onto the scene.`)
+  if (made.length === 1) made[0].sheet?.render(true)
+  return made
+}
+
+// ---- group hunt ----
+async function a2wGroupHunt () {
+  if (!game.user.isGM) { ui.notifications.warn('The Storyteller calls the hunt.'); return null }
+  const pcs = a2wPCs().filter((a) => a2Rules(a)?.hunger)
+  if (!pcs.length) { ui.notifications.info('No vampire player characters to hunt.'); return null }
+  return ChatMessage.create({ content: '<div class="a2w-hunt"><h4>The hunt</h4><p>Each of you: how do you feed tonight?</p></div>', speaker: { alias: 'Storyteller' }, flags: { world: { a2hunt: { v: 1, actors: pcs.map((a) => a.uuid) } } } })
+}
+function a2wHuntRender (message, root) {
+  const h = message.flags?.world?.a2hunt
+  const box = root.querySelector('.a2w-hunt')
+  if (!h || !box || box.querySelector('.a2w-hunt-row')) return
+  for (const uuid of h.actors ?? []) {
+    const actor = a2FromUuid(uuid)
+    if (!actor) continue
+    const hunger = a2ActorHunger(actor)
+    const row = document.createElement('div')
+    row.className = 'a2w-hunt-row'
+    row.innerHTML = `<span><strong>${a2Esc(actor.name)}</strong> Hunger ${'●'.repeat(hunger)}${'○'.repeat(Math.max(0, 5 - hunger))} <small>Vitae ${a2Int(actor.system?.health?.value)}/${a2Int(actor.system?.health?.max)}</small></span>`
+    if (actor.isOwner) { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = '<i class="fa-solid fa-droplet"></i> Hunt'; b.addEventListener('click', (ev) => { ev.preventDefault(); globalThis.V6Alpha2?.tools?.feed?.(actor) }); row.append(b) }
+    box.append(row)
+  }
+}
+
+// ---- vinculum ----
+function a2wVinculum (actor) { const v = actor?.flags?.world?.a2?.vinculum; let night = 1; try { night = a2tClock().night } catch (e) { /* 1 */ } return v && Array.isArray(v.mates) && v.mates.length && (v.until === null || v.until === undefined || night <= a2Int(v.until)) ? v : null }
+async function a2wVaulderie () {
+  if (!game.user.isGM) { ui.notifications.warn('The Storyteller records a Vaulderie.'); return null }
+  const cands = new Map()
+  for (const t of globalThis.canvas?.tokens?.controlled ?? []) if (t.actor && a2Creature(t.actor) === 'vampire') cands.set(t.actor.uuid, { actor: t.actor, on: true })
+  for (const a of a2wPCs()) if (a2Creature(a) === 'vampire' && !cands.has(a.uuid)) cands.set(a.uuid, { actor: a, on: cands.size === 0 })
+  const list = [...cands.values()]
+  if (list.length < 2) { ui.notifications.warn('A Vaulderie needs at least two vampires: select their tokens.'); return null }
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: 'Vaulderie' },
+    content: `<div class="a2w-npc"><p class="a2w-hint">The vinculum ends every Blood Bond of those who share the cup, blocks new ones, and takes 2 dice from tests against a packmate. It lasts twice the bond interval of the oldest blood among them (PG p.135-136).</p>${list.map((c, i) => `<label class="checkbox"><input type="checkbox" name="v${i}" ${c.on ? 'checked' : ''}> ${a2Esc(c.actor.name)}</label>`).join('<br>')}</div>`,
+    ok: { label: 'Share the cup', callback: (ev, button) => list.filter((c, i) => button.form.elements[`v${i}`].checked).map((c) => c.actor) },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res || res.length < 2) return null
+  let night = 1
+  try { night = a2tClock().night } catch (e) { /* 1 */ }
+  const nights = a2wVinculumNights(res.map((a) => { try { return a2cTierKey('vampire', a.system?.vampire?.generation?.value) } catch (e) { return 'neonate' } }))
+  for (const a of res) await a.update({ 'flags.world.a2.vinculum': { mates: res.filter((x) => x.uuid !== a.uuid).map((x) => ({ uuid: x.uuid, name: x.name })), since: night, until: night + nights }, 'flags.world.a2.bonds': [] })
+  await ChatMessage.create({ content: `<div class="a2y-bond"><h4>Vaulderie</h4><p>${res.map((a) => a2Esc(a.name)).join(', ')} share the cup. Their Blood Bonds are broken; the vinculum holds for ${nights} nights (until night ${night + nights}).</p></div>`, speaker: { alias: 'Storyteller' } })
+  return res
+}
+// Dice for the roll dialog (alpha2-states calls this through the bond check). → { dice, note } or null
+function a2wVinculumMods (actor, foe, roll) {
+  if (!a2wOn() || !actor || !foe) return null
+  const v = a2wVinculum(actor)
+  if (!v || !v.mates.some((m) => m.uuid === foe.uuid || m.name === foe.name)) return null
+  return roll.attack || roll.contested ? { dice: -2, note: `Vinculum with ${foe.name}: −2 acting against a packmate (PG p.135).` } : null
+}
+
+// ---- recap ----
+async function a2wRecap () {
+  if (!game.user.isGM) { ui.notifications.warn('The Storyteller writes the recap.'); return null }
+  const since = a2Int(a2eGet('recapAt', 0))
+  const msgs = game.messages.contents.filter((m) => a2Int(m.timestamp) > since)
+  if (!msgs.length) { ui.notifications.info('Nothing in the chat log since the last recap.'); return null }
+  const strip = (h) => String(h ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  const rows = []
+  const notable = []
+  for (const m of msgs) {
+    const roll = m.rolls?.find((r) => r?.options?.a2?.built)
+    if (roll) {
+      let v = {}
+      try { v = a2RollVerdict(roll) } catch (e) { /* skip */ }
+      const name = m.speaker?.alias ?? a2xSpeaker(m)?.name ?? 'Someone'
+      rows.push({ name, win: v.win === true, critical: Boolean(v.critical), painful: Boolean(v.painful), bestial: Boolean(v.bestial) })
+      if (v.bestial || v.critical) notable.push(`${name}: ${v.bestial ? 'bestial failure' : 'critical win'}${m.flavor ? ` (${strip(m.flavor)})` : ''}`)
+      if (m.flags?.world?.a2comp) notable.push(`${name}: ${m.flags.world.a2comp.line}`)
+      continue
+    }
+    const w = m.flags?.world ?? {}
+    if (w.a2t || w.a2socEnd || w.a2zcard || /a2y-bond|a2v-result|a2y-downtime/.test(m.content ?? '')) notable.push(strip(m.content).slice(0, 260))
+    else if (w.a2task && a2yTaskState(w.a2task).state !== 'open') notable.push(`Task "${strip(m.content)}": ${a2yTaskState(w.a2task).state} at ${a2yTaskState(w.a2task).total}/${w.a2task.target}.`)
+  }
+  let clock = { night: 1, session: 1 }
+  try { clock = a2tClock() } catch (e) { /* tools off */ }
+  const table = a2wRecapRolls(rows)
+  const html = `<p><em>Written ${new Date().toLocaleDateString()} from ${msgs.length} chat messages. Night ${clock.night}.</em></p>
+<h2>What happened</h2>${notable.length ? `<ul>${notable.slice(0, 80).map((n) => `<li>${a2Esc(n)}</li>`).join('')}</ul>` : '<p>Nothing the tools recorded.</p>'}
+<h2>Rolls</h2>${table.length ? `<table><thead><tr><th>Character</th><th>Rolls</th><th>Wins</th><th>Critical wins</th><th>Painful failures</th><th>Bestial failures</th></tr></thead><tbody>${table.map((r) => `<tr><td>${a2Esc(r.name)}</td><td>${r.rolls}</td><td>${r.wins}</td><td>${r.criticals}</td><td>${r.painful}</td><td>${r.bestial}</td></tr>`).join('')}</tbody></table>` : '<p>No rolls.</p>'}
+<h2>Storyteller's notes</h2><p></p>`
+  let journal = game.journal.find((j) => j.flags?.world?.a2recap)
+  journal ??= await JournalEntry.create({ name: 'Session Recaps', flags: { world: { a2recap: true, v6key: 'local:recaps' } } })
+  const name = `Session ${clock.session}`
+  const dupes = journal.pages.filter((p) => p.name === name || p.name.startsWith(`${name} (`)).length
+  const [page] = await journal.createEmbeddedDocuments('JournalEntryPage', [{ name: dupes ? `${name} (${dupes + 1})` : name, type: 'text', text: { content: html, format: 1 }, sort: (journal.pages.size + 1) * 100000 }])
+  await game.settings.set(a2eNs(), a2eKey('recapAt'), Date.now())
+  journal.sheet?.render(true, { pageId: page.id })
+  ui.notifications.info(`Recap written: ${journal.name}, ${page.name}.`)
+  return page
+}
+
+// ---- reactions ----
+// Called by the turn card's "Use a reaction" (alpha2-combat). Resolves true to tick the counter.
+async function a2wReaction (actor) {
+  if (!a2wOn() || !actor) return true
+  const powers = actor.items.filter((i) => i.type === 'discipline' && i.system?.activation?.activationType === 'reaction')
+  const canSurge = a2Creature(actor) === 'vampire' || a2Creature(actor) === 'ghoul'
+  if (!powers.length && !canSurge) return true
+  const buttons = [
+    ...(canSurge ? [{ action: 'surge', label: 'Blood Surge', icon: 'fa-solid fa-droplet' }] : []),
+    ...powers.slice(0, 12).map((p) => ({ action: `p:${p.id}`, label: p.name, icon: 'fa-solid fa-bolt' })),
+    { action: 'other', label: 'Something else', icon: 'fa-solid fa-check' }
+  ]
+  const pick = await foundry.applications.api.DialogV2.wait({ window: { title: `Reaction: ${actor.name}` }, position: { width: 420 }, content: '<div class="a2w-npc"><p class="a2w-hint">A reaction is a power that says so, or a Blood Surge before a test (PG p.110). Defending costs none.</p></div>', buttons, rejectClose: false }).catch(() => null)
+  if (!pick) return false
+  try {
+    if (pick === 'surge') globalThis.V6Alpha2?.tools?.bloodSurge?.(actor)
+    else if (String(pick).startsWith('p:')) { const item = actor.items.get(String(pick).slice(2)); if (item) { if (a2State.RollDialog?.open) a2State.RollDialog.open({ actor, item }); else item.sheet?.render(true) } }
+  } catch (e) { console.error('V6 Automation | reaction', e) }
+  return true
+}
+
+function a2wInjectStyles () {
+  document.getElementById('v6a-table-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-table-style'
+  style.textContent = `
+.a2w-top { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-bottom: 6px; font-weight: 600; }
+.a2w-top i { opacity: 0.8; margin-right: 4px; }
+.a2w-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.a2w-table th, .a2w-table td { padding: 3px 6px; text-align: left; vertical-align: middle; border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent); }
+.a2w-table .c { text-align: center; }
+.a2w-table input[type="number"] { width: 4em; text-align: center; }
+.a2w-group td { font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; opacity: 0.75; border-bottom: 1px solid #a31621; padding-top: 8px; }
+.a2w-dash { max-height: 70vh; overflow-y: auto; }
+.a2w-dash td.warn, .a2w-dash span.warn { color: #e0a13a; font-weight: 600; }
+.a2w-dash td.bad, .a2w-dash span.bad { color: #ff6b76; font-weight: 700; }
+.a2w-dash a[data-open] { cursor: pointer; }
+.a2w-dash small { opacity: 0.7; }
+.a2w-pips { letter-spacing: 1px; }
+.a2w-pips.hunger { color: #d0303c; }
+.a2w-states { white-space: nowrap; }
+.a2w-states img { border: 0; vertical-align: middle; margin-right: 2px; filter: drop-shadow(0 0 1px #000); }
+.a2w-states span { margin-left: 4px; font-size: 12px; }
+.a2w-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+.a2w-grid2 label { display: flex; flex-direction: column; gap: 2px; }
+.a2w-hint, .a2w-preview { margin: 6px 0; padding: 4px 8px; border-left: 3px solid #7a0000; background: color-mix(in srgb, currentColor 6%, transparent); font-size: 12.5px; }
+.a2w-dim { opacity: 0.7; font-size: 12px; margin: 4px 0 0; }
+.a2w-member { padding: 4px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+.a2w-hunt h4 { margin: 0 0 2px; font-weight: 700; }
+.a2w-hunt-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+.a2w-hunt-row span { flex: 1; }
+.a2w-hunt-row button { flex: 0 0 auto; width: auto; padding: 0 10px; line-height: 1.6; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2TableBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.table?.booted) return true
+  a2eReg('tableTools', { name: 'Dashboard, coterie, NPC maker, hunts, Vaulderie, recap, reaction menu', hint: 'The Storyteller\'s table tools in the token controls and as chat commands (/dash, /coterie, /npc, /hunt, /vaulderie, /recap).', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('tokenSetup', { name: 'Tokens: bars and markers', hint: 'New tokens get a Health bar and a Vitae bar. A mortal at 0 Health is marked defeated; torpor shows as a state.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('coterie', { scope: 'world', config: false, type: Object, default: {} })
+  a2eReg('recapAt', { scope: 'world', config: false, type: Number, default: 0 })
+  a2wInjectStyles()
+  a2wPatchBars()
+  if (!a2wState.hooked) {
+    a2wState.hooked = true
+    a2wTokenHooks()
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { const root = html instanceof HTMLElement ? html : html?.[0]; if (root && a2wOn()) a2wHuntRender(message, root) } catch (e) { console.error('V6 Automation | hunt card', e) } })
+    Hooks.on('v6a2NewNight', ({ actors, night } = {}) => {
+      if (!a2wOn() || !game.user.isGM) return
+      for (const a of actors ?? []) { const v = a.flags?.world?.a2?.vinculum; if (v && v.until !== null && v.until !== undefined && a2Int(night) > a2Int(v.until)) a.update({ 'flags.world.a2.vinculum': null }) }
+    })
+    Hooks.on('getSceneControlButtons', (controls) => {
+      const tools = controls?.tokens?.tools
+      if (!tools || !a2wOn()) return
+      tools['v6a2-coterie'] = { name: 'v6a2-coterie', title: 'Coterie', icon: 'fa-solid fa-people-roof', order: 111, button: true, onChange: () => a2wCoterieOpen() }
+      if (!game.user?.isGM) return
+      tools['v6a2-dash'] = { name: 'v6a2-dash', title: 'Storyteller dashboard', icon: 'fa-solid fa-table-list', order: 100, button: true, onChange: () => a2wDashboard() }
+      tools['v6a2-npc'] = { name: 'v6a2-npc', title: 'NPC maker', icon: 'fa-solid fa-user-plus', order: 112, button: true, onChange: () => a2wNpcMaker() }
+      tools['v6a2-hunt'] = { name: 'v6a2-hunt', title: 'Group hunt', icon: 'fa-solid fa-paw', order: 113, button: true, onChange: () => a2wGroupHunt() }
+    })
+    try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
+  }
+  api.table = { booted: true, dashboard: a2wDashboard, coterie: a2wCoterieOpen, npc: a2wNpcMaker, makeNpc: a2wNpcCreate, hunt: a2wGroupHunt, vaulderie: a2wVaulderie, recap: a2wRecap, reaction: a2wReaction, rules: { npcStats: a2wNpcStats, npcHumanity: a2wNpcHumanity, vinculumNights: a2wVinculumNights, recapRolls: a2wRecapRolls } }
+  console.log('V6 Automation | table tools loaded')
+  return true
+}
+globalThis.a2TableBoot ??= a2TableBoot
 
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)
