@@ -1,3 +1,5 @@
+// Notifications are shown as HTML: the text is escaped first (see build_automation.py).
+const v6aNote = (() => { const esc = (m) => String(m ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); const go = (type) => (m, o) => globalThis.ui?.notifications?.[type]?.(esc(m), o); return { esc, info: go('info'), warn: go('warn'), error: go('error') } })()
 // ---------------------------------------------------------------------------
 // V6 Automation for the wod6e system (Vampire: The Masquerade Alpha 2.0 playtest rules).
 // One file, two uses: the esmodule of the "v6-automation" module, or the body
@@ -104,7 +106,7 @@ function v6aDesired (actor) {
           kind: 'bonus', source: `${item.id}:${i}`,
           name: auto.effects.length > 1 && e.note ? `${auto.label ?? item.name} (${e.note})` : (auto.label ?? item.name),
           img: 'icons/svg/upgrade.svg',
-          description: `<p>Automatic bonus from <strong>${item.name}</strong>. Remove the item to remove this.</p>`,
+          description: `<p>Automatic bonus from <strong>${v6aEsc(item.name)}</strong>. Remove the item to remove this.</p>`,
           effects: [eff]
         })
       })
@@ -225,13 +227,13 @@ async function v6aPayCost (item) {
     const amount = Number(costs[type]) || 0
     if (!amount) continue
     const current = Number(foundry.utils.getProperty(actor, `system.${type}.value`) ?? 0)
-    if (current < amount) ui.notifications.warn(`${actor.name} has only ${current} ${label} for ${item.name} (cost ${amount}).`)
+    if (current < amount) v6aNote.warn(`${actor.name} has only ${current} ${label} for ${item.name} (cost ${amount}).`)
     upd[`system.${type}.value`] = Math.max(current - amount, 0)
     paid.push(`${Math.min(amount, current)} ${label}`)
   }
   if (!paid.length) return
   await actor.update(upd)
-  ui.notifications.info(`${item.name}: paid ${paid.join(' and ')}.`)
+  v6aNote.info(`${item.name}: paid ${paid.join(' and ')}.`)
 }
 
 // ---- hooks --------------------------------------------------------------
@@ -261,6 +263,9 @@ function v6aHooks () {
   })
 }
 
+// A name is plain text: escaped wherever it goes into HTML.
+function v6aEsc (s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') }
+
 async function v6aMaturing (actor, old) {
   const lines = []
   for (const [key, before] of Object.entries(old)) {
@@ -268,7 +273,7 @@ async function v6aMaturing (actor, old) {
     if (now <= before) continue
     for (const power of actor.items.filter((i) => i.type === 'discipline' && i.system?.disciplineType === key)) {
       for (const m of power.system?.maturing ?? []) {
-        if (m.level > before && m.level <= now) lines.push(`<li><strong>${power.name}</strong> (${m.level} dots): ${m.description}</li>`)
+        if (m.level > before && m.level <= now) lines.push(`<li><strong>${v6aEsc(power.name)}</strong> (${m.level} dots): ${m.description}</li>`)
       }
     }
   }
@@ -282,18 +287,18 @@ async function v6aBoot () {
   if (globalThis.V6Automation.active) {
     // An older copy may be running without the Alpha 2 part: add it.
     if (typeof a2Boot === 'function' && !globalThis.V6Alpha2?.booted) { a2EnsureSettings(); if (a2Enabled()) await a2Boot() }
-    ui.notifications.info('V6 Automation is already running.')
+    v6aNote.info('V6 Automation is already running.')
     return
   }
   globalThis.V6Automation.active = true
   globalThis.V6Automation.sync = (actor) => v6aSync(actor)
   globalThis.V6Automation.syncAll = async () => { for (const a of game.actors) if (a.type !== 'group') await v6aSync(a) }
-  try { await v6aPatchRollDialog() } catch (e) { console.error('V6 Automation | roll dialog patch failed', e); ui.notifications.warn('V6 Automation: power costs and toggle filtering are off (see console).') }
+  try { await v6aPatchRollDialog() } catch (e) { console.error('V6 Automation | roll dialog patch failed', e); v6aNote.warn('V6 Automation: power costs and toggle filtering are off (see console).') }
   v6aHooks()
   if (typeof a2Boot === 'function') { a2EnsureSettings(); if (a2Enabled()) await a2Boot() }
   if (v6aIsGM()) { for (const a of game.actors) if (a.type !== 'group') await v6aSync(a).catch((e) => console.error('V6 Automation |', a.name, e)) }
   console.log('V6 Automation | ready')
-  ui.notifications.info('V6 Automation is running.')
+  v6aNote.info('V6 Automation is running.')
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +614,7 @@ function a2EnsureSettings () {
 }
 
 async function a2SetEnabled (on) {
+  if (!game.user?.isGM) { v6aNote.warn('Only the Storyteller switches the Alpha 2 rules.'); return }
   a2EnsureSettings()
   const [ns, key] = A2_SETTING_KEYS.find(([n, k]) => game.settings.settings.has(`${n}.${k}`))
   await game.settings.set(ns, key, Boolean(on))
@@ -652,14 +658,14 @@ function a2ActorHunger (actor) {
 }
 function a2ActorHealth (actor) {
   const npc = a2NpcInfo(actor)
-  const max = npc?.minion ? 1 : a2Int(npc?.healthMax) > 0 ? a2Int(npc.healthMax) : a2HealthMax(actor.system?.attributes?.stamina?.value) // a made NPC keeps the Health from the ST Packet's table
-  const f = actor.flags?.world?.a2?.health ?? {}
+  const max = npc?.minion ? 1 : a2Int(npc?.healthMax) > 0 ? a2Int(npc.healthMax) : a2HealthMax(actor?.system?.attributes?.stamina?.value) // a made NPC keeps the Health from the ST Packet's table
+  const f = actor?.flags?.world?.a2?.health ?? {}
   const baneful = a2Clamp(a2Int(f.baneful), 0, max)
   const value = a2Clamp(f.value === undefined || f.value === null ? max : a2Int(f.value), 0, max - baneful)
   return { value, baneful, max }
 }
 function a2ActorHumanity (actor) {
-  const v = actor.system?.vampire ?? {}
+  const v = actor?.system?.vampire ?? {}
   const migrated = a2Int(v.humanity?.max) === 10
   const rank = migrated ? a2Clamp(a2Int(v.humanity?.value), 0, 10) : (A2_ALPHA1_RANK[a2Int(v.humanity?.value)] ?? 6)
   const violations = migrated ? a2Clamp(a2Int(v.nature?.value), 0, 10 - rank) : 0
@@ -1271,7 +1277,7 @@ function a2RollForTarget (message, roll, target, { auto = false } = {}) {
 
 async function a2PromptCompare (message) {
   const list = game.messages.contents.slice(-40).reverse().filter((m) => m.id !== message.id && m.isContentVisible !== false && m.rolls?.some((r) => r?.options?.a2?.built))
-  if (!list.length) { ui.notifications.info('There is no other Alpha 2 roll in recent chat to compare with.'); return }
+  if (!list.length) { v6aNote.info('There is no other Alpha 2 roll in recent chat to compare with.'); return }
   const options = list.map((m) => {
     const r = m.rolls.find((x) => x?.options?.a2?.built)
     return `<option value="${m.id}">${a2Esc(m.alias)}: ${a2Plural(a2Int(r.total), 'success', 'successes')} (${new Date(m.timestamp).toLocaleTimeString()})</option>`
@@ -1450,7 +1456,7 @@ function a2HumanityTracker (actor, editable, rules, creature) {
       if (pos > 10 - cur.violations) { a2WriteHumanity(actor, a2HumanityErase(cur, 1)); return }
       const rank = pos === cur.rank ? pos - 1 : pos
       if (rank > cur.rank && cur.violations && !ev?.shiftKey) {
-        ui.notifications.warn('Alpha 2: you can\'t raise your rank while you have violations (PG p.127). Erase them first, or Shift-click to override.')
+        v6aNote.warn('Alpha 2: you can\'t raise your rank while you have violations (PG p.127). Erase them first, or Shift-click to override.')
         return
       }
       a2WriteHumanity(actor, a2HumanitySetRank(cur, rank))
@@ -1498,10 +1504,11 @@ function a2WriteHumanity (actor, h) {
   })
 }
 
-async function a2Violate (actor, n = 1) {
+// quiet: the caller writes its own card (the Humanity window does), so the note here would say it twice
+async function a2Violate (actor, n = 1, { quiet = false } = {}) {
   const res = a2HumanityViolate(a2ActorHumanity(actor), n)
   await a2WriteHumanity(actor, res)
-  if (res.lost) await a2Note(actor, `${actor.name}: ${a2PathInfo(actor).name}`, [`A violation hit a filled box: rank drops to ${res.rank} and all slashes are erased (PG p.127).`])
+  if (res.lost && !quiet) await a2Note(actor, `${actor.name}: ${a2PathInfo(actor).name}`, [`A violation hit a filled box: rank drops to ${res.rank} and all slashes are erased (PG p.127).`])
   return res
 }
 
@@ -1563,7 +1570,7 @@ async function a2MendActor (actor, vitae) {
   if (!rules?.vitae) return null
   const cur = a2Int(actor.system.health?.value)
   const res = a2Mend(a2ActorHealth(actor), Math.min(a2Int(vitae), cur))
-  if (!res.spent) { ui.notifications.info(`${actor.name}: nothing to mend, or no Vitae.`); return res }
+  if (!res.spent) { v6aNote.info(`${actor.name}: nothing to mend, or no Vitae.`); return res }
   await actor.update({ 'flags.world.a2.health': { value: res.value, baneful: res.baneful }, 'system.health.value': cur - res.spent })
   return res
 }
@@ -1676,7 +1683,7 @@ function a2ReportMigration (rep) {
   if (rep.fixed.length) console.log('V6 Alpha 2 | violation tracker max fixed:', rep.fixed.join(', '))
   if (rep.ambiguous.length) {
     console.warn('V6 Alpha 2 | Humanity left unchanged (ambiguous):\n' + rep.ambiguous.join('\n'))
-    ui.notifications.warn(`V6 Alpha 2: ${rep.ambiguous.length} actor(s) have a Humanity value that isn't an Alpha 1 scale position; left unchanged (see console).`)
+    v6aNote.warn(`V6 Alpha 2: ${rep.ambiguous.length} actor(s) have a Humanity value that isn't an Alpha 1 scale position; left unchanged (see console).`)
   }
 }
 
@@ -1880,7 +1887,7 @@ async function a2Boot () {
   } catch (e) {
     a2State.booting = null
     console.error('V6 Automation | Alpha 2 rules failed to load', e)
-    ui.notifications.error('V6 Automation: the Alpha 2 rules failed to load (see console).')
+    v6aNote.error('V6 Automation: the Alpha 2 rules failed to load (see console).')
     return false
   }
 }
@@ -2366,7 +2373,7 @@ async function a2xActivationGuard (item, actor, { override = false } = {}) {
   if (!problems.length) return true
   const text = problems.join(' ')
   if (game.user.isGM) {
-    if (override || a2xShiftHeld()) { ui.notifications.warn(`${text} GM override.`); return true }
+    if (override || a2xShiftHeld()) { v6aNote.warn(`${text} GM override.`); return true }
     const ok = await foundry.applications.api.DialogV2.confirm({
       window: { title: `Activate ${item.name}?` },
       content: `<p>${a2Esc(text)}</p><p>Activate it anyway? A cost is paid as far as it goes (PG p.102, p.149). Shift-click the roll button to skip this question.</p>`,
@@ -2374,7 +2381,7 @@ async function a2xActivationGuard (item, actor, { override = false } = {}) {
     })
     return ok === true
   }
-  ui.notifications.warn(`${text} It can't be activated (PG p.102, p.149); the Storyteller can override.`)
+  v6aNote.warn(`${text} It can't be activated (PG p.102, p.149); the Storyteller can override.`)
   return false
 }
 
@@ -2434,13 +2441,13 @@ function a2xAdjustContext (res, args) {
 
 async function a2xSetImpaired (actorLike, keyOrMap, on = true) {
   const actor = a2xActor(actorLike)
-  if (!actor) { ui.notifications.warn('No actor to impair: select a token.'); return null }
+  if (!actor) { v6aNote.warn('No actor to impair: select a token.'); return null }
   const defs = a2xAttrDefs()
   const map = typeof keyOrMap === 'string' ? { [keyOrMap]: on } : (keyOrMap ?? {})
   const upd = {}
   for (const [k, v] of Object.entries(map)) {
     const key = a2xKey(k)
-    if (!(key in defs)) { ui.notifications.warn(`Unknown Attribute "${k}".`); continue }
+    if (!(key in defs)) { v6aNote.warn(`Unknown Attribute "${k}".`); continue }
     upd[`flags.world.a2.impaired.${key}`] = Boolean(v)
   }
   if (!Object.keys(upd).length) return null
@@ -2461,7 +2468,7 @@ async function a2xImpair (actorLike, key) {
     return { key: null, willpower: 1 }
   }
   await a2xSetImpaired(actor, c.key, true)
-  if (c.moved) ui.notifications.info(`${a2TraitLabel('Attributes', a2xKey(key))} is already impaired, so ${a2TraitLabel('Attributes', c.key)} is impaired instead; the Storyteller may pick another (PG p.105).`)
+  if (c.moved) v6aNote.info(`${a2TraitLabel('Attributes', a2xKey(key))} is already impaired, so ${a2TraitLabel('Attributes', c.key)} is impaired instead; the Storyteller may pick another (PG p.105).`)
   return { key: c.key, moved: c.moved }
 }
 
@@ -2474,7 +2481,7 @@ async function a2xRecoverImpairment (actorLike, key, { vitae = false } = {}) {
   const upd = { [`flags.world.a2.impaired.${key}`]: false }
   if (vitae) {
     const cur = a2Int(actor.system?.health?.value)
-    if (!a2Rules(actor)?.vitae || cur < 2) { ui.notifications.warn(`${actor.name} needs 2 Vitae to end an impairment (PG p.105).`); return null }
+    if (!a2Rules(actor)?.vitae || cur < 2) { v6aNote.warn(`${actor.name} needs 2 Vitae to end an impairment (PG p.105).`); return null }
     upd['system.health.value'] = cur - 2
   }
   await actor.update(upd)
@@ -2693,7 +2700,7 @@ function a2xCanWrite (message) {
 }
 async function a2xWriteMessage (message, update) {
   if (a2xCanWrite(message)) return message.update(update)
-  if (!a2xGMActive()) { ui.notifications.warn('This needs the GM online: the chat card belongs to another user.'); return null }
+  if (!a2xGMActive()) { v6aNote.warn('This needs the GM online: the chat card belongs to another user.'); return null }
   a2xRelay('message', { id: message.id, update })
   return null
 }
@@ -2734,24 +2741,36 @@ async function a2xOnSocket (data, senderId) {
   } catch (e) { console.error('V6 Alpha 2 | socket', e) }
 }
 
+// One answer per card at a time. A second click on Reroll, Beast's Bargain or Apply damage while
+// the first window is still open would open it again, and both answers would count (two
+// Willpower for one reroll, the damage twice). The second call is dropped instead.
+const a2xBusy = new Set()
+async function a2xOnce (key, fn) {
+  if (a2xBusy.has(key)) return null
+  a2xBusy.add(key)
+  try { return await fn() } finally { a2xBusy.delete(key) }
+}
+function a2xCardKey (messageOrId) { return `card:${a2xMessage(messageOrId)?.id ?? String(messageOrId)}` }
+
 // ---- 2. Willpower reroll ------------------------------------------------------------
-async function a2xRerollWillpower (messageOrId, { dice = null, rollIndex = null } = {}) {
+async function a2xRerollWillpower (messageOrId, opts = {}) { return a2xOnce(a2xCardKey(messageOrId), () => a2xRerollWillpowerNow(messageOrId, opts)) }
+async function a2xRerollWillpowerNow (messageOrId, { dice = null, rollIndex = null } = {}) {
   if (!a2Enabled()) return null
   const message = a2xMessage(messageOrId)
   const i = rollIndex ?? a2xFirstA2Roll(message)
   const roll = message?.rolls?.[i]
-  if (!roll?.options?.a2?.built) { ui.notifications.warn('No Alpha 2 test on that card.'); return null }
+  if (!roll?.options?.a2?.built) { v6aNote.warn('No Alpha 2 test on that card.'); return null }
   const actor = a2xSpeaker(message)
-  if (!actor?.isOwner) { ui.notifications.warn("Only the rolling character's owner can spend its Willpower."); return null }
+  if (!actor?.isOwner) { v6aNote.warn("Only the rolling character's owner can spend its Willpower."); return null }
   const json = roll.toJSON()
   const list = a2xRerollable(json.terms)
   const check = a2xRerollCheck({ a2: roll.options.a2, act: a2xAct(message, i), willpower: actor.system?.willpower?.value, dice: list.length, hasWillpower: Boolean(actor.system?.willpower) })
-  if (!check.ok) { ui.notifications.warn(check.reason); return null }
+  if (!check.ok) { v6aNote.warn(check.reason); return null }
   let picks = Array.isArray(dice) ? dice : await a2xPromptReroll(list, a2xHungerValues(json.terms))
   if (!Array.isArray(picks)) return null
   picks = [...new Set(picks.map(Number))].filter((p) => list[p]).slice(0, A2X_MAX_REROLL)
   if (!picks.length) return null
-  if (!a2xCanWrite(message) && !a2xGMActive()) { ui.notifications.warn('This needs the GM online: the chat card belongs to another user.'); return null }
+  if (!a2xCanWrite(message) && !a2xGMActive()) { v6aNote.warn('This needs the GM online: the chat card belongs to another user.'); return null }
   const fresh = await new foundry.dice.Roll(`${picks.length}d10cs>=6`).evaluate()
   const values = (fresh.dice ?? []).flatMap((d) => (d.results ?? []).map((r) => r.result))
   try { await game.dice3d?.showForRoll?.(fresh, game.user, true) } catch (e) { /* Dice So Nice is optional */ }
@@ -2787,18 +2806,19 @@ async function a2xPromptReroll (list, hunger = []) {
 }
 
 // ---- 3. Beast's Bargain ---------------------------------------------------------------
-async function a2xBeastsBargain (messageOrId, { rollIndex = null, complication = null, text = '', violations = 0, masquerade = 1 } = {}) {
+async function a2xBeastsBargain (messageOrId, opts = {}) { return a2xOnce(a2xCardKey(messageOrId), () => a2xBeastsBargainNow(messageOrId, opts)) }
+async function a2xBeastsBargainNow (messageOrId, { rollIndex = null, complication = null, text = '', violations = 0, masquerade = 1 } = {}) {
   if (!a2Enabled()) return null
   const message = a2xMessage(messageOrId)
   const i = rollIndex ?? a2xFirstA2Roll(message)
   const roll = message?.rolls?.[i]
-  if (!roll?.options?.a2?.built) { ui.notifications.warn('No Alpha 2 test on that card.'); return null }
+  if (!roll?.options?.a2?.built) { v6aNote.warn('No Alpha 2 test on that card.'); return null }
   const actor = a2xSpeaker(message)
-  if (!actor?.isOwner) { ui.notifications.warn("Only the rolling character's owner can strike a Beast's Bargain."); return null }
-  if (!a2Rules(actor)?.humanity) { ui.notifications.warn(`${actor.name} has no Beast to bargain with (${a2Creature(actor)}).`); return null }
+  if (!actor?.isOwner) { v6aNote.warn("Only the rolling character's owner can strike a Beast's Bargain."); return null }
+  if (!a2Rules(actor)?.humanity) { v6aNote.warn(`${actor.name} has no Beast to bargain with (${a2Creature(actor)}).`); return null }
   const { v } = a2xVerdict(message, roll)
   const check = a2xBargainCheck(v, { act: a2xAct(message, i), automaticFailure: roll.options.automaticFailure })
-  if (!check.ok) { ui.notifications.warn(check.reason); return null }
+  if (!check.ok) { v6aNote.warn(check.reason); return null }
   const hunger = a2Int(roll.options.a2.hungerAvailable ?? a2ActorHunger(actor))
   let o = { complication, text, violations, masquerade }
   if (!complication) {
@@ -2806,8 +2826,8 @@ async function a2xBeastsBargain (messageOrId, { rollIndex = null, complication =
     if (!o) return null
   }
   if (!A2X_BARGAIN.some((c) => c[0] === o.complication)) o.complication = 'collateral'
-  if (o.complication === 'frenzy-hunger' && hunger < 3) { ui.notifications.warn('A hunger frenzy risk needs 3 or more Hunger dice (PG p.98).'); return null }
-  if (!a2xCanWrite(message) && !a2xGMActive()) { ui.notifications.warn('This needs the GM online: the chat card belongs to another user.'); return null }
+  if (o.complication === 'frenzy-hunger' && hunger < 3) { v6aNote.warn('A hunger frenzy risk needs 3 or more Hunger dice (PG p.98).'); return null }
+  if (!a2xCanWrite(message) && !a2xGMActive()) { v6aNote.warn('This needs the GM online: the chat card belongs to another user.'); return null }
   const label = A2X_BARGAIN.find((c) => c[0] === o.complication)[1]
   const n = o.complication === 'feed' ? Math.max(0, a2Int(o.violations)) : 0
   const boxes = o.complication === 'masquerade' ? Math.max(1, a2Int(o.masquerade, 1)) : 0
@@ -2863,11 +2883,11 @@ async function a2xPromptBargain (actor, v, hunger) {
 
 // ---- 4. frenzy ------------------------------------------------------------------------
 async function a2xFrenzyTest (actorLike, opts = {}) {
-  if (!a2Enabled()) { ui.notifications.warn('The Alpha 2 rules are off.'); return null }
+  if (!a2Enabled()) { v6aNote.warn('The Alpha 2 rules are off.'); return null }
   const actor = a2xActor(actorLike)
-  if (!actor) { ui.notifications.warn('Select a token (or give an actor) for the frenzy test.'); return null }
-  if (!a2Rules(actor)?.humanity) { ui.notifications.warn(`${actor.name} has no Beast and doesn't frenzy (${a2Creature(actor) ?? actor.type}).`); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token (or give an actor) for the frenzy test.'); return null }
+  if (!a2Rules(actor)?.humanity) { v6aNote.warn(`${actor.name} has no Beast and doesn't frenzy (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   let o = { type: A2X_FRENZY[opts.type] ? opts.type : 'rage', difficulty: opts.difficulty ?? null, modifier: a2Int(opts.modifier), hunger: opts.hunger !== false, fear: a2Int(opts.fear, 5), rage: opts.rage ?? [], ride: Boolean(opts.ride) }
   if (opts.dialog !== false) {
     o = await a2xPromptFrenzy(actor, o)
@@ -3189,15 +3209,15 @@ function a2xDamageOpts (opts = {}) {
 
 // Public: V6Alpha2.actions.applyDamage(targets, { amount, baneful, armour, source, margin, ... })
 async function a2xApplyDamage (targets, opts = {}) {
-  if (!a2Enabled()) { ui.notifications.warn('The Alpha 2 rules are off.'); return [] }
+  if (!a2Enabled()) { v6aNote.warn('The Alpha 2 rules are off.'); return [] }
   const list = a2xResolveTargets(targets)
-  if (!list.length) { ui.notifications.warn('No target: target a token (T) or select one.'); return [] }
+  if (!list.length) { v6aNote.warn('No target: target a token (T) or select one.'); return [] }
   const o = a2xDamageOpts(opts)
   if (typeof a2zDamageApplied === 'function') a2zDamageApplied(list.map((t) => t.actor), o) // eslint-disable-line no-undef
   if (!game.user.isGM && !list.every((t) => t.actor.isOwner)) {
-    if (!a2xGMActive()) { ui.notifications.warn('Damage to a token you don\'t own needs the GM online.'); return [] }
+    if (!a2xGMActive()) { v6aNote.warn('Damage to a token you don\'t own needs the GM online.'); return [] }
     a2xRelay('damage', { targets: list.map((t) => t.uuid), opts: o })
-    ui.notifications.info(`Damage sent to the GM for ${list.map((t) => t.name).join(', ')}.`)
+    v6aNote.info(`Damage sent to the GM for ${list.map((t) => t.name).join(', ')}.`)
     return list.map((t) => ({ name: t.name, uuid: t.uuid, relayed: true }))
   }
   const results = []
@@ -3385,18 +3405,19 @@ async function a2xDamageDialog ({ title = 'Apply damage', source = '', formula =
   })
 }
 
-async function a2xPromptCardDamage (message, i) {
+async function a2xPromptCardDamage (message, i) { return a2xOnce(`damage:${message?.id}`, () => a2xPromptCardDamageNow(message, i)) }
+async function a2xPromptCardDamageNow (message, i) {
   const roll = message?.rolls?.[i]
   const info = a2xAttackInfo(message, roll)
   if (!info) return null
   const act = a2xAct(message, i)
   const { v } = a2xVerdict(message, roll)
-  if (v.win === false && !act.bargain) { ui.notifications.info('The attack failed: no damage (PG p.116).'); return null }
+  if (v.win === false && !act.bargain) { v6aNote.info('The attack failed: no damage (PG p.116).'); return null }
   const margin = act.bargain ? 0 : v.win === true ? Math.max(0, a2Int(v.margin)) : a2Int(v.successes)
   const marginNote = act.bargain ? "Beast's Bargain: a basic win has no margin (PG p.19)." : v.win === true ? '' : 'No defence roll is linked, so the margin is all your successes. If the target defended, use Compare first (PG p.116, p.120).'
   const tg = a2xCardTargets(message, roll, info.attacker)
   const targets = a2xResolveTargets(tg.list)
-  if (!targets.length) { ui.notifications.warn('Target a token (T), or select one, to apply the damage to.'); return null }
+  if (!targets.length) { v6aNote.warn('Target a token (T), or select one, to apply the damage to.'); return null }
   const r = await a2xDamageDialog({ title: `Apply damage: ${info.label}`, source: info.label, formula: info.formula, base: info.base, baseNote: info.baseNote, margin, marginNote, addMargin: info.riders.some((x) => x.own) ? true : info.addMargin, rage: info.rage, baneful: info.baneful || Boolean(info.weapons[0]?.baneful), ignoreEndurance: info.ignoreEndurance, willpower: info.resource === 'willpower', targets, from: tg.from, weapons: info.weapons, riders: info.riders, calc: info.calc, called: Boolean(info.limb) })
   if (!r) return null
   return a2xApplyDamage(targets.map((t) => t.ref), {
@@ -3420,7 +3441,7 @@ async function a2xPromptCardDamage (message, i) {
 // Macro: damage the targeted (or selected) tokens without a card.
 async function a2xPromptDamage (targets = null, defaults = {}) {
   const list = a2xResolveTargets(targets)
-  if (!list.length) { ui.notifications.warn('Target a token (T), or select one, to apply the damage to.'); return null }
+  if (!list.length) { v6aNote.warn('Target a token (T), or select one, to apply the damage to.'); return null }
   const r = await a2xDamageDialog({ base: a2Int(defaults.amount, 1), margin: 0, addMargin: false, baneful: Boolean(defaults.baneful), targets: list, from: game.user?.targets?.size ? 'targeted' : 'selected', source: defaults.source ?? '' })
   if (!r) return null
   return a2xApplyDamage(list.map((t) => t.ref), { amount: r.base + r.rage, margin: r.addMargin && !r.calledShot ? r.margin : 0, baneful: r.baneful, armour: r.armour, piercing: r.piercing, ignoreEndurance: r.ignoreEndurance, resource: r.willpower ? 'willpower' : 'health', source: defaults.source ?? '' })
@@ -3530,6 +3551,19 @@ function a2xInjectStyles () {
   document.head.append(style)
 }
 
+// A double click on a card button is one click: the button sleeps for a moment after it is
+// pressed. Without this the same window opens twice (or a roll goes out twice).
+const a2xClicked = new WeakMap()
+function a2xGuardClicks (ev) {
+  try {
+    const b = ev.target?.closest?.('.chat-message button, .chat-message a[class*="a2"]')
+    if (!b || !b.closest('.chat-message')?.querySelector('[class*="a2"]')) return // only cards this module has a hand in
+    const now = Date.now()
+    if (now - (a2xClicked.get(b) ?? 0) < 800) { ev.preventDefault(); ev.stopImmediatePropagation(); return }
+    a2xClicked.set(b, now)
+  } catch (e) { /* never in the way of a click */ }
+}
+
 function a2xHooks (api) {
   if (api.hooked) return
   Hooks.on('renderChatMessageHTML', a2xRenderChat)
@@ -3538,6 +3572,7 @@ function a2xHooks (api) {
   Hooks.on('updateActor', a2xOnUpdateActor)
   document.addEventListener('pointerdown', a2xTrackMods, true)
   document.addEventListener('click', a2xTrackMods, true)
+  document.addEventListener('click', a2xGuardClicks, true)
   for (const ch of A2X_SOCKETS) { try { game.socket?.on?.(ch, a2xOnSocket) } catch (e) { console.warn('V6 Alpha 2 | socket', ch, e) } }
   api.hooked = true
 }
@@ -4090,8 +4125,8 @@ function a2tGMs () { return (game.users ?? []).filter((u) => u.isGM).map((u) => 
 function a2tWhisper (actor) { return [...new Set((game.users ?? []).filter((u) => u.isGM || actor?.testUserPermission?.(u, 'OWNER')).map((u) => u.id))] }
 function a2tTrait (cfg, key) { return WOD6E?.configs?.[cfg]?.getList?.({})?.[key]?.displayName ?? (key ? key[0].toUpperCase() + key.slice(1) : '') }
 function a2tReady (gmOnly = false) {
-  if (!a2Enabled()) { ui.notifications?.warn('The Alpha 2 rules are switched off.'); return false }
-  if (gmOnly && !game.user?.isGM) { ui.notifications?.warn('Only the GM can do that.'); return false }
+  if (!a2Enabled()) { v6aNote.warn('The Alpha 2 rules are switched off.'); return false }
+  if (gmOnly && !game.user?.isGM) { v6aNote.warn('Only the GM can do that.'); return false }
   return true
 }
 function a2tPickActor (actor) {
@@ -4214,7 +4249,7 @@ async function a2tVictimUpdate (data) {
   if (!victim) return false
   if (victim.isOwner) { await a2tVictimLocal(data); return true }
   if (!game.users?.activeGM) {
-    ui.notifications.warn(`No GM is connected: apply the changes to ${victim.name} by hand.`)
+    v6aNote.warn(`No GM is connected: apply the changes to ${victim.name} by hand.`)
     return false
   }
   game.socket.emit(globalThis.V6Alpha2?.toolsSocket ?? a2tSocketName(), { a2t: 1, op: 'victim', data, user: game.user.id })
@@ -4338,13 +4373,14 @@ function a2tSurgeTargets (actor, tier) {
 }
 
 async function a2tBloodSurge (actor) {
-  if (!actor?.isOwner) return null
-  if (!a2Rules(actor)?.surge || !actor.system?.canBloodSurge) { ui.notifications.warn(`${actor.name} can't use Blood Surge: it has no Vitae to burn (PG p.137).`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
+  if (!a2Rules(actor)?.surge || !actor.system?.canBloodSurge) { v6aNote.warn(`${actor.name} can't use Blood Surge: it has no Vitae to burn (PG p.137).`); return null }
   const vitae = a2Int(actor.system.health?.value)
-  if (vitae < 1) { ui.notifications.warn(`${actor.name} has no Vitae for a Blood Surge.`); return null }
+  if (vitae < 1) { v6aNote.warn(`${actor.name} has no Vitae for a Blood Surge.`); return null }
   const tier = a2tActorTier(actor)
   const targets = a2tSurgeTargets(actor, tier)
-  if (!targets.length) { ui.notifications.warn('Nothing left that Blood Surge can raise at this tier.'); return null }
+  if (!targets.length) { v6aNote.warn('Nothing left that Blood Surge can raise at this tier.'); return null }
   const capText = (t) => (t.cap === null ? 'no cap' : t.type === 'attribute' ? `up to +${t.cap - t.existing} more` : `up to ${t.cap} dots`)
   const group = (type, label) => {
     const list = targets.filter((t) => t.type === type)
@@ -4370,9 +4406,9 @@ async function a2tBloodSurgeApply (actor, targetId, vitaeSpent) {
   const tier = a2tActorTier(actor)
   const target = a2tSurgeTargets(actor, tier).find((t) => `${t.type}:${t.key}` === targetId)
   const vitae = a2Int(actor.system.health?.value)
-  if (!target) { ui.notifications.warn('Choose a valid Blood Surge target.'); return null }
+  if (!target) { v6aNote.warn('Choose a valid Blood Surge target.'); return null }
   const check = a2tSurgeCheck({ kind: target.type, base: target.base, effective: target.effective, existing: target.existing, vitae: Number(vitaeSpent), available: vitae, cap: target.cap })
-  if (!check.ok) { ui.notifications.warn(check.reason); return null }
+  if (!check.ok) { v6aNote.warn(check.reason); return null }
   const spend = a2Int(vitaeSpent)
   const hungerBefore = a2ActorHunger(actor)
   await actor.update({ 'system.health.value': vitae - spend })
@@ -4464,7 +4500,7 @@ function a2tNightCandidates () {
 async function a2tNewNight (opts = {}) {
   if (!a2tReady(true)) return null
   const list = a2tNightCandidates()
-  if (!list.length) { ui.notifications.info('No actors to wake.'); return null }
+  if (!list.length) { v6aNote.info('No actors to wake.'); return null }
   const clock = a2tClock()
   const row = (c, i) => {
     const a = c.actor
@@ -4599,11 +4635,11 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
 }
 
 // ---- feeding ------------------------------------------------------------------------
-function a2tHerdItems (actor) { return (actor.items ?? []).filter((i) => i.type === 'resource' && /^herd\b/i.test(String(i.name ?? ''))) }
+function a2tHerdItems (actor) { return (actor?.items ?? []).filter((i) => i.type === 'resource' && /^herd\b/i.test(String(i.name ?? ''))) }
 function a2tHerdInfo (actor) {
   const items = a2tHerdItems(actor)
   const dots = items.reduce((t, i) => t + a2Int(i.system?.dots?.value), 0)
-  return { items, dots, ...a2tHerdState(actor.flags?.world?.a2?.herd, a2tClock().session, dots) }
+  return { items, dots, ...a2tHerdState(actor?.flags?.world?.a2?.herd, a2tClock().session, dots) }
 }
 function a2tStoredBags (actor) {
   const night = a2tClock().night
@@ -4624,9 +4660,9 @@ function a2tVictim () {
 async function a2tFeed (actorArg = null) {
   if (!a2tReady()) return null
   const actor = a2tPickActor(actorArg)
-  if (!actor || actor.type !== 'vampire') { ui.notifications.warn('Select your vampire\'s token, or open the helper from its sheet.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
-  if (a2Creature(actor) !== 'vampire') { ui.notifications.warn('Only vampires and Duskborn hunt for blood. A ghoul drinks Vitae from its domitor (PG p.102, p.136).'); return null }
+  if (!actor || actor.type !== 'vampire') { v6aNote.warn('Select your vampire\'s token, or open the helper from its sheet.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
+  if (a2Creature(actor) !== 'vampire') { v6aNote.warn('Only vampires and Duskborn hunt for blood. A ghoul drinks Vitae from its domitor (PG p.102, p.136).'); return null }
   const start = await a2tFeedStartDialog(actor)
   if (!start) return null
   const outcome = await a2tFeedTest(actor, start)
@@ -4711,14 +4747,14 @@ async function a2tFeedTest (actor, start) {
   const auto = (label) => ({ win: true, margin: 0, painful: false, bestial: false, label, rolled: false })
   if (start.method === 'herd') {
     const herd = a2tHerdInfo(actor)
-    if (!herd.dots && !start.tax) { ui.notifications.warn(`${actor.name} has no Herd Resource.`); return null }
-    if (herd.left < 1 && !start.tax) { ui.notifications.warn('No Herd feedings left this session. Tick "Tax the herd" for one more (PG p.143).'); return null }
+    if (!herd.dots && !start.tax) { v6aNote.warn(`${actor.name} has no Herd Resource.`); return null }
+    if (herd.left < 1 && !start.tax) { v6aNote.warn('No Herd feedings left this session. Tick "Tax the herd" for one more (PG p.143).'); return null }
     return auto('Herd: a safe feeding, as a won hunt (PG p.143)')
   }
   if (start.method === 'direct') return auto('No test')
   if (start.method === 'attack' && start.helpless) return auto('Helpless or willing victim: automatic win (PG p.118)')
   const RD = a2State.RollDialog
-  if (!RD) { ui.notifications.error('The roll dialog is not available.'); return null }
+  if (!RD) { v6aNote.error('The roll dialog is not available.'); return null }
   let test
   let difficulty = 0
   if (start.method === 'attack') {
@@ -4868,7 +4904,7 @@ function a2tFeedApplyDialog (actor, start, outcome) {
 // res: what a2tFeedApplyDialog returned.
 async function a2tFeedApply (actor, res) {
   const { start, outcome, d, feeding, plan, attack, victim } = res
-  if (feeding && plan.blocked) { ui.notifications.warn(plan.blocked); return null }
+  if (feeding && plan.blocked) { v6aNote.warn(plan.blocked); return null }
   const lines = []
   const vitae = a2Int(actor.system.health?.value)
   const hungerBefore = a2ActorHunger(actor)
@@ -4963,7 +4999,7 @@ async function a2tMasqChange (delta = 0, reason = '', { set = null } = {}) {
   if (!a2tReady(true)) return null
   const before = a2tMasqState()
   const to = set === null || set === undefined ? a2Clamp(before.rank + a2Int(delta), 0, 10) : a2Clamp(a2Int(set), 0, 10)
-  if (to === before.rank) { ui.notifications.info(`The Masquerade Tracker stays at ${to}.`); return to }
+  if (to === before.rank) { v6aNote.info(`The Masquerade Tracker stays at ${to}.`); return to }
   await a2tSet('masquerade', a2tMasqApply(before, to, reason, game.user.name, new Date().toISOString()))
   const lvA = a2tMasqLevel(before.rank)
   const lvB = a2tMasqLevel(to)
@@ -5089,7 +5125,7 @@ function a2tMasqAppClass () {
 }
 function a2tMasqOpen () {
   if (!a2tReady()) return null
-  if (!game.user?.isGM && !a2tGet('masqueradePlayers')) { ui.notifications.warn('The Masquerade Tracker is for the Storyteller.'); return null }
+  if (!game.user?.isGM && !a2tGet('masqueradePlayers')) { v6aNote.warn('The Masquerade Tracker is for the Storyteller.'); return null }
   const Cls = a2tMasqAppClass()
   a2tState.masqApp ??= new Cls()
   a2tState.masqApp.render({ force: true })
@@ -5103,7 +5139,7 @@ function a2tAwardCandidates () { return [...(game.actors ?? [])].filter((a) => a
 async function a2tAwardXP () {
   if (!a2tReady(true)) return null
   const list = a2tAwardCandidates()
-  if (!list.length) { ui.notifications.info('No player characters to award.'); return null }
+  if (!list.length) { v6aNote.info('No player characters to award.'); return null }
   const clock = a2tClock()
   const head = `<tr><th>Character</th>${A2T_XP_CONDITIONS.map(([k, l, h]) => `<th class="c" title="${a2Esc(h)} (PG p.64)">${a2Esc(l)}</th>`).join('')}<th class="c" title="Diablerie: 10 × the victim's generation modifier, outside the 5 XP cap (PG p.64-66)">Diablerie</th></tr>`
   const rows = list.map((a, i) => {
@@ -5301,8 +5337,8 @@ function a2tSpendEvaluate (actor, p = {}) {
 async function a2tSpendXP (actorArg = null) {
   if (!a2tReady()) return null
   const actor = a2tPickActor(actorArg)
-  if (!actor || actor.type !== 'vampire') { ui.notifications.warn('Select a character token, or open the helper from the sheet.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor || actor.type !== 'vampire') { v6aNote.warn('Select a character token, or open the helper from the sheet.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const x = a2tXp(actor)
   const gm = Boolean(game.user?.isGM)
   const content = `<div class="a2t-dialog a2t-spend">
@@ -5362,7 +5398,7 @@ async function a2tSpendApply (actor, p = {}) {
   if (!actor?.isOwner) return null
   const ev = a2tSpendEvaluate(actor, p)
   const override = Boolean(p.override) && game.user?.isGM
-  if (!ev.ok && !override) { ui.notifications.warn(ev.errors.join(' ')); return null }
+  if (!ev.ok && !override) { v6aNote.warn(ev.errors.join(' ')); return null }
   const s = actor.system ?? {}
   const tier = a2tActorTier(actor)
   const upd = {}
@@ -5607,7 +5643,7 @@ async function a2ToolsBoot () {
     return true
   } catch (e) {
     console.error('V6 Automation | Alpha 2 tools failed to load', e)
-    ui.notifications?.error('V6 Automation: the Alpha 2 tools failed to load (see console).')
+    v6aNote.error('V6 Automation: the Alpha 2 tools failed to load (see console).')
     return false
   }
 }
@@ -5822,7 +5858,7 @@ async function a2bLibraryIndex ({ compendium = true } = {}) {
 
 async function a2bRelink ({ actors = null, dryRun = true, dropAlpha1 = true, compendium = true } = {}) {
   const report = { updated: [], removed: [], unchanged: 0, actors: 0, dryRun }
-  if (!game.user?.isGM) { ui.notifications?.warn('Only the GM can relink bonuses.'); return report }
+  if (!game.user?.isGM) { v6aNote.warn('Only the GM can relink bonuses.'); return report }
   const index = await a2bLibraryIndex({ compendium })
   for (const actor of actors ?? game.actors ?? []) {
     if (actor.type === 'group') continue
@@ -5846,7 +5882,7 @@ async function a2bRelink ({ actors = null, dryRun = true, dropAlpha1 = true, com
     }
   }
   const verb = dryRun ? 'would update' : 'updated'
-  ui.notifications?.info(`Bonuses relink: ${verb} ${report.updated.length} items and ${dryRun ? 'would remove' : 'removed'} ${report.removed.length} Alpha 1 entries on ${report.actors} actors.`)
+  v6aNote.info(`Bonuses relink: ${verb} ${report.updated.length} items and ${dryRun ? 'would remove' : 'removed'} ${report.removed.length} Alpha 1 entries on ${report.actors} actors.`)
   return report
 }
 
@@ -6596,7 +6632,7 @@ async function a2pRoute (holder, payload) {
 async function a2pGm (op, data) {
   if (game.user.isGM) return a2pSocketOps[op]?.(data)
   if (a2pState.socket && a2pHasGM()) { game.socket.emit(A2P_SOCKET, { a2p: op, ...data }); return 'sent' }
-  ui.notifications.warn('V6 Automation: this needs the GM (no GM connected, or no module socket in the macro version).')
+  v6aNote.warn('V6 Automation: this needs the GM (no GM connected, or no module socket in the macro version).')
   return null
 }
 
@@ -6625,7 +6661,7 @@ async function a2pAsk (spec, actor, vars) {
     const path = ask.extra.cost.resource === 'willpower' ? 'system.willpower.value' : 'system.health.value'
     const cur = a2pInt(foundry.utils.getProperty(actor, path))
     const afford = Math.floor(cur / each)
-    if (afford < out.extra) { ui.notifications.warn(`${actor.name} can only pay for ${afford} extra.`); out.extra = afford }
+    if (afford < out.extra) { v6aNote.warn(`${actor.name} can only pay for ${afford} extra.`); out.extra = afford }
     if (out.extra) await actor.update({ [path]: cur - out.extra * each })
   }
   return out
@@ -6662,7 +6698,7 @@ async function a2pRefund (item, before = null) {
   const paid = before === null ? 0 : Math.min(a2pInt(cost.amount), Math.max(0, a2pInt(before) - a2pInt(res?.value)))
   if (!paid) return
   await actor.update({ [`system.${cost.type}.value`]: Math.min(a2pInt(res?.value) + paid, a2pInt(res?.max)) })
-  ui.notifications.info(`${item.name}: same activation, ${paid} ${cost.type === 'health' ? 'Vitae' : 'Willpower'} refunded.`)
+  v6aNote.info(`${item.name}: same activation, ${paid} ${cost.type === 'health' ? 'Vitae' : 'Willpower'} refunded.`)
 }
 
 async function a2pPayNoRoll (item, { force = false } = {}) {
@@ -6673,7 +6709,7 @@ async function a2pPayNoRoll (item, { force = false } = {}) {
   const label = cost.type === 'health' ? 'Vitae' : 'Willpower'
   const cur = a2pInt(actor.system?.[cost.type]?.value)
   if (cur < amount && !force) {
-    if (!game.user.isGM) { ui.notifications.warn(`${actor.name} has only ${cur} ${label}; ${item.name} costs ${amount}.`); return false }
+    if (!game.user.isGM) { v6aNote.warn(`${actor.name} has only ${cur} ${label}; ${item.name} costs ${amount}.`); return false }
     const ok = await foundry.applications.api.DialogV2.confirm({ window: { title: item.name }, content: `<p>${a2pEsc(actor.name)} has only ${cur} ${label}; ${a2pEsc(item.name)} costs ${amount}. Activate anyway?</p>`, rejectClose: false }).catch(() => false)
     if (!ok) return false
   }
@@ -6947,7 +6983,7 @@ async function a2pResolve (message, targetUuid, win, margin) {
 async function a2pApplyToCurrent (message) {
   const c = message.flags?.world?.a2p ?? {}
   const tlist = a2pCurrentTargets().filter((t) => t.uuid !== c.casterUuid)
-  if (!tlist.length) { ui.notifications.info('Target one or more tokens first.'); return }
+  if (!tlist.length) { v6aNote.info('Target one or more tokens first.'); return }
   const m = await foundry.applications.api.DialogV2.prompt({
     window: { title: `${c.power}: apply to ${tlist.map((t) => t.name).join(', ')}` },
     content: `<div class="form-group"><label>Margin of success</label><input type="number" name="margin" value="${a2pInt(c.margin)}" min="0" step="1" autofocus></div>`,
@@ -6975,7 +7011,7 @@ async function a2pApplyManual (message, index) {
     // current targets, or onto the creator for its own effects.
     const self = a2pSide(m.fx) === 'self'
     const holders = self ? [a2pFrom(card.casterUuid)].filter(Boolean) : a2pCurrentTargets().map((t) => t.actor).filter(Boolean)
-    if (!holders.length) { ui.notifications.info('Target the token(s) first.'); return }
+    if (!holders.length) { v6aNote.info('Target the token(s) first.'); return }
     for (const h of holders) {
       const part = a2pBuildPart(card.actData, [m.fx], { side: self ? 'self' : 'target', holder: h, vars: card.vars, choice: card.choice, autoDamage: true })
       const r = await a2pRoute(h, { ...part, power: card.power })
@@ -7041,7 +7077,7 @@ async function a2pEndWhere (test, reason) {
 async function a2pEndScene () {
   if (!game.user.isGM) return a2pGm('endScene', {})
   const n = await a2pEndWhere((ap) => a2pEndsOn(ap, 'sceneEnd'), 'end of scene')
-  ui.notifications.info(`End of scene: ${a2pPlural(n, 'power', 'powers')} ended.`)
+  v6aNote.info(`End of scene: ${a2pPlural(n, 'power', 'powers')} ended.`)
   return n
 }
 // Called by the New Night tool: Hooks.callAll('v6a2NewNight'). One night ends
@@ -7133,10 +7169,10 @@ async function a2pUpkeepDue (actor, cond) {
       const upd = { 'flags.world.a2.activePower.upkeep.paid': true }
       if (extend) upd['flags.world.a2.activePower.expires.turnsLeft'] = a2pInt(ap.expires?.turnsLeft, 1) + 1
       await fresh.update(upd)
-      ui.notifications.info(`${ap.power}: paid ${u.amount} ${label}.`)
+      v6aNote.info(`${ap.power}: paid ${u.amount} ${label}.`)
     } else if (ok === false || ok) {
       // Declined, or not enough to pay: it ends (an extension simply lapses).
-      if (ok) ui.notifications.warn(`${actor.name} has only ${cur} ${label}: ${ap.power} ends.`)
+      if (ok) v6aNote.warn(`${actor.name} has only ${cur} ${label}: ${ap.power} ends.`)
       if (!extend) await a2pEnd(ap.id, { reason: 'upkeep not paid' })
     }
     // Closed without an answer: still due; unpaid at the next turn start (or night), it ends.
@@ -7741,7 +7777,7 @@ const a2eSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // auto = press Roll for the user (the dialog shows for a moment).
 async function a2eOpenRoll (actor, test, { auto = false, vs = null } = {}) {
   const RD = typeof a2State !== 'undefined' ? a2State.RollDialog : null
-  if (!RD || !actor) { ui.notifications?.error('The roll dialog is not available.'); return null }
+  if (!RD || !actor) { v6aNote.error('The roll dialog is not available.'); return null }
   if (vs) a2State.pendingVs.set(actor.uuid, vs)
   const before = new Set(foundry.applications.instances.keys())
   const pending = RD.open({ actor, test })
@@ -7910,7 +7946,7 @@ function a2oOnUpdate (message, change) {
       if (gm && !a2oPlayerOwned(actor)) {
         if (a2eGet('opposeNpcAuto', true) !== false) a2oState.queue = a2oState.queue.then(() => a2oDefend(message, actor, null, { auto: true })).catch((e) => console.error('V6 Automation | auto defence', e))
       } else if (!game.user.isGM && actor.isOwner) {
-        ui.notifications?.info(`${def.attacker} attacks ${actor.name}: defend from the chat card (it costs no action, PG p.120).`)
+        v6aNote.info(`${def.attacker} attacks ${actor.name}: defend from the chat card (it costs no action, PG p.120).`)
       }
     }
   } catch (e) { console.error('V6 Automation | opposed test', e) }
@@ -7920,7 +7956,7 @@ async function a2oDefend (message, actor, key = null, { auto = false } = {}) {
   const def = message?.flags?.world?.a2def
   const r = a2oRoll(message)
   if (!def || !r || !actor?.isOwner) return null
-  if (a2oDefenceOf(message.id, actor.uuid)) { if (!auto) ui.notifications?.info(`${actor.name} has already defended against this attack.`); return null }
+  if (a2oDefenceOf(message.id, actor.uuid)) { if (!auto) v6aNote.info(`${actor.name} has already defended against this attack.`); return null }
   const list = a2oOptions(def, actor)
   const pick = list.find((d) => d.key === key) ?? list[0]
   // the simple npc sheet has no Dexterity: it defends with its Physical level
@@ -8496,7 +8532,7 @@ function a2lMyActor () {
 }
 async function a2lRollTest (test, { actor = null, label = '', request = null } = {}) {
   actor ??= a2lMyActor()
-  if (!actor) { ui.notifications.warn(game.user.isGM ? 'Select the token that rolls first. Shift-click asks the players instead.' : 'Select your token first, or have the Storyteller assign your character.'); return null }
+  if (!actor) { v6aNote.warn(game.user.isGM ? 'Select the token that rolls first. Shift-click asks the players instead.' : 'Select your token first, or have the Storyteller assign your character.'); return null }
   if (request) {
     const at = Date.now()
     a2lState.pendingReq.set(actor.uuid, { id: request, at })
@@ -8509,16 +8545,16 @@ async function a2lRollTest (test, { actor = null, label = '', request = null } =
 async function a2lOpenActor (name, ref) {
   let actor = game.actors.getName(name)
   if (!actor && ref?.pack) {
-    if (!game.user.isGM) { ui.notifications.info(`${name} isn't in the world yet. Ask the Storyteller to open it once.`); return null }
+    if (!game.user.isGM) { v6aNote.info(`${name} isn't in the world yet. Ask the Storyteller to open it once.`); return null }
     const adv = await game.packs.get(ref.pack)?.getDocument(ref.adventure)
     const src = adv?.actors?.get(ref.id)
-    if (!src) { ui.notifications.warn(`${name} was not found in the book compendium.`); return null }
+    if (!src) { v6aNote.warn(`${name} was not found in the book compendium.`); return null }
     const data = src.toObject()
     let folder = game.folders.find((f) => f.type === 'Actor' && f.name === 'Imported NPCs (V6)')
     folder ??= await Folder.create({ name: 'Imported NPCs (V6)', type: 'Actor' })
     data.folder = folder.id
     actor = await Actor.create(data, { keepId: !game.actors.get(data._id) })
-    ui.notifications.info(`${name} was imported from the book compendium.`)
+    v6aNote.info(`${name} was imported from the book compendium.`)
   }
   actor?.sheet?.render(true)
   return actor ?? null
@@ -8551,9 +8587,9 @@ function a2lCandidates () {
   return [...out.values()]
 }
 async function a2lRequestDialog ({ test = null, label = '' } = {}) {
-  if (!game.user.isGM) { ui.notifications.warn('Only the Storyteller asks for rolls.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('Only the Storyteller asks for rolls.'); return null }
   const cands = a2lCandidates()
-  if (!cands.length) { ui.notifications.warn('No player characters yet, and no token selected, to ask for a roll.'); return null }
+  if (!cands.length) { v6aNote.warn('No player characters yet, and no token selected, to ask for a roll.'); return null }
   const opt = (list, cur, cfg, none) => (none ? `<option value="">${none}</option>` : '') + list.map((k) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${a2Esc(typeof a2TraitLabel === 'function' ? a2TraitLabel(cfg, k) : k)}</option>`).join('')
   const second = test ? (test.skills?.[0] ? `s:${test.skills[0]}` : test.disciplines?.[0] ? `d:${test.disciplines[0]}` : test.attributes?.[1] ? `a:${test.attributes[1]}` : '') : 's:awareness'
   const secondOpts = `<option value="">nothing</option><optgroup label="Skills">${A2L_SKILLS.map((k) => `<option value="s:${k}" ${second === `s:${k}` ? 'selected' : ''}>${a2Esc(a2TraitLabel('Skills', k))}</option>`).join('')}</optgroup><optgroup label="Attributes">${A2L_ATTRS.map((k) => `<option value="a:${k}" ${second === `a:${k}` ? 'selected' : ''}>${a2Esc(a2TraitLabel('Attributes', k))}</option>`).join('')}</optgroup><optgroup label="Disciplines">${Object.values(A2L_DISCS).map((k) => `<option value="d:${k}" ${second === `d:${k}` ? 'selected' : ''}>${a2Esc(a2TraitLabel('Disciplines', k))}</option>`).join('')}</optgroup>`
@@ -9373,22 +9409,25 @@ async function a2cApply (actor, state, lib) {
   await actor.update(plan.update)
   if (plan.items.length) await actor.createEmbeddedDocuments('Item', plan.items)
   if (actor.prototypeToken && plan.update.name) { try { await actor.update({ 'prototypeToken.name': plan.update.name }) } catch (e) { /* not ours to rename */ } }
-  ui.notifications.info(`${plan.update.name} is ready: ${plan.items.length} items added.`)
+  v6aNote.info(`${plan.update.name} is ready: ${plan.items.length} items added.`)
   return plan
 }
 
-async function a2cOpen (actorLike = null) {
-  if (!a2Enabled()) { ui.notifications.warn('The Alpha 2 rules are off.'); return null }
+// fresh: the blank character was made by this call; closing the window without creating removes it again
+async function a2cOpen (actorLike = null, { fresh = false } = {}) {
+  if (!a2Enabled()) { v6aNote.warn('The Alpha 2 rules are off.'); return null }
   let actor = actorLike?.documentName === 'Actor' ? actorLike : (typeof actorLike === 'string' ? (game.actors.get(actorLike) ?? game.actors.getName(actorLike)) : null)
   actor ??= globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character
   if (!actor) {
-    if (!game.user.can?.('ACTOR_CREATE')) { ui.notifications.warn('Open your character sheet first, or ask the Storyteller to make you a blank character.'); return null }
+    if (!game.user.can?.('ACTOR_CREATE')) { v6aNote.warn('Open your character sheet first, or ask the Storyteller to make you a blank character.'); return null }
     actor = await Actor.create({ name: 'New character', type: 'vampire' })
+    fresh = true
   }
-  if (actor.type !== 'vampire') { ui.notifications.warn('Character creation is for player-type characters.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const drop = async () => { if (fresh && a2cBlank(actor)) { try { await actor.delete() } catch (e) { /* it stays: harmless */ } } }
+  if (actor.type !== 'vampire') { v6aNote.warn('Character creation is for player-type characters.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const lib = await a2cLibrary()
-  if (!lib.clan.size || !lib.lifepath.size) { ui.notifications.error('The V6 library (clans, lifepaths, powers) is not in this world. Import the V6 Rules bundle first.'); return null }
+  if (!lib.clan.size || !lib.lifepath.size) { v6aNote.error('The V6 library (clans, lifepaths, powers) is not in this world. Import the V6 Rules bundle first.'); await drop(); return null }
   const ui2 = { step: 1 }
   const res = await foundry.applications.api.DialogV2.prompt({
     window: { title: `Character creation: ${actor.name}`, resizable: true },
@@ -9417,18 +9456,18 @@ async function a2cOpen (actorLike = null) {
       a2cUpdate(root, lib, ui2)
     }
   }).catch((e) => { console.error('V6 Automation | character creation', e); return null })
-  if (!res) return null
+  if (!res) { await drop(); return null }
   const open = a2cCheck(res).filter((c) => !c.ok)
   if (open.length) {
     const sure = await foundry.applications.api.DialogV2.confirm({ window: { title: 'Not everything adds up' }, content: `<p>${open.length} ${open.length === 1 ? 'line is' : 'lines are'} not met:</p><ul>${open.slice(0, 12).map((c) => `<li>${a2Esc(c.text)}</li>`).join('')}</ul><p>Create the character anyway?</p>`, rejectClose: false }).catch(() => false)
-    if (!sure) return a2cOpen(actor)
+    if (!sure) return a2cOpen(actor, { fresh })
   }
   // a character that already has dots: creating again replaces what is on the sheet
   if (!a2cBlank(actor)) {
     const go = await foundry.applications.api.DialogV2.confirm({ window: { title: 'Create over an existing character?' }, content: `<p><strong>${a2Esc(actor.name)}</strong> already has lifepaths or Skill dots.</p><p>Creating again sets every Attribute, Skill and Discipline to what this window holds and replaces the clan, lifepaths, powers, traits, merits, flaws and Resources on the sheet. Experience spent since creation is not kept.</p><p>Go on?</p>`, rejectClose: false }).catch(() => false)
     if (!go) return null
   }
-  try { await a2cApply(actor, res, lib) } catch (e) { console.error('V6 Automation | character creation', e); ui.notifications.error('Character creation could not write the sheet. See the console (F12).'); return null }
+  try { await a2cApply(actor, res, lib) } catch (e) { console.error('V6 Automation | character creation', e); v6aNote.error('Character creation could not write the sheet. See the console (F12).'); return null }
   actor.sheet?.render(true)
   return actor
 }
@@ -9667,7 +9706,7 @@ async function a2zSet (actorLike, id, on = true, { level = null } = {}) {
   const actor = actorLike?.documentName === 'Actor' ? actorLike : a2FromUuid(actorLike)
   const def = A2Z_BY_ID[id]
   if (!actor || !def) return false
-  if (!actor.isOwner) { ui.notifications?.warn(`You can't change ${actor.name}.`); return false }
+  if (!actor.isOwner) { v6aNote.warn(`You can't change ${actor.name}.`); return false }
   if (def.levels && on) await actor.update({ [`flags.world.a2.states.${id}`]: { level: a2Clamp(a2Int(level, def.start), def.levels[0], def.levels.at(-1)), turns: 0, round: game.combat?.round ?? null } })
   else if (id === 'surprised' && on) await actor.update({ 'flags.world.a2.states.surprised': { round: game.combat?.round ?? null } })
   if (a2zHas(actor, id) !== Boolean(on)) await actor.toggleStatusEffect(a2zSid(id), { active: Boolean(on) })
@@ -9743,7 +9782,7 @@ function a2zRenderChat (message, html) {
     btn('<i class="fa-solid fa-fire-extinguisher"></i> Put out', `Roll on the ground: Dexterity + Athletics, Difficulty ${a2zLevel(actor, 'burning')} (PG p.139)`, async () => {
       const roll = await a2eOpenRoll(actor, { attributes: ['dexterity'], skills: ['athletics'], disciplines: [], difficulty: a2zLevel(actor, 'burning') })
       const v = roll?.a2Verdict ?? (roll ? a2RollVerdict(roll) : null)
-      if (v?.win) { await a2zSet(actor, 'burning', false); await a2zSet(actor, 'prone', true); ui.notifications.info(`${actor.name} is out, and on the ground.`) }
+      if (v?.win) { await a2zSet(actor, 'burning', false); await a2zSet(actor, 'prone', true); v6aNote.info(`${actor.name} is out, and on the ground.`) }
     })
   }
   if (d.fear > 0 && typeof a2xFrenzyTest === 'function') btn('<i class="fa-solid fa-ghost"></i> Fear frenzy', `Fear frenzy test, Difficulty ${d.fear} (PG p.146)`, () => a2xFrenzyTest(actor, { type: 'fear', difficulty: d.fear }))
@@ -9754,8 +9793,8 @@ function a2zRenderChat (message, html) {
 // ---- the States window ----
 async function a2zOpen (actorLike = null) {
   const actor = actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character)
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You can't change ${actor.name}.`); return null }
   const rows = A2Z_STATES.map((s) => {
     const on = a2zHas(actor, s.id)
     const lvl = s.levels ? `<select name="lvl.${s.id}">${s.levels.map((l) => `<option value="${l}" ${a2zLevel(actor, s.id) === l ? 'selected' : ''}>${l}: ${a2Esc(s.levelNames[l])}</option>`).join('')}</select>` : ''
@@ -9810,6 +9849,13 @@ function a2zHooks () {
         if (d.levels && !actor.flags?.world?.a2?.states?.[id]?.level) actor.update({ [`flags.world.a2.states.${id}`]: { level: d.start, turns: 0, round: game.combat?.round ?? null } })
         if (id === 'surprised' && !actor.flags?.world?.a2?.states?.surprised) actor.update({ 'flags.world.a2.states.surprised': { round: game.combat?.round ?? null } })
         if (id === 'staked' && !a2zHas(actor, 'torpor')) actor.toggleStatusEffect(a2zSid('torpor'), { active: true })
+        // Torpor ticked by hand, or brought on by a stake, is noted on the character as well: the
+        // Torpor window, the dashboard and New Night read it from there.
+        if (id === 'torpor' && a2Creature(actor) === 'vampire' && !actor.flags?.world?.a2?.torpor) {
+          let night = 1
+          try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock yet */ } // eslint-disable-line no-undef
+          actor.update({ 'flags.world.a2.torpor': { reason: a2zHas(actor, 'staked') ? 'staked' : 'manual', since: night } })
+        }
       }
     } catch (e) { console.error('V6 Automation | state', e) }
   })
@@ -9820,6 +9866,7 @@ function a2zHooks () {
       for (const s of effect.statuses ?? []) {
         const id = String(s).replace(/^v6-/, '')
         if (String(s).startsWith('v6-') && A2Z_BY_ID[id] && actor?.documentName === 'Actor' && actor.flags?.world?.a2?.states?.[id]) actor.update({ [`flags.world.a2.states.${id}`]: null })
+        if (s === 'v6-torpor' && actor?.documentName === 'Actor' && actor.flags?.world?.a2?.torpor) actor.update(a2Unset({}, 'flags.world.a2.torpor')) // unticked by hand: it has risen
       }
     } catch (e) { /* nothing to clear */ }
   })
@@ -10020,12 +10067,12 @@ async function a2vSay (html, actor = null) { return ChatMessage.create({ content
 async function a2vRun (actor, id) {
   const move = A2V_BY_ID[id]
   if (!move || !actor) return null
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const target = a2vTarget(actor)
-  if (move.target && !target) { ui.notifications.warn(`${move.label}: target a token first (T).`); return null }
+  if (move.target && !target) { v6aNote.warn(`${move.label}: target a token first (T).`); return null }
   // crushing and tying up need the hold first (PG p.118-119); the Storyteller can wave it through
   if (move.needs && target && !a2zHas(target, move.needs)) {
-    if (!game.user.isGM) { ui.notifications.warn(`${move.label}: you have to hold ${target.name} first. Grab it, then try again (PG p.118).`); return null }
+    if (!game.user.isGM) { v6aNote.warn(`${move.label}: you have to hold ${target.name} first. Grab it, then try again (PG p.118).`); return null }
     const go = await foundry.applications.api.DialogV2.confirm({ window: { title: move.label }, content: `<p><strong>${a2Esc(target.name)}</strong> isn't held. ${a2Esc(move.label)} is for a target you hold (PG p.118).</p><p>Roll anyway?</p>`, rejectClose: false }).catch(() => false)
     if (!go) return null
   }
@@ -10052,7 +10099,7 @@ async function a2vInstant (actor, move, target) {
   switch (move.instant) {
     case 'assist': {
       const helpers = a2zEdges(target).filter((e) => e.label.startsWith('Assisted'))
-      if (helpers.length >= 3) { ui.notifications.warn(`${target.name} already has 3 helpers (PG p.110).`); return null }
+      if (helpers.length >= 3) { v6aNote.warn(`${target.name} already has 3 helpers (PG p.110).`); return null }
       if (!target.isOwner && !a2xIsGM()) { await a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> assists <strong>${a2Esc(target.name)}</strong>: +1 die on its next test (PG p.110). <em>Storyteller: add the edge in States.</em></p>`, actor); return null }
       await a2zAddEdge(target, { label: `Assisted by ${actor.name}`, dice: 1, when: 'own-test', from: actor.uuid, combatantId: a2vCombatantId(actor) })
       return a2vSay(`<p><strong>${a2Esc(actor.name)}</strong> assists <strong>${a2Esc(target.name)}</strong>: +1 die on its next test (PG p.110).</p>`, actor)
@@ -10072,7 +10119,7 @@ async function a2vInstant (actor, move, target) {
       return null
     }
     case 'putout': {
-      if (!a2zHas(actor, 'burning')) { ui.notifications.info(`${actor.name} isn't burning.`); return null }
+      if (!a2zHas(actor, 'burning')) { v6aNote.info(`${actor.name} isn't burning.`); return null }
       const roll = await a2eOpenRoll(actor, { attributes: ['dexterity'], skills: ['athletics'], disciplines: [], difficulty: a2zLevel(actor, 'burning') })
       const v = roll?.a2Verdict ?? (roll ? a2RollVerdict(roll) : null)
       if (v?.win) { await a2zSet(actor, 'burning', false); await a2zSet(actor, 'prone', true) }
@@ -10131,7 +10178,8 @@ async function a2vResolve (attack, defender) {
 async function a2vOpen (actorLike = null) {
   if (!a2vOn()) return null
   const actor = actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character)
-  if (!actor) { ui.notifications.warn('Select your token first.'); return null }
+  if (!actor) { v6aNote.warn('Select your token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const target = a2vTarget(actor)
   const vamp = a2Creature(actor) === 'vampire'
   const groups = [...new Set(A2V_MOVES.map((m) => m.group))]
@@ -10192,13 +10240,13 @@ function a2vChat (text) {
   if (!c) return true
   const A = globalThis.V6Alpha2 ?? {}
   const actor = globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null
-  const gm = () => { if (!game.user.isGM) { ui.notifications.warn('That one is for the Storyteller.'); return false } return true }
+  const gm = () => { if (!game.user.isGM) { v6aNote.warn('That one is for the Storyteller.'); return false } return true }
   try {
     switch (c.cmd) {
       case 'help': ChatMessage.create({ content: `<div class="a2v-result"><p><strong>V6 chat commands</strong> (with or without "/v6 " in front)</p><ul>${A2V_HELP.map(([a, b]) => `<li><code>${a}</code>: ${b}</li>`).join('')}</ul></div>`, whisper: [game.user.id] }); break
-      case 'test': { const t = a2vParsePool(c.arg); if (!t) ui.notifications.warn('Use it like: /test wits+awareness 3'); else a2lRollTest(t, {}) ; break }
+      case 'test': { const t = a2vParsePool(c.arg); if (!t) v6aNote.warn('Use it like: /test wits+awareness 3'); else a2lRollTest(t, {}) ; break }
       case 'req': { if (!gm()) break; const t = a2vParsePool(c.arg); a2lRequestDialog(t ? { test: t } : {}); break }
-      case 'act': if (a2vOn()) a2vOpen(actor); else ui.notifications.info('The action menu is switched off in the module settings.'); break
+      case 'act': if (a2vOn()) a2vOpen(actor); else v6aNote.info('The action menu is switched off in the module settings.'); break
       case 'states': a2zOpen(actor); break
       case 'feed': A.tools?.feed?.(actor); break
       case 'surge': A.tools?.bloodSurge?.(actor); break
@@ -10324,7 +10372,7 @@ function a2vRenderSheet (app, element) {
     box.querySelectorAll('button[data-a2v-move]').forEach((b) => b.addEventListener('click', (ev) => {
       ev.preventDefault(); ev.stopPropagation()
       const m = A2V_MOVES.find((x) => x.id === b.dataset.a2vMove)
-      if (m?.target && !a2vTarget(actor)) { ui.notifications.warn('Target a token first: hover it and press T.'); return }
+      if (m?.target && !a2vTarget(actor)) { v6aNote.warn('Target a token first: hover it and press T.'); return }
       a2vRun(actor, b.dataset.a2vMove)
     }))
     tab.prepend(box)
@@ -10480,7 +10528,7 @@ function a2yBondDice (stage, role, { social = false, contested = false, attack =
 
 const a2yState = { hooked: false, pending: new Map(), seen: new Set() }
 function a2yOn () { return a2Enabled() && a2eGet('story', true) !== false }
-function a2yGate () { if (a2yOn()) return true; ui.notifications?.info('Social conflict, tasks, bonds and downtime are switched off in the module settings.'); return false }
+function a2yGate () { if (a2yOn()) return true; v6aNote.info('Social conflict, tasks, bonds and downtime are switched off in the module settings.'); return false }
 function a2yActor () { return globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null }
 function a2yEff (actor, kind, key) { const v = actor?.system?.[kind]?.[key]; return a2Int(v?.effective ?? v?.value) }
 function a2yBestPool (actor, pools) { return [...pools].sort((x, y) => (a2yEff(actor, 'attributes', y[0]) + a2yEff(actor, 'skills', y[1])) - (a2yEff(actor, 'attributes', x[0]) + a2yEff(actor, 'skills', x[1])))[0] }
@@ -10492,7 +10540,7 @@ function a2ySocial () { const s = a2eGet('social', null); return s && s.id ? s :
 async function a2ySocialSave (s) { return game.settings.set(a2eNs(), a2eKey('social'), s) }
 async function a2ySocialStart () {
   if (!a2yGate()) return null
-  if (!game.user.isGM) { ui.notifications.warn('The Storyteller starts a social conflict.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller starts a social conflict.'); return null }
   const res = await foundry.applications.api.DialogV2.prompt({
     window: { title: 'Social conflict' },
     position: { width: 520 },
@@ -10517,8 +10565,8 @@ function a2ySocialTotals (s, round) { const out = [0, 0]; for (const r of s.log.
 async function a2ySocialSpeak (side, approachId, cardRound) {
   const s = a2ySocial()
   const actor = a2yActor()
-  if (!s || s.done || s.round !== cardRound) { ui.notifications.info('That round is over.'); return null }
-  if (!actor) { ui.notifications.warn('Select the token that speaks.'); return null }
+  if (!s || s.done || s.round !== cardRound) { v6aNote.info('That round is over.'); return null }
+  if (!actor) { v6aNote.warn('Select the token that speaks.'); return null }
   const ap = A2Y_APPROACHES.find((x) => x.id === approachId) ?? A2Y_APPROACHES[0]
   const pool = a2yBestPool(actor, ap.pools)
   a2yState.pending.set(actor.uuid, { kind: 'social', id: s.id, round: s.round, side, approach: ap.label, at: Date.now() })
@@ -10573,7 +10621,7 @@ function a2ySocialRender (message, root) {
 // ---- prolonged tasks ----
 async function a2yTaskStart (preset = {}) {
   if (!a2yGate()) return null
-  if (!game.user.isGM) { ui.notifications.warn('The Storyteller sets up a prolonged task.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller sets up a prolonged task.'); return null }
   const attrs = typeof A2L_ATTRS !== 'undefined' ? A2L_ATTRS : []
   const skills = typeof A2L_SKILLS !== 'undefined' ? A2L_SKILLS : []
   const opt = (list, cfg, cur) => list.map((k) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${a2Esc(a2TraitLabel(cfg, k))}</option>`).join('')
@@ -10607,7 +10655,7 @@ function a2yTaskRender (message, root) {
     b.addEventListener('click', (ev) => {
       ev.preventDefault()
       const actor = a2yActor()
-      if (!actor) { ui.notifications.warn('Select the token that works on it.'); return }
+      if (!actor) { v6aNote.warn('Select the token that works on it.'); return }
       a2yState.pending.set(actor.uuid, { kind: 'task', id: message.id, at: Date.now() })
       a2eOpenRoll(actor, { attributes: [...t.test.attributes], skills: [...t.test.skills], disciplines: [] })
     })
@@ -10655,12 +10703,12 @@ function a2yBonds (actor) { const b = actor?.flags?.world?.a2?.bonds; return Arr
 // thrall drinks from master (an actor, or just a name).
 async function a2yDrink (thrall, master, { night = null, quiet = false } = {}) {
   if (!thrall || !master) return null
-  if (typeof a2wVinculum === 'function' && a2wVinculum(thrall)) { if (!quiet) ui.notifications.info(`${thrall.name} is in a vinculum: no Blood Bond can form (PG p.135).`); return null } // eslint-disable-line no-undef
+  if (typeof a2wVinculum === 'function' && a2wVinculum(thrall)) { if (!quiet) v6aNote.info(`${thrall.name} is in a vinculum: no Blood Bond can form (PG p.135).`); return null } // eslint-disable-line no-undef
   const name = typeof master === 'string' ? master : master.name
   const uuid = typeof master === 'string' ? null : master.uuid
   const tier = typeof master === 'string' ? 'neonate' : a2yTier(master)
   // Duskborn blood can't bond Kindred (PG p.135)
-  if (tier === 'duskborn' && a2Creature(thrall) === 'vampire' && a2yTier(thrall) !== 'duskborn') { if (!quiet) ui.notifications.info('Duskborn blood can\'t bond Kindred (PG p.135).'); return null }
+  if (tier === 'duskborn' && a2Creature(thrall) === 'vampire' && a2yTier(thrall) !== 'duskborn') { if (!quiet) v6aNote.info('Duskborn blood can\'t bond Kindred (PG p.135).'); return null }
   const list = a2yBonds(thrall).map((b) => ({ ...b }))
   let bond = list.find((b) => (uuid && b.uuid === uuid) || b.name === name)
   if (!bond) { bond = { id: foundry.utils.randomID(8), name, uuid, tier, stage: 0, drinks: [], last: null }; list.push(bond) }
@@ -10687,8 +10735,8 @@ function a2yBondMods (actor, foe, roll) {
 async function a2yBondsOpen (actorLike = null) {
   if (!a2yGate()) return null
   const actor = actorLike?.documentName === 'Actor' ? actorLike : a2yActor()
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You can't change ${actor.name}.`); return null }
   const bonds = a2yBonds(actor)
   const target = [...(game.user?.targets ?? [])].map((t) => t.actor).find((a) => a && a.uuid !== actor.uuid)
   const names = ['none yet', '1 Fascination', '2 Devotion', '3 Obsession']
@@ -10726,8 +10774,8 @@ async function a2yNightBonds (actors, night) {
 async function a2yDowntime (actorLike = null) {
   if (!a2yGate()) return null
   const actor = actorLike?.documentName === 'Actor' ? actorLike : a2yActor()
-  if (!actor) { ui.notifications.warn('Select your token first.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select your token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const used = a2Int(actor.flags?.world?.a2?.downtime?.used)
   const resources = actor.items.filter((i) => i.type === 'resource')
   const resOpts = resources.map((r) => `<option value="${r.id}">${a2Esc(r.name)} (${a2Int(r.system?.dots?.value)})</option>`).join('')
@@ -10756,25 +10804,25 @@ async function a2yDowntime (actorLike = null) {
       if (!shared) return null
       line = shared
     } else if (def.res && String(res.res).startsWith('c:')) {
-      ui.notifications.warn('Only Acquire Resources works on a shared coterie Resource; the Storyteller changes the others on the coterie page.'); return null
+      v6aNote.warn('Only Acquire Resources works on a shared coterie Resource; the Storyteller changes the others on the coterie page.'); return null
     } else if (def.res === 'gain') {
-      if (item) { if (dotsOf(item) >= 5) { ui.notifications.warn(`${item.name} is already at 5 dots.`); return null } await item.update({ 'system.dots.value': dotsOf(item) + 1 }); line = `${item.name} rises to ${dotsOf(item)} dots.` } else { const made = await actor.createEmbeddedDocuments('Item', [{ name: res.newName || 'New Resource', type: 'resource', img: 'icons/svg/coins.svg', system: { description: '', dots: { value: 1, max: 5 }, resourceType: 'physicalAssets' } }]); line = `New Resource: ${made[0].name}, 1 dot.` }
+      if (item) { if (dotsOf(item) >= 5) { v6aNote.warn(`${item.name} is already at 5 dots.`); return null } await item.update({ 'system.dots.value': dotsOf(item) + 1 }); line = `${item.name} rises to ${dotsOf(item)} dots.` } else { const made = await actor.createEmbeddedDocuments('Item', [{ name: res.newName || 'New Resource', type: 'resource', img: 'icons/svg/coins.svg', system: { description: '', dots: { value: 1, max: 5 }, resourceType: 'physicalAssets' } }]); line = `New Resource: ${made[0].name}, 1 dot.` }
     } else if (def.res === 'move') {
       const to = actor.items.get(res.to)
       const n = Math.min(3, res.dots, dotsOf(item), 5 - dotsOf(to))
-      if (!item || !to || item.id === to.id || n < 1) { ui.notifications.warn('Pick the Resource to take dots from and the one to move them to.'); return null }
+      if (!item || !to || item.id === to.id || n < 1) { v6aNote.warn('Pick the Resource to take dots from and the one to move them to.'); return null }
       await item.update({ 'system.dots.value': dotsOf(item) - n }); await to.update({ 'system.dots.value': dotsOf(to) + n }); line = `${n} ${n === 1 ? 'dot' : 'dots'} moved from ${item.name} to ${to.name}.`
     } else if (def.res === 'recover') {
-      if (!item) { ui.notifications.warn('Pick the Resource to restore.'); return null }
+      if (!item) { v6aNote.warn('Pick the Resource to restore.'); return null }
       const n = Math.min(2, res.dots, 5 - dotsOf(item)); await item.update({ 'system.dots.value': dotsOf(item) + n }); line = `${item.name}: ${n} spent ${n === 1 ? 'dot' : 'dots'} restored (now ${dotsOf(item)}).`
     } else if (def.res === 'spend') {
-      if (!item || dotsOf(item) < 3) { ui.notifications.warn('Repairing the Masquerade costs 3 dots of one Resource. For several Resources (4 dots), lower them by hand.'); return null }
+      if (!item || dotsOf(item) < 3) { v6aNote.warn('Repairing the Masquerade costs 3 dots of one Resource. For several Resources (4 dots), lower them by hand.'); return null }
       await item.update({ 'system.dots.value': dotsOf(item) - 3 }); line = `${item.name} spends 3 dots (now ${dotsOf(item)}): the Masquerade Tracker goes down by 1.`
       const masq = globalThis.V6Alpha2?.tools?.masquerade
       if (game.user.isGM && masq?.clear) await masq.clear(1, `${actor.name} repairs the Masquerade`); else line += ' Storyteller: lower the tracker.'
     }
     await actor.update({ 'flags.world.a2.downtime': { used: used + 1 } })
-  } catch (e) { console.error('V6 Automation | downtime', e); ui.notifications.error('The downtime action could not be applied. See the console (F12).'); return null }
+  } catch (e) { console.error('V6 Automation | downtime', e); v6aNote.error('The downtime action could not be applied. See the console (F12).'); return null }
   await ChatMessage.create({ content: `<div class="a2y-downtime"><h4>Downtime: ${a2Esc(def.label)}</h4>${res.note ? `<p><em>${a2Esc(res.note)}</em></p>` : ''}<p>${a2Esc(line)}</p><p class="a2y-dim">Action ${used + 1}${used + 1 > 2 ? ' (more than the usual 2: the Storyteller allows it)' : ' of 2'}.</p></div>`, speaker: ChatMessage.getSpeaker({ actor }) })
   return res
 }
@@ -10782,7 +10830,7 @@ async function a2yDowntimeReset () {
   if (!game.user.isGM) return
   let n = 0
   for (const a of game.actors) if (a.flags?.world?.a2?.downtime?.used) { await a.update({ 'flags.world.a2.downtime': { used: 0 } }); n++ }
-  ui.notifications.info(`Downtime actions reset for ${n} ${n === 1 ? 'character' : 'characters'}.`)
+  v6aNote.info(`Downtime actions reset for ${n} ${n === 1 ? 'character' : 'characters'}.`)
 }
 
 // ---- complications on a painful failure ----
@@ -11042,7 +11090,7 @@ function a2wDashRefresh () {
   box.outerHTML = a2wDashHtml()
 }
 async function a2wDashboard () {
-  if (!game.user.isGM) { ui.notifications.warn('The dashboard is the Storyteller\'s.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The dashboard is the Storyteller\'s.'); return null }
   if (a2wState.dash?.rendered) { a2wState.dash.bringToFront?.(); a2wDashRefresh(); return a2wState.dash }
   foundry.applications.api.DialogV2.wait({
     window: { title: 'Storyteller dashboard', resizable: true },
@@ -11142,10 +11190,10 @@ function a2wCoterieDrop (root) {
       f[`r${i}.type`].value = a2wResourceKind(item)
       f[`r${i}.dots`].value = a2Clamp(a2Int(item.system?.dots?.value ?? item.system?.level, 1) || 1, 1, 5)
       f[`r${i}.uuid`].value = item.uuid
-      ui.notifications.info(`${item.name} added. Save to keep it.`)
+      v6aNote.info(`${item.name} added. Save to keep it.`)
       return
     }
-    ui.notifications.warn('No free row: save, reopen, and drop it again.')
+    v6aNote.warn('No free row: save, reopen, and drop it again.')
   })
 }
 async function a2wCoterieOpen () {
@@ -11170,13 +11218,13 @@ async function a2wCoterieOpen () {
     rejectClose: false,
     render: (ev, dialog) => { if (gm) a2wCoterieDrop(dialog.element) }
   }).catch(() => null)
-  if (gm && res && typeof res === 'object') { await game.settings.set(a2eNs(), a2eKey('coterie'), res); ui.notifications.info('Coterie saved.') }
+  if (gm && res && typeof res === 'object') { await game.settings.set(a2eNs(), a2eKey('coterie'), res); v6aNote.info('Coterie saved.') }
   return res
 }
 
 // ---- NPC maker ----
 async function a2wNpcMaker () {
-  if (!game.user.isGM) { ui.notifications.warn('The Storyteller makes NPCs.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller makes NPCs.'); return null }
   const clans = [...(game.items ?? [])].filter((i) => i.type === 'clan' && !/archive/i.test(i.folder?.name ?? '')).sort((a, b) => a.name.localeCompare(b.name))
   const res = await foundry.applications.api.DialogV2.prompt({
     window: { title: 'NPC maker' },
@@ -11207,6 +11255,7 @@ async function a2wNpcMaker () {
   return a2wNpcCreate(res)
 }
 async function a2wNpcCreate (o) {
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller makes NPCs.'); return null }
   const st = a2wNpcStats(o)
   const creature = { human: 'mortal', ghoul: 'ghoul', vampire: 'vampire', animal: 'animal' }[o.kind] ?? 'mortal'
   const system = { attributes: {}, skills: {} }
@@ -11236,16 +11285,16 @@ async function a2wNpcCreate (o) {
     })
     made.push(actor)
   }
-  ui.notifications.info(`${made.length === 1 ? made[0].name : `${made.length} NPCs`} made: in the folder "Made NPCs (V6)". Drag onto the scene.`)
+  v6aNote.info(`${made.length === 1 ? made[0].name : `${made.length} NPCs`} made: in the folder "Made NPCs (V6)". Drag onto the scene.`)
   if (made.length === 1) made[0].sheet?.render(true)
   return made
 }
 
 // ---- group hunt ----
 async function a2wGroupHunt () {
-  if (!game.user.isGM) { ui.notifications.warn('The Storyteller calls the hunt.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller calls the hunt.'); return null }
   const pcs = a2wPCs().filter((a) => a2Rules(a)?.hunger)
-  if (!pcs.length) { ui.notifications.info('No vampire player characters to hunt.'); return null }
+  if (!pcs.length) { v6aNote.info('No vampire player characters to hunt.'); return null }
   return ChatMessage.create({ content: '<div class="a2w-hunt"><h4>The hunt</h4><p>Each of you: how do you feed tonight?</p></div>', speaker: { alias: 'Storyteller' }, flags: { world: { a2hunt: { v: 1, actors: pcs.map((a) => a.uuid) } } } })
 }
 function a2wHuntRender (message, root) {
@@ -11267,12 +11316,12 @@ function a2wHuntRender (message, root) {
 // ---- vinculum ----
 function a2wVinculum (actor) { const v = actor?.flags?.world?.a2?.vinculum; let night = 1; try { night = a2tClock().night } catch (e) { /* 1 */ } return v && Array.isArray(v.mates) && v.mates.length && (v.until === null || v.until === undefined || night <= a2Int(v.until)) ? v : null }
 async function a2wVaulderie () {
-  if (!game.user.isGM) { ui.notifications.warn('The Storyteller records a Vaulderie.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller records a Vaulderie.'); return null }
   const cands = new Map()
   for (const t of globalThis.canvas?.tokens?.controlled ?? []) if (t.actor && a2Creature(t.actor) === 'vampire') cands.set(t.actor.uuid, { actor: t.actor, on: true })
   for (const a of a2wPCs()) if (a2Creature(a) === 'vampire' && !cands.has(a.uuid)) cands.set(a.uuid, { actor: a, on: cands.size === 0 })
   const list = [...cands.values()]
-  if (list.length < 2) { ui.notifications.warn('A Vaulderie needs at least two vampires: select their tokens.'); return null }
+  if (list.length < 2) { v6aNote.warn('A Vaulderie needs at least two vampires: select their tokens.'); return null }
   const res = await foundry.applications.api.DialogV2.prompt({
     window: { title: 'Vaulderie' },
     content: `<div class="a2w-npc"><p class="a2w-hint">The vinculum ends every Blood Bond of those who share the cup, blocks new ones, and takes 2 dice from tests against a packmate. It lasts twice the bond interval of the oldest blood among them (PG p.135-136).</p>${list.map((c, i) => `<label class="checkbox"><input type="checkbox" name="v${i}" ${c.on ? 'checked' : ''}> ${a2Esc(c.actor.name)}</label>`).join('<br>')}</div>`,
@@ -11297,10 +11346,10 @@ function a2wVinculumMods (actor, foe, roll) {
 
 // ---- recap ----
 async function a2wRecap () {
-  if (!game.user.isGM) { ui.notifications.warn('The Storyteller writes the recap.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The Storyteller writes the recap.'); return null }
   const since = a2Int(a2eGet('recapAt', 0))
   const msgs = game.messages.contents.filter((m) => a2Int(m.timestamp) > since)
-  if (!msgs.length) { ui.notifications.info('Nothing in the chat log since the last recap.'); return null }
+  if (!msgs.length) { v6aNote.info('Nothing in the chat log since the last recap.'); return null }
   const strip = (h) => String(h ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
   const rows = []
   const notable = []
@@ -11333,7 +11382,7 @@ async function a2wRecap () {
   const [page] = await journal.createEmbeddedDocuments('JournalEntryPage', [{ name: dupes ? `${name} (${dupes + 1})` : name, type: 'text', text: { content: html, format: 1 }, sort: (journal.pages.size + 1) * 100000 }])
   await game.settings.set(a2eNs(), a2eKey('recapAt'), Date.now())
   journal.sheet?.render(true, { pageId: page.id })
-  ui.notifications.info(`Recap written: ${journal.name}, ${page.name}.`)
+  v6aNote.info(`Recap written: ${journal.name}, ${page.name}.`)
   return page
 }
 
@@ -11602,7 +11651,7 @@ async function a2gInstall ({ force = false } = {}) {
 async function a2gOpen () {
   let journal = game.journal.find((j) => j.flags?.world?.a2guide)
   if (!journal && game.user.isGM) journal = await a2gInstall()
-  if (!journal) { ui.notifications.info('The guide isn\'t in this world yet: the Storyteller makes it with /v6 guide.'); return null }
+  if (!journal) { v6aNote.info('The guide isn\'t in this world yet: the Storyteller makes it with /v6 guide.'); return null }
   journal.sheet?.render(true)
   return journal
 }
@@ -11694,10 +11743,10 @@ async function a2rOnPower (message) {
 }
 async function a2rFeedAegis (actor) {
   const ae = actor?.flags?.world?.a2?.aegis
-  if (!ae) { ui.notifications.info('No Blood Aegis is up.'); return }
-  if (a2Int(ae.fed) >= a2Int(ae.maxFed)) { ui.notifications.warn(`The barrier has taken all the extra Vitae it can (${ae.maxFed}).`); return }
+  if (!ae) { v6aNote.info('No Blood Aegis is up.'); return }
+  if (a2Int(ae.fed) >= a2Int(ae.maxFed)) { v6aNote.warn(`The barrier has taken all the extra Vitae it can (${ae.maxFed}).`); return }
   const vit = a2Int(actor.system?.health?.value)
-  if (vit < 1) { ui.notifications.warn('No Vitae to feed it.'); return }
+  if (vit < 1) { v6aNote.warn('No Vitae to feed it.'); return }
   await actor.update({ 'system.health.value': vit - 1, 'flags.world.a2.aegis': { ...ae, points: a2Int(ae.points) + 2, fed: a2Int(ae.fed) + 1 } })
 }
 async function a2rHaruspexReroll (message) {
@@ -11706,10 +11755,10 @@ async function a2rHaruspexReroll (message) {
   const i = a2xFirstA2Roll(message)
   const roll = message?.rolls?.[i]
   if (!actor?.isOwner || !h?.uses || !roll?.options?.a2?.built) return null
-  if (!a2xCanWrite(message) && !a2xGMActive()) { ui.notifications.warn('This needs the GM online: the chat card belongs to another user.'); return null }
+  if (!a2xCanWrite(message) && !a2xGMActive()) { v6aNote.warn('This needs the GM online: the chat card belongs to another user.'); return null }
   const json = roll.toJSON()
   const n = a2xRerollable(json.terms).length
-  if (!n) { ui.notifications.info('No standard dice to reroll on that test.'); return null }
+  if (!n) { v6aNote.info('No standard dice to reroll on that test.'); return null }
   const fresh = await new foundry.dice.Roll(`${n}d10cs>=6`).evaluate()
   const values = (fresh.dice ?? []).flatMap((d) => (d.results ?? []).map((r) => r.result))
   try { await game.dice3d?.showForRoll?.(fresh, game.user, true) } catch (e) { /* Dice So Nice is optional */ }
@@ -11885,7 +11934,7 @@ async function a2qSync (actor, { quiet = true } = {}) {
     // actions from an older version of the module follow the catalogue
     const upd = a2qStale(actor.items, catalog)
     if (upd.length) await actor.updateEmbeddedDocuments('Item', upd)
-    if (!quiet) ui.notifications.info(data.length ? `${actor.name}: ${data.length} actions added to the Actions tab.` : `${actor.name} already has every action.`)
+    if (!quiet) v6aNote.info(data.length ? `${actor.name}: ${data.length} actions added to the Actions tab.` : `${actor.name} already has every action.`)
     return data.length
   } finally { a2qState.busy.delete(actor.id) }
 }
@@ -11899,7 +11948,7 @@ function a2qBest (actor, keys, kind) {
 async function a2qRun (actor, item) {
   const f = item?.flags?.world?.a2act
   const A = globalThis.V6Alpha2 ?? {}
-  if (!actor?.isOwner) { ui.notifications.warn(`You don't own ${actor?.name}.`); return true }
+  if (!actor?.isOwner) { v6aNote.warn(`You don't own ${actor?.name}.`); return true }
   if (f?.kind === 'move') { await a2vRun(actor, f.ref); return true }
   if (f?.kind === 'downtime') { await A.story?.downtime?.(actor); return true }
   if (f?.kind === 'tool') {
@@ -11913,7 +11962,7 @@ async function a2qRun (actor, item) {
     // answer the attack that is waiting, with everything a defence gets; without one it is a plain roll
     const attack = a2oPendingAttack(actor)
     if (attack) { await a2oDefend(attack, actor, f.ref); return true }
-    ui.notifications.info(`No attack on ${actor.name} is waiting for a defence: rolling ${f.ref === 'parry' ? 'Dexterity + Fighting' : 'Dexterity + Athletics'} as a plain test.`)
+    v6aNote.info(`No attack on ${actor.name} is waiting for a defence: rolling ${f.ref === 'parry' ? 'Dexterity + Fighting' : 'Dexterity + Athletics'} as a plain test.`)
     a2oPlainNext(actor)
   }
   const t = a2qTest(item)
@@ -12269,8 +12318,8 @@ async function a2fPrepare (actor, move, target) {
   }).catch(() => null)
   if (!res) return false
   if (res.range.blocked) {
-    if (!game.user.isGM) { ui.notifications.warn(res.range.note); return false }
-    ui.notifications.warn(`${res.range.note} Rolling anyway, as the Storyteller.`)
+    if (!game.user.isGM) { v6aNote.warn(res.range.note); return false }
+    v6aNote.warn(`${res.range.note} Rolling anyway, as the Storyteller.`)
   }
   return { weapon: res.weapon, limb: res.limb, band: res.picked || !dist ? res.band : null }
 }
@@ -12316,15 +12365,15 @@ async function a2fInjure (actor, limb, margin) {
 // The Limbs window: what is hurt, and mending it for the printed price.
 async function a2fLimbsOpen (actorLike = null) {
   const actor = actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character)
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You can't change ${actor.name}.`); return null }
   const limbs = a2fLimbs(actor)
   const vamp = Boolean(a2Rules(actor)?.vitae)
   const rows = limbs.map((l, i) => {
     const c = a2fMendCost(l.level)
     return `<tr><td><strong>${a2Esc(a2Cap(l.limb))}</strong><br><small>${a2Esc(A2F_INJURY[l.level]?.text ?? '')}</small></td>
       <td class="c"><label title="An ear, a finger, a toe"><input type="checkbox" name="small.${i}"> small</label>${l.level === 5 ? `<br><label title="The lost part is at hand: 1 Vitae and 1 Willpower less"><input type="checkbox" name="kept.${i}"> have it</label>` : ''}</td>
-      <td class="c">${c.vitae[0] === c.vitae[1] ? '' : `<input type="number" name="vitae.${i}" value="${c.vitae[0]}" min="${c.vitae[0]}" max="${c.vitae[1]}" style="width:3.5em" title="The Storyteller sets the price in this range">`}</td>
+      <td class="c">${c.vitae[0] === c.vitae[1] ? '' : `<input type="number" name="vitae.${i}" value="${c.vitae[0]}" min="${c.vitae[0]}" max="${c.vitae[1]}" style="width:3.5em" title="The Storyteller sets the price in this range">`}<br><small data-a2f-price="${i}"></small></td>
       <td class="c"><button type="button" data-a2f-mend="${i}"${vamp ? '' : ' disabled'}><i class="fa-solid fa-droplet"></i> Mend</button> <button type="button" data-a2f-drop="${i}" title="Remove it without a cost (healed otherwise, or entered by mistake)"><i class="fa-solid fa-xmark"></i></button></td></tr>`
   }).join('')
   let action = null
@@ -12340,6 +12389,21 @@ async function a2fLimbsOpen (actorLike = null) {
       const el = dialog?.element
       const form = el?.querySelector('form')
       if (!form) return
+      // the price follows the tick boxes: a small part is cheaper, a part at hand saves 1 of each
+      const price = (i) => {
+        const f = form.elements
+        const c = a2fMendCost(limbs[i].level, { small: Boolean(f[`small.${i}`]?.checked), kept: Boolean(f[`kept.${i}`]?.checked) })
+        const inp = f[`vitae.${i}`]
+        if (inp) {
+          const off = a2Int(inp.value, a2Int(inp.min)) - a2Int(inp.min)
+          inp.min = c.vitae[0]; inp.max = c.vitae[1]
+          inp.value = a2Clamp(c.vitae[0] + Math.max(0, off), c.vitae[0], c.vitae[1])
+          inp.disabled = c.vitae[0] === c.vitae[1]
+        }
+        const out = el.querySelector(`[data-a2f-price="${i}"]`)
+        if (out) out.textContent = `${c.vitae[0] === c.vitae[1] ? c.vitae[0] : `${c.vitae[0]} to ${c.vitae[1]}`} Vitae${c.willpower ? `, ${c.willpower} Willpower` : ''}`
+      }
+      limbs.forEach((l, i) => { price(i); for (const k of ['small', 'kept']) form.elements[`${k}.${i}`]?.addEventListener('change', () => price(i)) })
       const pick = (kind, i) => { const f = form.elements; action = { kind, i, small: Boolean(f[`small.${i}`]?.checked), kept: Boolean(f[`kept.${i}`]?.checked), vitae: f[`vitae.${i}`] ? a2Int(f[`vitae.${i}`].value) : null, newLimb: String(f.newLimb?.value ?? '').trim(), newLevel: a2Int(f.newLevel?.value, 1) }; dialog.close() }
       el.querySelectorAll('[data-a2f-mend]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); pick('mend', a2Int(b.dataset.a2fMend)) }))
       el.querySelectorAll('[data-a2f-drop]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); pick('drop', a2Int(b.dataset.a2fDrop)) }))
@@ -12348,7 +12412,7 @@ async function a2fLimbsOpen (actorLike = null) {
   }).catch(() => null)
   if (!action) return data
   if (action.kind === 'add') {
-    if (!action.newLimb) { ui.notifications.warn('Name the limb first.'); return a2fLimbsOpen(actor) }
+    if (!action.newLimb) { v6aNote.warn('Name the limb first.'); return a2fLimbsOpen(actor) }
     const res = a2fInjuryMerge(limbs, action.newLimb, action.newLevel, a2fNight())
     await actor.update({ 'flags.world.a2.limbs': res.limbs })
     await a2zSet(actor, 'limb', true, { level: a2fWorstLimb(res.limbs) })
@@ -12362,7 +12426,7 @@ async function a2fLimbsOpen (actorLike = null) {
     const vit = action.vitae === null ? c.vitae[0] : a2Clamp(action.vitae, c.vitae[0], c.vitae[1])
     const haveV = a2Int(actor.system?.health?.value)
     const haveW = a2Int(actor.system?.willpower?.value)
-    if (haveV < vit || haveW < c.willpower) { ui.notifications.warn(`${actor.name} needs ${vit} Vitae${c.willpower ? ` and ${c.willpower} Willpower` : ''} to mend the ${l.limb} (has ${haveV} and ${haveW}).`); return a2fLimbsOpen(actor) }
+    if (haveV < vit || haveW < c.willpower) { v6aNote.warn(`${actor.name} needs ${vit} Vitae${c.willpower ? ` and ${c.willpower} Willpower` : ''} to mend the ${l.limb} (has ${haveV} and ${haveW}).`); return a2fLimbsOpen(actor) }
     const upd = {}
     if (vit) upd['system.health.value'] = haveV - vit
     if (c.willpower) upd['system.willpower.value'] = haveW - c.willpower
@@ -12379,9 +12443,9 @@ async function a2fLimbsOpen (actorLike = null) {
 
 // ---- a group acting as one ----
 async function a2fGroup () {
-  if (!game.user.isGM) { ui.notifications.warn('That one is for the Storyteller.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('That one is for the Storyteller.'); return null }
   const tokens = (globalThis.canvas?.tokens?.controlled ?? []).filter((t) => t.actor)
-  if (tokens.length < 2) { ui.notifications.warn('Select the tokens of the group first (two or more), and target who they act against.'); return null }
+  if (tokens.length < 2) { v6aNote.warn('Select the tokens of the group first (two or more), and target who they act against.'); return null }
   const pool = (a) => { try { return a.type === 'npc' ? a2Int(a2NpcBestLevel(a, ['strength']).value) : a2vEff(a, 'strength') + a2Int(a.system?.skills?.fighting?.effective ?? a.system?.skills?.fighting?.value) } catch (e) { return 0 } }
   const sorted = [...tokens].sort((x, y) => pool(y.actor) - pool(x.actor))
   const bonus = a2fGroupBonus(tokens.length)
@@ -12561,7 +12625,7 @@ function a2nGhoulDue ({ fed = null, night = 1, interval = 30 } = {}) {
 // ---- helpers ----
 const a2nState = { hooked: false }
 function a2nOn () { return a2Enabled() && a2eGet('humanityFlow', true) !== false }
-function a2nGate () { if (a2nOn()) return true; ui.notifications?.info('The Humanity, day and torpor windows are switched off in the module settings.'); return false }
+function a2nGate () { if (a2nOn()) return true; v6aNote.info('The Humanity, day and torpor windows are switched off in the module settings.'); return false }
 function a2nNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
 function a2nPick (actorLike) { return actorLike?.documentName === 'Actor' ? actorLike : (globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null) }
 function a2nVal (actor, kind, key) { const v = actor?.system?.[kind]?.[key]; return a2Int(v?.effective ?? v?.value) }
@@ -12608,12 +12672,13 @@ async function a2nRoll (actor, { label = 'Test', attributes = [], skills = [], e
     a2: { v: 2, hunger: hungerDice, hungerAvailable: a2ActorHunger(actor), takeHalf: false, contested: opp !== null, opponent: opp, cap: null, frenzy: false, attr, notes: lines, oppose: null, vsMessage: null, itemUuid: null, creature: a2Creature(actor), npc: Boolean(a2NpcInfo(actor)), trueFaith: 0 }
   }
   const Test = a2xState.Test ?? (await import(a2SystemUrl('core/scripts/wod6e-test.js'))).WOD6eTest
-  const roll = await Test.executeTest({ actor, context, flavor: label, createMessage: false })
+  const flavor = a2Esc(label) // a card's flavour is shown as HTML, and a label may carry a name
+  const roll = await Test.executeTest({ actor, context, flavor, createMessage: false })
   let messageMode
   for (const k of ['messageMode', 'rollMode']) {
     try { if (game.settings.settings.has(`core.${k}`)) { messageMode = game.settings.get('core', k); break } } catch (e) { /* not in this version */ }
   }
-  const message = await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor: label }, messageMode ? { messageMode } : {})
+  const message = await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor }, messageMode ? { messageMode } : {})
   return { roll, v: roll.a2Verdict ?? a2RollVerdict(roll), message }
 }
 async function a2nCard (actor, title, lines, { whisper = true } = {}) {
@@ -12624,8 +12689,9 @@ async function a2nCard (actor, title, lines, { whisper = true } = {}) {
 
 // ---- Humanity ----
 async function a2nViolate (actor, n, reason = '') {
+  if (!actor?.isOwner) { v6aNote.warn(`You don't own ${actor?.name ?? 'that character'}.`); return null }
   const before = a2ActorHumanity(actor)
-  const res = await a2Violate(actor, Math.max(1, a2Int(n, 1)))
+  const res = await a2Violate(actor, Math.max(1, a2Int(n, 1)), { quiet: true })
   const path = a2PathInfo(actor)
   const lines = [`${reason || 'Violation'}: ${a2Plural(Math.max(1, a2Int(n, 1)), 'slash', 'slashes')}.`]
   if (res.lost) lines.push(`A slash fell on a filled box: rank ${before.rank} → ${res.rank}, and every slash is erased (PG p.127).`)
@@ -12635,11 +12701,12 @@ async function a2nViolate (actor, n, reason = '') {
   return res
 }
 async function a2nJustify (actor) {
+  if (!actor?.isOwner) { v6aNote.warn(`You don't own ${actor?.name ?? 'that character'}.`); return null }
   const hum = a2ActorHumanity(actor)
   const night = a2nNight()
   const wp = a2Int(actor.system?.willpower?.value)
   const chk = a2nJustifyCheck({ rank: hum.rank, violations: hum.violations, willpower: wp, last: actor.flags?.world?.a2?.justifyNight ?? null, night })
-  if (!chk.ok) { ui.notifications.warn(`${actor.name}: ${chk.why}`); return null }
+  if (!chk.ok) { v6aNote.warn(`${actor.name}: ${chk.why}`); return null }
   await actor.update({ 'system.willpower.value': wp - 1, 'flags.world.a2.justifyNight': night })
   const r = await a2nRoll(actor, { label: `Justify · Self-Control (Composure ${a2nVal(actor, 'attributes', 'composure')} + Resolve ${a2nVal(actor, 'attributes', 'resolve')}) vs Difficulty ${hum.rank}`, attributes: ['composure', 'resolve'], difficulty: hum.rank, notes: ['Justify: 1 Willpower spent. Each success erases a slash; a failure is −2 dice on every test until the next night (PG p.127).'] })
   if (!r) return null
@@ -12651,11 +12718,12 @@ async function a2nJustify (actor) {
   return out
 }
 async function a2nRaise (actor) {
+  if (!game.user.isGM) { v6aNote.warn('Raising the rank is the Storyteller\'s call (PG p.127).'); return null }
   const hum = a2ActorHumanity(actor)
-  if (hum.violations > 0) { ui.notifications.warn(`${actor.name} can't raise the rank while it has violations; such an act may erase one instead (PG p.127).`); return null }
-  if (hum.rank >= 10) { ui.notifications.info(`${actor.name} is at rank 10 already.`); return null }
+  if (hum.violations > 0) { v6aNote.warn(`${actor.name} can't raise the rank while it has violations; such an act may erase one instead (PG p.127).`); return null }
+  if (hum.rank >= 10) { v6aNote.info(`${actor.name} is at rank 10 already.`); return null }
   const x = a2tXp(actor)
-  if (x.available < 20) { ui.notifications.warn(`${actor.name} has ${x.available} XP; a rank costs 20 (PG p.127).`); return null }
+  if (x.available < 20) { v6aNote.warn(`${actor.name} has ${x.available} XP; a rank costs 20 (PG p.127).`); return null }
   x.spent += 20
   x.log.push({ at: new Date().toISOString(), type: 'spend', kind: 'humanity', what: `${a2PathInfo(actor).name} rank ${hum.rank + 1}`, xp: 20, by: game.user?.name ?? '' })
   await actor.update({ 'flags.world.a2.xp': a2tXpSave(x) })
@@ -12666,9 +12734,9 @@ async function a2nRaise (actor) {
 async function a2nHumanity (actorLike = null) {
   if (!a2nGate()) return null
   const actor = a2nPick(actorLike)
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (!a2Rules(actor)?.humanity) { ui.notifications.warn(`${actor.name} has no Humanity or Path (${a2Creature(actor) ?? actor.type}).`); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (!a2Rules(actor)?.humanity) { v6aNote.warn(`${actor.name} has no Humanity or Path (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const hum = a2ActorHumanity(actor)
   const path = a2PathInfo(actor)
   const gm = game.user.isGM
@@ -12707,7 +12775,7 @@ async function a2nHumanity (actorLike = null) {
   }
   if (res.do === 'justify') return a2nJustify(actor)
   if (res.do === 'precept') {
-    if (!hum.violations) { ui.notifications.info(`${actor.name} has no violation to erase.`); return null }
+    if (!hum.violations) { v6aNote.info(`${actor.name} has no violation to erase.`); return null }
     await a2WriteHumanity(actor, a2HumanityErase(hum, 1))
     await a2nCard(actor, `${actor.name}: ${path.name}`, [`A precept kept with effort and risk: 1 slash erased, ${hum.violations - 1} left (PG p.127).`])
     return null
@@ -12726,9 +12794,9 @@ function a2nReadViolation (form) {
 async function a2nDay (actorLike = null) {
   if (!a2nGate()) return null
   const actor = a2nPick(actorLike)
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (a2Creature(actor) !== 'vampire') { ui.notifications.warn(`${actor.name} doesn't sleep by day (${a2Creature(actor) ?? actor.type}).`); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (a2Creature(actor) !== 'vampire') { v6aNote.warn(`${actor.name} doesn't sleep by day (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const g = a2ActorGenMod(actor)
   const diff = a2nWakeDifficulty(g)
   const awake = a2zHas(actor, 'day')
@@ -12766,7 +12834,7 @@ async function a2nDay (actorLike = null) {
 // ---- the sunrise clock ----
 function a2nSunrise () { const s = a2eGet('sunrise', null); return s && typeof s === 'object' && s.hours !== null && s.hours !== undefined ? Math.max(0, a2Int(s.hours)) : null }
 async function a2nSunriseSet (hours) {
-  if (!game.user.isGM) { ui.notifications.warn('The sunrise clock is the Storyteller\'s.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The sunrise clock is the Storyteller\'s.'); return null }
   const h = hours === null || hours === undefined || hours === '' ? null : Math.max(0, a2Int(hours))
   await game.settings.set(a2eNs(), a2eKey('sunrise'), { hours: h })
   if (h === null) return null
@@ -12778,16 +12846,17 @@ async function a2nSunriseSet (hours) {
 async function a2nTorpor (actorLike = null) {
   if (!a2nGate()) return null
   const actor = a2nPick(actorLike)
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (a2Creature(actor) !== 'vampire') { ui.notifications.warn(`${actor.name} can't fall into torpor (${a2Creature(actor) ?? actor.type}).`); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
-  const t = actor.flags?.world?.a2?.torpor ?? null
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (a2Creature(actor) !== 'vampire') { v6aNote.warn(`${actor.name} can't fall into torpor (${a2Creature(actor) ?? actor.type}).`); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
+  const night = a2nNight()
+  // the note on the character, or at least the Torpor state itself (ticked by hand a moment ago)
+  const t = actor.flags?.world?.a2?.torpor ?? (a2zHas(actor, 'torpor') ? { reason: a2zHas(actor, 'staked') ? 'staked' : 'manual', since: night } : null)
   const hum = a2ActorHumanity(actor)
   const path = a2PathInfo(actor)
   const band = a2RankBand(hum.rank, path.bands)
   const g = a2ActorGenMod(actor)
   const diff = a2nWakeDifficulty(g)
-  const night = a2nNight()
   const length = a2nTorporNights(hum.rank, path.bands) ?? 30
   const st = t ? a2nTorporState({ since: t.since ?? night, night, length }) : null
   const vitae = a2Int(actor.system?.health?.value)
@@ -12826,23 +12895,23 @@ async function a2nTorpor (actorLike = null) {
     return null
   }
   if (pick === 'fed') {
-    if (vitae < 1) { ui.notifications.warn(`${actor.name} has no Vitae: feed it at least 1 first.`); return null }
+    if (vitae < 1) { v6aNote.warn(`${actor.name} has no Vitae: feed it at least 1 first.`); return null }
     const r = await a2nRoll(actor, { label: `Rise from torpor · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: wakeNotes, drop: asleep })
     if (r?.v.win === true) await rise(['Fed and woken (PG p.140).'])
     else if (r) await a2nCard(actor, `${actor.name} stays in torpor`, ['It doesn\'t wake. Feeding it again allows another test.'])
     return r
   }
   if (pick === 'hunter') {
-    if (st && !st.hunter && !game.user.isGM) { ui.notifications.warn(`The Unconscious Hunter stirs only once the torpor has run its length (${a2Plural(length - st.elapsed, 'night', 'nights')} to go).`); return null }
+    if (st && !st.hunter && !game.user.isGM) { v6aNote.warn(`The Unconscious Hunter stirs only once the torpor has run its length (${a2Plural(length - st.elapsed, 'night', 'nights')} to go).`); return null }
     const r = await a2nRoll(actor, { label: 'Unconscious Hunter · Resolve + Awareness vs Difficulty 3', attributes: ['resolve'], skills: ['awareness'], extra: mod, difficulty: 3, notes: wakeNotes, drop: asleep })
     if (r?.v.win === true) await a2nCard(actor, `${actor.name}: the Unconscious Hunter`, ['It wakes to feed and at once risks a hunger frenzy (Difficulty = its Hunger dice; the Storyteller may lower it for familiar prey). Without 1 Vitae by the end of the scene it sinks back into torpor (PG p.141).', 'Storyteller: untick Torpor once it has fed, or leave it.'])
     else if (r) await a2nCard(actor, `${actor.name} doesn't stir`, ['The prey passes unnoticed.'])
     return r
   }
   if (pick === 'will') {
-    if (st && !st.voluntary && !game.user.isGM) { ui.notifications.warn('Rising by will is possible only after half the torpor\'s length has passed (PG p.141).'); return null }
+    if (st && !st.voluntary && !game.user.isGM) { v6aNote.warn('Rising by will is possible only after half the torpor\'s length has passed (PG p.141).'); return null }
     const wp = a2Int(actor.system?.willpower?.value)
-    if (wp < 1) { ui.notifications.warn(`${actor.name} has no Willpower to spend.`); return null }
+    if (wp < 1) { v6aNote.warn(`${actor.name} has no Willpower to spend.`); return null }
     await actor.update({ 'system.willpower.value': wp - 1 })
     const r = await a2nRoll(actor, { label: `Rise by will · Stamina + Resolve vs Difficulty ${diff}`, attributes: ['stamina', 'resolve'], extra: mod, difficulty: diff, notes: ['1 Willpower spent (PG p.141).', ...wakeNotes], drop: asleep })
     if (r?.v.win === true) {
@@ -12858,10 +12927,10 @@ async function a2nTorpor (actorLike = null) {
 // ---- diablerie (the Storyteller runs it) ----
 async function a2nDiablerie (actorLike = null, victimLike = null) {
   if (!a2nGate()) return null
-  if (!game.user.isGM) { ui.notifications.warn('Diablerie is run by the Storyteller: select the diablerist, target the victim.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('Diablerie is run by the Storyteller: select the diablerist, target the victim.'); return null }
   const actor = a2nPick(actorLike)
   const victim = victimLike?.documentName === 'Actor' ? victimLike : (actor ? a2vTarget(actor) : null)
-  if (!actor || !victim) { ui.notifications.warn('Select the diablerist\'s token and target the victim (T).'); return null }
+  if (!actor || !victim) { v6aNote.warn('Select the diablerist\'s token and target the victim (T).'); return null }
   const helpless = ['tied', 'staked', 'torpor'].some((id) => a2zHas(victim, id)) || Boolean(victim.flags?.world?.a2?.torpor)
   const vVitae = a2Rules(victim)?.vitae ? a2Int(victim.system?.health?.value) : 0
   const problems = a2nDiablerieCheck({ actorCreature: a2Creature(actor), victimCreature: victim.type === 'npc' ? 'vampire' : a2Creature(victim), victimVitae: vVitae, victimHelpless: helpless, sameActor: actor.uuid === victim.uuid })
@@ -12988,7 +13057,7 @@ function a2nDomitor (ghoul) {
 }
 async function a2nGhouls () {
   if (!a2nGate()) return null
-  if (!game.user.isGM) { ui.notifications.warn('The ghoul list is the Storyteller\'s.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The ghoul list is the Storyteller\'s.'); return null }
   const ghouls = a2nGhoulList()
   const night = a2nNight()
   const interval = a2Int(a2eGet('ghoulInterval', 30), 30)
@@ -13018,10 +13087,10 @@ async function a2nGhouls () {
   const ghoul = ghouls[action.i]
   const master = action.dom ? a2FromUuid(action.dom) : null
   const known = a2nDomitor(ghoul)
-  if (!master && !known?.name) { ui.notifications.warn(`Pick who feeds ${ghoul.name}.`); return a2nGhouls() }
+  if (!master && !known?.name) { v6aNote.warn(`Pick who feeds ${ghoul.name}.`); return a2nGhouls() }
   if (master) {
     const have = a2Int(master.system?.health?.value)
-    if (have < 1) { ui.notifications.warn(`${master.name} has no Vitae to give.`); return a2nGhouls() }
+    if (have < 1) { v6aNote.warn(`${master.name} has no Vitae to give.`); return a2nGhouls() }
     await master.update({ 'system.health.value': have - 1 })
   }
   await ghoul.update({ 'system.health.value': Math.min(5, a2Int(ghoul.system?.health?.value) + 1), 'flags.world.a2.ghoulFed': night, 'flags.world.a2.domitor': master ? { uuid: master.uuid, name: master.name } : known })
@@ -13082,7 +13151,7 @@ function a2nCommand (cmd, arg, actor) {
     case 'ghouls': a2nGhouls(); return true
     case 'sunrise': {
       const a = String(arg ?? '').trim().toLowerCase()
-      if (a === '') { const h = a2nSunrise(); ui.notifications.info(h === null ? 'The sunrise clock is off. /v6 sunrise 3 starts it at 3 hours.' : `${a2Plural(h, 'hour', 'hours')} until sunrise.`) } else a2nSunriseSet(a === 'off' ? null : a2Int(a))
+      if (a === '') { const h = a2nSunrise(); v6aNote.info(h === null ? 'The sunrise clock is off. /v6 sunrise 3 starts it at 3 hours.' : `${a2Plural(h, 'hour', 'hours')} until sunrise.`) } else a2nSunriseSet(a === 'off' ? null : a2Int(a))
       return true
     }
   }
@@ -13228,10 +13297,10 @@ function a2dRelay (op, data = {}) {
 // ---- the powers window ----
 async function a2dPowers (actorLike = null) {
   const actor = a2dPick(actorLike)
-  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
-  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  if (!actor) { v6aNote.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   const powers = (actor.items ?? []).filter((i) => i.type === 'discipline').sort((a, b) => String(a.system?.disciplineType ?? '').localeCompare(String(b.system?.disciplineType ?? '')) || a2Int(a.system?.level) - a2Int(b.system?.level) || a.name.localeCompare(b.name))
-  if (!powers.length) { ui.notifications.info(`${actor.name} has no Discipline powers.`); return null }
+  if (!powers.length) { v6aNote.info(`${actor.name} has no Discipline powers.`); return null }
   const rules = a2Rules(actor)
   const have = { health: a2Int(actor.system?.health?.value), willpower: a2Int(actor.system?.willpower?.value) }
   const frenzy = typeof a2xFrenzyState === 'function' ? a2xFrenzyState(actor) : null
@@ -13323,9 +13392,9 @@ async function a2dCoterieAcquire (actor, ref, name) {
   const c = a2wCoterie()
   const index = ref === 'new' ? null : a2Int(ref, -1)
   const res = a2dCoteriePlus(c.resources, { index, name })
-  if (!res) { ui.notifications.warn(index === null ? 'Name the new shared Resource.' : 'That shared Resource is at 5 dots already.'); return null }
+  if (!res) { v6aNote.warn(index === null ? 'Name the new shared Resource.' : 'That shared Resource is at 5 dots already.'); return null }
   if (game.user.isGM) { await game.settings.set(a2eNs(), a2eKey('coterie'), { ...c, resources: res.resources }); return res.line }
-  if (!game.users?.activeGM) { ui.notifications.warn('A shared Resource is kept by the Storyteller: it needs the Storyteller online.'); return null }
+  if (!game.users?.activeGM) { v6aNote.warn('A shared Resource is kept by the Storyteller: it needs the Storyteller online.'); return null }
   a2dRelay('coterie', { index, name, actor: actor?.name ?? '' })
   return `${res.line} (Entered by the Storyteller's client.)`
 }
@@ -13360,7 +13429,7 @@ async function a2dBoonsOpen () {
   const all = a2dBoons()
   if (act.do === 'add') {
     const next = a2dBoonAdd(all, act, a2dNight())
-    if (!next) { ui.notifications.warn('Say who owes, and to whom.'); return a2dBoonsOpen() }
+    if (!next) { v6aNote.warn('Say who owes, and to whom.'); return a2dBoonsOpen() }
     await a2dBoonsSave(next)
     if (!act.secret) await ChatMessage.create({ speaker: { alias: 'Storyteller' }, content: `<div class="a2v-result"><p><strong>${a2Esc(act.by.trim())}</strong> owes <strong>${a2Esc(act.to.trim())}</strong> a ${a2Esc(String(A2D_BOON_SIZES[act.size] ?? 'minor').toLowerCase())} boon${act.note.trim() ? `: ${a2Esc(act.note.trim())}` : ''}.</p></div>` })
   } else if (act.do === 'settle') {
@@ -13440,7 +13509,7 @@ async function a2dUndo (id) {
   const e = a2dState.log.find((x) => x.id === id)
   if (!e || e.undone) return false
   const actor = a2FromUuid(e.uuid)
-  if (!actor) { ui.notifications.warn(`${e.name} is no longer there.`); return false }
+  if (!actor) { v6aNote.warn(`${e.name} is no longer there.`); return false }
   const keys = new Set(e.changes.map((c) => c.key))
   const upd = {}
   if (actor.type === 'npc') {
@@ -13453,7 +13522,7 @@ async function a2dUndo (id) {
   if (Object.keys(upd).length) await actor.update(upd, { a2Damage: true, a2dUndo: true })
   if (keys.has('rank') || keys.has('violations')) await a2WriteHumanity(actor, { rank: e.before.rank, violations: e.before.violations })
   e.undone = true
-  ui.notifications.info(`Taken back: ${e.name}, ${a2dLine(e.changes)}.`)
+  v6aNote.info(`Taken back: ${e.name}, ${a2dLine(e.changes)}.`)
   if (a2dState.logApp?.rendered) a2dLogRefresh()
   return true
 }
@@ -13472,7 +13541,7 @@ function a2dLogRefresh () {
 }
 function a2dLogWire (el) { el?.querySelectorAll('[data-a2d-undo]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); b.disabled = true; a2dUndo(a2Int(b.dataset.a2dUndo)) })) }
 async function a2dLogOpen () {
-  if (!game.user.isGM) { ui.notifications.warn('The log is the Storyteller\'s.'); return null }
+  if (!game.user.isGM) { v6aNote.warn('The log is the Storyteller\'s.'); return null }
   if (a2dState.logApp?.rendered) { a2dState.logApp.bringToFront?.(); return a2dState.logApp }
   foundry.applications.api.DialogV2.wait({
     window: { title: 'Automation log', resizable: true },
@@ -13568,6 +13637,8 @@ async function a2DeskBoot () {
 }
 globalThis.a2DeskBoot ??= a2DeskBoot
 
+// Notifications are shown as HTML: the text is escaped first (see build_automation.py).
+const v6iNote = (() => { const esc = (m) => String(m ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); const go = (type) => (m, o) => globalThis.ui?.notifications?.[type]?.(esc(m), o); return { esc, info: go('info'), warn: go('warn'), error: go('error') } })()
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)
 // Reads *.v6bundle.json files. The V6 Rules bundle goes into the world (players
@@ -13732,7 +13803,7 @@ async function runV6Importer (opts = {}) {
   const FP = foundry.applications.apps.FilePicker.implementation
   const SOURCE = (typeof ForgeVTT !== 'undefined' && ForgeVTT.usingTheForge) ? 'forgevtt' : 'data'
   const CDN = /https:\/\/cdn\.alchemyrpg\.com\/[^\s"'()<>]+?\.(?:webp|png|jpe?g|gif|svg|mp4|webm|mp3|ogg)/gi
-  if (!game.user.isGM) return ui.notifications.warn('Only the Gamemaster can run the V6 importer.')
+  if (!game.user.isGM) return v6iNote.warn('Only the Gamemaster can run the V6 importer.')
 
   let served = []
   try { served = (await FP.browse(SOURCE, `${ROOT_DIR}/bundles`)).files.filter((f) => f.endsWith('.v6bundle.json')) } catch (e) { /* folder not there */ }
@@ -13764,20 +13835,20 @@ async function runV6Importer (opts = {}) {
       },
       rejectClose: false
     })
-  if (!choice?.list?.length) return ui.notifications.warn('No bundle selected.')
+  if (!choice?.list?.length) return v6iNote.warn('No bundle selected.')
 
   const dry = Boolean(choice.dry)
   const report = [] // one entry per bundle: { name, target, rows, images }
   let advCache = null
   const log = (m) => console.log(`V6 Importer | ${m}`)
-  const note = (m) => { ui.notifications.info(m); log(m) }
+  const note = (m) => { v6iNote.info(m); log(m) }
   // a comparison says so at once and shows how far it is (the bar needs Foundry 13 or later)
   let bar = null
   if (dry && !opts.quiet) {
     const msg = `Comparing ${choice.list.length} ${choice.list.length === 1 ? 'bundle' : 'bundles'} with what is there. Nothing is written; this takes a few seconds.`
-    try { bar = ui.notifications.info(msg, { progress: true }) } catch (e) { ui.notifications.info(msg) }
+    try { bar = v6iNote.info(msg, { progress: true }) } catch (e) { v6iNote.info(msg) }
   }
-  const step = (pct, message) => { try { bar?.update?.(message ? { pct, message } : { pct }) } catch (e) { /* only a progress bar */ } }
+  const step = (pct, message) => { try { bar?.update?.(message ? { pct, message: v6iEscape(message) } : { pct }) } catch (e) { /* only a progress bar */ } } // the bar shows HTML
 
   // ---------- helpers ----------
   const byKey = (collection) => { const map = new Map(); for (const d of collection) { const k = d.getFlag('world', FLAG); if (k) map.set(k, d) } return map }
@@ -14053,7 +14124,7 @@ async function runV6Importer (opts = {}) {
       const data = rewrite(bundle)
       if (toWorld) await importToWorld(data)
       else await importToAdventure(data)
-    } catch (err) { ui.notifications.error(`${dry ? 'Comparing' : 'Import of'} ${f.name} failed: ${err.message}`); console.error(err) } finally { done += 1 }
+    } catch (err) { v6iNote.error(`${dry ? 'Comparing' : 'Import of'} ${f.name} failed: ${err.message}`); console.error(err) } finally { done += 1 }
   }
   if (dry) {
     step(1)
