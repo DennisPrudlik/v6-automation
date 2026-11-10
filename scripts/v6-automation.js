@@ -1775,7 +1775,8 @@ async function a2Boot () {
     for (const [name, boot] of [['actions', globalThis.a2ActionsBoot ?? (typeof a2ActionsBoot === 'function' ? a2ActionsBoot : null)],
       ['tools', globalThis.a2ToolsBoot ?? (typeof a2ToolsBoot === 'function' ? a2ToolsBoot : null)],
       ['bonuses', globalThis.a2BonusesBoot ?? (typeof a2BonusesBoot === 'function' ? a2BonusesBoot : null)],
-      ['powers', globalThis.a2PowersBoot ?? (typeof a2PowersBoot === 'function' ? a2PowersBoot : null)]]) {
+      ['powers', globalThis.a2PowersBoot ?? (typeof a2PowersBoot === 'function' ? a2PowersBoot : null)],
+      ['journal styling', globalThis.a2StyleBoot ?? (typeof a2StyleBoot === 'function' ? a2StyleBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -7322,6 +7323,224 @@ async function a2PowersBoot () {
   return true
 }
 globalThis.a2PowersBoot ??= a2PowersBoot
+
+// ---- V6 journal look ---------------------------------------------------------------
+// Tidies and styles the journal pages the V6 importer made, at render time, so
+// nothing in the stored text changes:
+//  - hides a first heading that only repeats the page title Foundry already shows;
+//  - evens out heading levels (the page title is the top; the text starts one below);
+//  - marks "V6 note", "Homebrew" and "For our chronicle" paragraphs as call-outs;
+//  - gives tables, lists and headings one consistent look in both colour themes.
+// Client setting "journalStyle": off | v6 (imported V6 journals, default) | all.
+
+const A2S_NOTE = /^(?:V6\b|V5\s*(?:→|->|to)\s*V6|Homebrew\b|House rule|For our (?:chronicle|table)|Conversion note|Storyteller note)/i
+const A2S_META = /^(?:Prerequisites?|Focus|Cost|Duration|Test|Dice pool|Attitude|Horrors|Level|Source)\s*:/i
+
+function a2sNorm (s) {
+  return String(s ?? '').toLowerCase().replace(/^\s*(?:\d+[.)]|[ivxlc]+[.)]|chapter\s+\w+\s*[:.-])\s*/i, '').replace(/\s*\(v6\)\s*$/i, '').replace(/[^a-z0-9]+/g, ' ').trim()
+}
+// Does a first heading only repeat the page's name? Pure.
+function a2sSameTitle (heading, pageName) {
+  const h = a2sNorm(heading)
+  const n = a2sNorm(pageName)
+  if (!h || !n) return false
+  if (h === n) return true
+  const [short, long] = h.length <= n.length ? [h, n] : [n, h]
+  // "Sunset of Flames" vs "Chapter 3: Sunset of Flames", but not "Rules" vs "House Rules for Hunting".
+  return long.includes(short) && short.length >= Math.max(4, long.length * 0.6)
+}
+// What a heading says beyond the page's name, when one contains the other:
+// '' = nothing more, null = neither contains the other. Pure.
+function a2sTitleExtra (heading, pageName) {
+  const h = String(heading ?? '').replace(/\s+/g, ' ').trim()
+  const n = String(pageName ?? '').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+  if (!h || !n) return null
+  const at = h.toLowerCase().indexOf(n.toLowerCase())
+  if (at > 0 && at + n.length < h.length) return null // the name sits mid-sentence: a heading of its own
+  if (at >= 0) {
+    const extra = (h.slice(0, at) + ' ' + h.slice(at + n.length)).replace(/^[\s:–—-]+|[\s:–—-]+$/g, '').replace(/\s+/g, ' ')
+    // "Kinds of" (from "Kinds of Frenzy") says nothing by itself.
+    return extra.length < 4 || /\b(?:of|the|a|an|and|to|for|in|on)$/i.test(extra) ? '' : extra
+  }
+  return n.toLowerCase().includes(h.toLowerCase()) ? '' : null
+}
+// Display levels for headings: the shallowest one in the text becomes level 2. Pure.
+function a2sLevels (levels) {
+  if (!levels.length) return []
+  const min = Math.min(...levels)
+  return levels.map((l) => Math.min(5, l - min + 2))
+}
+
+function a2sMode () {
+  try {
+    const ns = typeof a2tNs === 'function' ? a2tNs() : 'wod6e'
+    return game.settings.get(ns, ns === 'wod6e' ? 'v6A2JournalStyle' : 'journalStyle') || 'v6'
+  } catch (e) { return 'v6' }
+}
+function a2sWanted (entry) {
+  const mode = a2sMode()
+  if (mode === 'off') return false
+  if (mode === 'all') return true
+  return Boolean(entry?.flags?.world?.v6key || entry?.flags?.world?.alpha1Key)
+}
+
+// Dress one page's text. `root` holds the page's own HTML.
+function a2sDecorate (root, pageName) {
+  if (!root || root.dataset?.v6Styled === '1') return
+  if (root.dataset) root.dataset.v6Styled = '1'
+  root.classList.add('v6-doc')
+  const heads = [...root.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+  const first = root.firstElementChild
+  let dup = null
+  if (first && /^H[1-6]$/.test(first.tagName)) {
+    const extra = a2sTitleExtra(first.textContent, pageName)
+    if (a2sSameTitle(first.textContent, pageName)) {
+      dup = first
+      dup.classList.add('v6-dup')
+    } else if (extra !== null) {
+      // "Welcome to the Night: The Lasombra Defection" under the title "Welcome to the Night":
+      // keep only what the heading adds, as a subtitle.
+      dup = first
+      dup.classList.add('v6-dup')
+      if (extra) {
+        const sub = root.ownerDocument.createElement('p')
+        sub.className = 'v6-subtitle'
+        sub.textContent = extra
+        dup.after(sub)
+      }
+    } else if (first.tagName === 'H1') {
+      // A second, differently worded title: show it as a subtitle, never as another headline.
+      dup = first
+      dup.classList.add('v6-subtitle')
+    }
+  }
+  const rest = heads.filter((h) => h !== dup)
+  const shown = a2sLevels(rest.map((h) => Number(h.tagName[1])))
+  rest.forEach((h, i) => { h.dataset.v6Level = String(shown[i]) })
+  for (const p of root.querySelectorAll('p')) {
+    const lead = p.firstElementChild
+    if (!lead || p.firstChild !== lead) continue
+    const text = lead.textContent.trim()
+    if (lead.tagName === 'STRONG' && A2S_NOTE.test(text)) p.classList.add('v6-note')
+    else if (lead.tagName === 'EM' && (A2S_META.test(text) || A2S_NOTE.test(text))) p.classList.add(A2S_NOTE.test(text) ? 'v6-note' : 'v6-meta')
+  }
+  for (const t of root.querySelectorAll('table')) {
+    if (t.parentElement?.classList.contains('v6-table-wrap')) continue
+    const wrap = root.ownerDocument.createElement('div')
+    wrap.className = 'v6-table-wrap'
+    t.replaceWith(wrap)
+    wrap.appendChild(t)
+  }
+}
+
+// Find the page articles inside a rendered journal window and dress them.
+function a2sScan (element, entry) {
+  if (!element || !a2sWanted(entry)) return
+  const pages = element.matches?.('[data-page-id]') ? [element] : [...(element.querySelectorAll?.('[data-page-id]') ?? [])]
+  for (const art of pages) {
+    const page = entry?.pages?.get?.(art.dataset.pageId)
+    if (!page || (page.type && page.type !== 'text')) continue
+    const body = art.querySelector('.journal-page-content') ?? art.querySelector('section') ?? art
+    if (body.querySelector?.('prose-mirror, .editor.prosemirror, .editor-container')) continue // being edited
+    art.classList.add('v6-doc-page')
+    a2sDecorate(body, page.name)
+  }
+}
+
+const a2sState = { hooked: false, observers: new WeakMap() }
+function a2sOnRender (app, element) {
+  try {
+    const doc = app?.document
+    const el = element instanceof HTMLElement ? element : element?.[0] ?? app?.element
+    if (!doc || !el) return
+    if (doc.documentName === 'JournalEntryPage') {
+      if (!a2sWanted(doc.parent) || (doc.type && doc.type !== 'text')) return
+      const host = el.closest?.('[data-page-id]') ?? el
+      if (!host.dataset.pageId) host.dataset.pageId = doc.id
+      a2sScan(host, doc.parent)
+      return
+    }
+    if (doc.documentName !== 'JournalEntry') return
+    a2sScan(el, doc)
+    // Pages are drawn into the window after it opens, and again on every page turn.
+    if (!a2sState.observers.has(el) && typeof MutationObserver === 'function') {
+      const obs = new MutationObserver(() => { try { a2sScan(el, doc) } catch (e) { /* cosmetic only */ } })
+      obs.observe(el, { childList: true, subtree: true })
+      a2sState.observers.set(el, obs)
+    }
+  } catch (e) { console.error('V6 Automation | journal styling', e) }
+}
+
+function a2sInjectStyles () {
+  document.getElementById('v6a-journal-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-journal-style'
+  style.textContent = `
+.v6-doc { --v6-accent: color-mix(in srgb, #b3261e 82%, currentColor); --v6-line: color-mix(in srgb, currentColor 22%, transparent); --v6-tint: color-mix(in srgb, currentColor 6%, transparent); line-height: 1.6; }
+.v6-doc .v6-dup { display: none; }
+.v6-doc-page .journal-page-header h1, .v6-doc-page > header h1 { border-bottom: 3px solid color-mix(in srgb, #b3261e 82%, currentColor); padding-bottom: 0.25em; margin-bottom: 0.6em; letter-spacing: 0.02em; }
+.v6-doc h1, .v6-doc h2, .v6-doc h3, .v6-doc h4, .v6-doc h5, .v6-doc h6 { font-family: inherit; line-height: 1.25; border: 0; text-shadow: none; }
+.v6-doc [data-v6-level="2"] { font-size: 1.5em; font-weight: 600; margin: 1.5em 0 0.5em; padding-bottom: 0.2em; border-bottom: 1px solid var(--v6-accent); }
+.v6-doc [data-v6-level="3"] { font-size: 1.22em; font-weight: 600; margin: 1.3em 0 0.4em; color: var(--v6-accent); }
+.v6-doc [data-v6-level="4"] { font-size: 1em; font-weight: 700; margin: 1.1em 0 0.3em; text-transform: uppercase; letter-spacing: 0.07em; }
+.v6-doc [data-v6-level="5"] { font-size: 1em; font-weight: 700; font-style: italic; margin: 1em 0 0.3em; }
+.v6-doc > .v6-dup + [data-v6-level], .v6-doc > [data-v6-level]:first-child { margin-top: 0.4em; }
+.v6-doc .v6-subtitle, .v6-doc h1.v6-subtitle { margin: -0.2em 0 1em; font-size: 1.1em; font-weight: 400; font-style: italic; opacity: 0.8; border: 0; }
+.v6-doc p { margin: 0.55em 0; text-align: start; }
+.v6-doc ul, .v6-doc ol { margin: 0.4em 0 0.8em; padding-inline-start: 1.5em; }
+.v6-doc li { margin: 0.2em 0; }
+.v6-doc li > p { margin: 0.1em 0; }
+.v6-doc .v6-note { margin: 0.9em 0; padding: 0.6em 0.9em; border-inline-start: 4px solid var(--v6-accent); background: color-mix(in srgb, #b3261e 9%, transparent); border-radius: 0 5px 5px 0; }
+.v6-doc .v6-meta { margin: 0.2em 0 0.7em; opacity: 0.85; font-size: 0.95em; }
+.v6-doc blockquote { margin: 0.9em 0; padding: 0.5em 1em; border-inline-start: 3px solid var(--v6-line); background: var(--v6-tint); border-radius: 0 5px 5px 0; font-style: normal; }
+.v6-doc blockquote p { margin: 0.3em 0; }
+.v6-doc .v6-table-wrap { margin: 1em 0; overflow-x: auto; border: 1px solid var(--v6-line); border-radius: 6px; }
+.v6-doc table { width: 100%; margin: 0; border-collapse: collapse; border: 0; background: transparent; font-size: 0.95em; }
+.v6-doc th { padding: 0.5em 0.7em; text-align: start; vertical-align: bottom; font-weight: 700; background: color-mix(in srgb, #b3261e 16%, transparent); border: 0; border-bottom: 2px solid var(--v6-accent); text-shadow: none; }
+.v6-doc td { padding: 0.45em 0.7em; vertical-align: top; border: 0; border-top: 1px solid var(--v6-line); }
+.v6-doc tbody tr:nth-child(even) { background: var(--v6-tint); }
+.v6-doc tbody tr:first-child td { border-top: 0; }
+.v6-doc td:first-child { font-weight: 600; }
+.v6-doc img { max-width: 100%; height: auto; border-radius: 5px; border: 0; }
+.v6-doc hr { border: 0; border-top: 1px solid var(--v6-line); margin: 1.4em 0; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2StyleBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.style?.booted) return true
+  try {
+    const ns = typeof a2tNs === 'function' ? a2tNs() : 'wod6e'
+    const key = ns === 'wod6e' ? 'v6A2JournalStyle' : 'journalStyle'
+    if (!game.settings.settings.has(`${ns}.${key}`)) {
+      game.settings.register(ns, key, {
+        name: 'V6 journal styling',
+        hint: 'Hides headings that repeat the page title and gives journal pages one look. "V6 journals" covers everything the V6 importer made.',
+        scope: 'client',
+        config: true,
+        type: String,
+        choices: { v6: 'V6 journals', all: 'All journals', off: 'Off' },
+        default: 'v6',
+        requiresReload: true
+      })
+    }
+  } catch (e) { console.error('V6 Automation | journal styling setting', e) }
+  a2sInjectStyles()
+  if (!a2sState.hooked) {
+    a2sState.hooked = true
+    Hooks.on('renderApplicationV2', a2sOnRender)
+    Hooks.on('renderJournalSheet', (app, html) => a2sOnRender(app, html)) // older journal windows
+    Hooks.on('renderJournalPageSheet', (app, html) => a2sOnRender(app, html))
+  }
+  // Journals that are already open.
+  for (const app of foundry.applications?.instances?.values?.() ?? []) { if (app.rendered) a2sOnRender(app, app.element) }
+  api.style = { booted: true, decorate: a2sDecorate, rules: { sameTitle: a2sSameTitle, levels: a2sLevels } }
+  console.log('V6 Automation | journal styling loaded')
+  return true
+}
+globalThis.a2StyleBoot ??= a2StyleBoot
 
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)
