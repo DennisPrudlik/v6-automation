@@ -361,6 +361,14 @@ const a2State = { pendingVs: new Map(), pendingPreset: new Map(), localVs: new M
 // ---- pure helpers (no Foundry globals; unit-tested in test/alpha2.test.mjs) ----
 // nothing there (null, undefined, an empty field) is the default, not 0
 function a2Int (v, d = 0) { if (v === null || v === undefined || v === '') return d; const n = Math.floor(Number(v)); return Number.isFinite(n) ? n : d }
+// Remove a key from a document: Foundry 14 wants an operator, older versions the "-=" key.
+// a2Unset(update, 'flags.world.a2.torpor') adds the right entry to an update object.
+function a2Unset (upd, path) {
+  const Op = globalThis.foundry?.data?.operators?.ForcedDeletion
+  if (Op) upd[path] = new Op()
+  else upd[path.replace(/\.([^.]+)$/, '.-=$1')] = null
+  return upd
+}
 function a2Clamp (v, lo, hi) { return Math.min(Math.max(v, lo), Math.max(lo, hi)) }
 function a2Half (n) { return Math.max(0, Math.ceil(a2Int(n) / 2)) }
 function a2Esc (s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
@@ -1605,15 +1613,14 @@ async function a2RevertHumanity () {
   for (const actor of game.actors) {
     const old = actor.flags?.world?.a2?.alpha1Humanity
     if (!old) continue
-    await actor.update({
+    await actor.update(a2Unset({
       'system.vampire.humanity.max': Math.max(1, old.humanity.max),
       'system.vampire.humanity.value': old.humanity.value,
       'system.vampire.nature.max': Math.max(1, old.nature.max),
       'system.vampire.nature.value': old.nature.value,
       'system.vampire.beast.max': Math.max(1, old.beast.max),
-      'system.vampire.beast.value': old.beast.value,
-      'flags.world.a2.-=alpha1Humanity': null
-    })
+      'system.vampire.beast.value': old.beast.value
+    }, 'flags.world.a2.alpha1Humanity'))
     done.push(actor.name)
   }
   return done
@@ -2438,7 +2445,7 @@ async function a2xNightlyRecovery (actorLike, night = 1, { rose = true } = {}) {
   if (!actor || actor.type !== 'vampire') return null
   const manual = [...a2xImpairment(actor).manual]
   const since = actor.flags?.world?.a2?.impairedNight ?? null
-  if (!manual.length) { if (since !== null) await actor.update({ 'flags.world.a2.-=impairedNight': null }); return null }
+  if (!manual.length) { if (since !== null) await actor.update(a2Unset({}, 'flags.world.a2.impairedNight')); return null }
   const creature = a2Creature(actor)
   if (creature === 'vampire' && !rose) return null // heals on rising
   const due = a2xRecoveryDue({ creature, night, since, count: manual.length })
@@ -2446,7 +2453,7 @@ async function a2xNightlyRecovery (actorLike, night = 1, { rose = true } = {}) {
   const key = manual[0]
   const upd = { [`flags.world.a2.impaired.${key}`]: false }
   if (manual.length > 1) upd['flags.world.a2.impairedNight'] = night
-  else upd['flags.world.a2.-=impairedNight'] = null
+  else a2Unset(upd, 'flags.world.a2.impairedNight')
   await actor.update(upd)
   return { key, label: a2TraitLabel('Attributes', key), left: manual.length - 1 }
 }
@@ -3197,6 +3204,12 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
   if (res.vitaeLoss) extra.push(`${name}: ${res.vitaeLoss} damage past a fully baneful track${rules.vitae ? ' came off Vitae' : ''} (PG p.100).`)
   if (res.massive) extra.push(`${name}: massive damage, twice the maximum Health in one blow: Final Death in almost all cases (PG p.101).`)
   for (const l of a2ZeroHealthLines(actor, res)) extra.push(`${name}: ${l}`)
+  // every box baneful with Vitae left is torpor (PG p.100): mark it, so the token shows it and New Night knows
+  if (a2Creature(actor) === 'vampire' && res.max > 0 && res.baneful >= res.max && a2Int(actor.system?.health?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
+    let night = 1
+    try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
+    try { await actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }) } catch (e) { console.error('V6 Automation | torpor', e) }
+  }
   // Retributive Hide and the like: a creature that hit with its own body takes
   // half the damage that got through (PG, Fortitude). Never bounces twice.
   if (res.taken > 0 && o.bodyAttack && o.attackerUuid && !o.reflected && typeof a2pList === 'function') { // eslint-disable-line no-undef
@@ -4471,9 +4484,9 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
     if (s.willpower && res.willpower !== wpBefore) upd['system.willpower.value'] = res.willpower
     if (res.health.value !== health.value || res.health.baneful !== health.baneful) upd['flags.world.a2.health'] = { value: res.health.value, baneful: res.health.baneful }
     if (res.torpor && (!prevTorpor || prevTorpor.reason !== res.torpor.reason)) upd['flags.world.a2.torpor'] = { reason: res.torpor.reason, since: night }
-    if (!res.torpor && prevTorpor) upd['flags.world.a2.-=torpor'] = null
+    if (!res.torpor && prevTorpor) a2Unset(upd, 'flags.world.a2.torpor')
     if (res.bloodLeft !== null && res.bloodLeft !== (actor.flags?.world?.a2?.bloodLeft ?? null)) {
-      if (res.bloodLeft >= 10) upd['flags.world.a2.-=bloodLeft'] = null
+      if (res.bloodLeft >= 10) a2Unset(upd, 'flags.world.a2.bloodLeft')
       else upd['flags.world.a2.bloodLeft'] = res.bloodLeft
     }
     const bags = actor.flags?.world?.a2?.bloodBags
@@ -5749,7 +5762,7 @@ async function a2bRelink ({ actors = null, dryRun = true, dropAlpha1 = true, com
         upd.push({ _id: item.id, 'flags.world.v6auto': want })
         report.updated.push(`${actor.name}: ${item.name}`)
       } else if (have && have.v !== 2 && dropAlpha1 && have.effects) {
-        upd.push({ _id: item.id, 'flags.world.-=v6auto': null })
+        upd.push(typeof a2Unset === 'function' ? a2Unset({ _id: item.id }, 'flags.world.v6auto') : { _id: item.id, 'flags.world.-=v6auto': null })
         report.removed.push(`${actor.name}: ${item.name}`)
       }
     }
@@ -6766,7 +6779,7 @@ async function a2pUpdateCard (msg, card) {
 function a2pCardBody (message) {
   const c = message.flags?.world?.a2p ?? {}
   const rows = []
-  const res = c.noRoll ? 'Activated without a roll' : `${a2pPlural(c.successes, 'success', 'successes')}${c.win === true ? ' · won' : c.win === false ? ' · lost' : ''}${c.margin && c.win !== false ? ` · margin ${c.margin}` : ''}`
+  const res = c.noRoll ? 'Activated without a roll' : `${a2pPlural(c.successes, 'success', 'successes')}${c.win === true ? ' · won' : c.win === false ? ' · lost' : ''}${c.margin && c.win !== false && !c.contested ? ` · margin ${c.margin}` : ''}`
   rows.push(`<div class="a2p-line"><strong>${a2pEsc(res)}</strong> · ${a2pEsc(c.durationText ?? '')}${c.step ? ` · Maturing ${'●'.repeat(c.step)}` : ''}${c.choice ? ` · ${a2pEsc(a2pCap(c.choice))}` : ''}${c.extra ? ` · extra ${c.extra}` : ''}</div>`)
   if (c.summary) rows.push(`<div class="a2p-line a2p-summary">${a2pEsc(c.summary)}</div>`)
   if (c.self?.length) rows.push(`<div class="a2p-line"><em>${a2pEsc(c.casterName)}</em>: ${a2pEsc(c.self.join('; '))}</div>`)
@@ -8546,7 +8559,7 @@ async function a2lOnUpdate (message, change) {
     try { bargain = Boolean(a2xAct(message, message.rolls.indexOf(roll)).bargain) } catch (e) { /* no actions on this roll */ }
     const win = bargain || (req.hideDiff ? (diff <= 0 ? successes > 0 : successes >= diff) : v.win !== false)
     const margin = bargain ? 0 : diff > 0 ? successes - diff : null
-    const text = `${successes} ${successes === 1 ? 'success' : 'successes'}: ${win ? 'win' : 'failure'}${margin !== null ? `, margin ${margin >= 0 ? '+' : ''}${margin}` : ''}${bargain ? ", by a Beast's Bargain" : ''}${v.critical ? ', critical' : ''}${v.painful && !bargain ? ', painful' : ''}${v.bestial && !bargain ? ', bestial' : ''}`
+    const text = `${successes} ${successes === 1 ? 'success' : 'successes'}: ${win ? 'win' : 'failure'}${margin !== null ? `, margin ${margin > 0 ? '+' : ''}${margin}` : ''}${bargain ? ", by a Beast's Bargain" : ''}${v.critical ? ', critical' : ''}${v.painful && !bargain ? ', painful' : ''}${v.bestial && !bargain ? ', bestial' : ''}`
     await card.update({ [`flags.world.a2req.results.${a2lKey(actor.uuid)}`]: { text, win, successes, messageId: message.id } })
   } catch (e) { console.error('V6 Automation | roll request', e) }
 }
