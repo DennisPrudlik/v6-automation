@@ -13747,6 +13747,7 @@ async function runV6Importer (opts = {}) {
 
   const dry = Boolean(choice.dry)
   const report = [] // one entry per bundle: { name, target, rows, images }
+  let advCache = null
   const log = (m) => console.log(`V6 Importer | ${m}`)
   const note = (m) => { ui.notifications.info(m); log(m) }
 
@@ -13804,7 +13805,7 @@ async function runV6Importer (opts = {}) {
   }
   const hasLevels = !!CONFIG.Scene?.documentClass?.schema?.fields?.levels
   const sceneData = async (e, folderId) => {
-    const src = e.image; const [w, h] = src ? await imageSize(src) : [4000, 3000]
+    const src = e.image; const [w, h] = src && !dry ? await imageSize(src) : [4000, 3000] // a comparison doesn't need the picture
     const base = { name: e.name || 'Untitled scene', folder: folderId ?? null, width: w, height: h, padding: 0.05, grid: { type: e.gridType ?? 0, size: e.gridSize ?? 100 }, navigation: false, flags: { world: { [FLAG]: e.key } } }
     if (!src) return base
     const thumb = /\.(webp|png|jpe?g|gif|svg|avif)$/i.test(src) ? src : null // videos can be backgrounds, not thumbnails
@@ -13936,7 +13937,8 @@ async function runV6Importer (opts = {}) {
       description: `<p>${data.name}: ${counts}.</p><p>Import everything or pick parts. Re-importing replaces what came from this Adventure and keeps everything else.</p>`,
       folders, items, actors, journal, scenes, flags: { world: { [FLAG]: data.slug } }
     }
-    const old = pack ? (await pack.getDocuments()).find((a) => a.getFlag('world', FLAG) === data.slug) : null
+    if (rows && pack && !advCache) advCache = await pack.getDocuments() // one read for the whole comparison
+    const old = pack ? (rows ? advCache : await pack.getDocuments()).find((a) => a.getFlag('world', FLAG) === data.slug) : null
     if (rows) {
       const have = old ? old.toObject() : null
       const by = (list) => new Map((list ?? []).map((d) => [d._id, d]))
