@@ -7456,6 +7456,7 @@ function a2sScan (element, entry) {
   for (const art of pages) {
     const page = entry?.pages?.get?.(art.dataset.pageId)
     if (!page || (page.type && page.type !== 'text')) continue
+    if (art.tagName === 'LI' || art.closest?.('nav, aside, .sidebar, .toc, ol.directory-list')) continue // the table of contents, not a page
     const body = art.querySelector('.journal-page-content') ?? art.querySelector('section') ?? art
     if (body.querySelector?.('prose-mirror, .editor.prosemirror, .editor-container')) continue // being edited
     if (styled) {
@@ -8688,7 +8689,9 @@ const a2cState = { lib: null, hooked: false }
 async function a2cLibrary () {
   if (a2cState.lib) return a2cState.lib
   const lib = { clan: new Map(), lifepath: new Map(), merit: new Map(), flaw: new Map(), clanTrait: new Map(), discipline: new Map(), nature: new Map() }
-  const add = (i) => { const m = lib[i.type]; if (m && !m.has(i.name)) m.set(i.name, i) }
+  // superseded material kept for reference (the "Alpha 1 (archive)" folder) is not offered
+  const archived = (i) => { for (let f = i.folder, n = 0; f && n < 6; f = f.folder, n++) if (/archive/i.test(f.name ?? '')) return true; return false }
+  const add = (i) => { const m = lib[i.type]; if (m && !m.has(i.name) && !archived(i)) m.set(i.name, i) }
   for (const i of game.items ?? []) add(i)
   if (!lib.clan.size || !lib.lifepath.size || !lib.discipline.size) {
     for (const pack of game.packs ?? []) {
@@ -8703,8 +8706,15 @@ async function a2cLibrary () {
 // ---- the window ----
 function a2cLabel (cfg, k) { return typeof a2TraitLabel === 'function' ? a2TraitLabel(cfg, k) : k }
 function a2cNum (name, value, min, max, extra = '') { return `<input type="number" name="${name}" value="${value}" min="${min}" max="${max}" step="1" class="a2c-num" ${extra}>` }
+// A short tag saying where an item comes from: its folder, without the type prefix.
+function a2cGroup (i) {
+  const f = String(i.folder?.name ?? '')
+  if (i.type === 'discipline') return /^Ported/i.test(f) ? 'ported' : /^Elder/i.test(f) ? 'elder' : /Ritual|Ceremon/i.test(f) ? 'ritual' : ''
+  if (i.type === 'clanTrait') return ''
+  return f.replace(/^(?:Merits|Flaws)\s*[—-]\s*/i, '').replace(/^General$/i, '')
+}
 function a2cItemList (kind, items, attrs = () => '') {
-  return `<input type="search" class="a2c-filter" data-list="${kind}" placeholder="Filter…"><div class="a2c-list" data-kind="${kind}">${items.map((i) => `<label class="a2c-item" ${attrs(i)} data-name="${a2Esc(i.name.toLowerCase())}" title="${a2Esc(String(i.system?.description ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 420))}"><input type="checkbox" name="${kind}" value="${a2Esc(i.name)}"> ${a2Esc(i.name)} <small>${a2Esc(i.flags?.world?.a2?.clan ?? i.system?.source?.book ?? '')}</small></label>`).join('')}</div>`
+  return `<input type="search" class="a2c-filter" data-list="${kind}" placeholder="Filter…"><div class="a2c-list" data-kind="${kind}">${items.map((i) => `<label class="a2c-item" ${attrs(i)} data-name="${a2Esc(i.name.toLowerCase())}" title="${a2Esc(String(i.system?.description ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 420))}"><input type="checkbox" name="${kind}" value="${a2Esc(i.name)}"> ${a2Esc(i.name)} <small>${a2Esc(a2cGroup(i))}</small></label>`).join('')}</div>`
 }
 function a2cContent (actor, lib) {
   const byName = (m) => [...m.values()].sort((a, b) => a.name.localeCompare(b.name))
@@ -8727,8 +8737,8 @@ function a2cContent (actor, lib) {
       <label>Embraced (year) <input type="number" name="embraced" step="1" placeholder="2019"></label>
       <label>Apparent age <input type="number" name="apparentAge" min="0" step="1" placeholder="31"></label>
       <label title="The decade you still feel at home in (PG p.56-59).">Nostalgic decade <input type="text" name="decade" placeholder="1990s"></label>
-      <label><span data-a2c="sire-word">Sire</span>'s name <input type="text" name="sireName"></label>
-      <label title="The kind of sire gives 1 dot in one of three Disciplines (PG p.26)."><span data-a2c="sire-word2">Sire</span> was <select name="sireType">${Object.keys(A2C_SIRES).map((s) => `<option value="${s}" ${s === 'Unknown' ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+      <label><span><span data-a2c="sire-word">Sire</span>'s name</span> <input type="text" name="sireName"></label>
+      <label title="The kind of sire gives 1 dot in one of three Disciplines (PG p.26)."><span><span data-a2c="sire-word2">Sire</span> was</span> <select name="sireType">${Object.keys(A2C_SIRES).map((s) => `<option value="${s}" ${s === 'Unknown' ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
     <p class="a2c-frame" data-a2c="frame"></p>
   </section>
@@ -8761,13 +8771,13 @@ function a2cContent (actor, lib) {
     </div>
     <h4>Powers <span data-a2c="power-count"></span></h4>
     <p class="a2c-hint">Only powers whose rank your dots reach are listed (PG p.44).</p>
-    ${a2cItemList('power', powers, (i) => `data-disc="${a2Esc(i.system.disciplineType)}" data-level="${a2Int(i.system.level)}"`).replace(/<small>[^<]*<\/small>/g, '')}
+    ${a2cItemList('power', powers, (i) => `data-disc="${a2Esc(i.system.disciplineType)}" data-level="${a2Int(i.system.level)}"`)}
   </section>
   <section data-step="7" hidden>
     <h4>Clan traits <span data-a2c="trait-count"></span> <label class="a2c-inline"><input type="checkbox" name="otherClans"> show other clans</label></h4>
     ${a2cItemList('trait', byName(lib.clanTrait), (i) => `data-clan="${a2Esc(i.flags?.world?.a2?.clan ?? '')}" data-tier="${a2Esc(i.system?.prerequisites?.generationTier ?? '')}"`)}
-    <h4>Merits <span data-a2c="merit-count"></span></h4>
-    ${a2cItemList('merit', byName(lib.merit), (i) => `data-tier="${a2Esc(i.system?.prerequisites?.generationTier ?? '')}"`)}
+    <h4>Merits <span data-a2c="merit-count"></span> <label class="a2c-inline"><input type="checkbox" name="otherMerits"> show loresheets and Path advantages</label></h4>
+    ${a2cItemList('merit', byName(lib.merit), (i) => `data-tier="${a2Esc(i.system?.prerequisites?.generationTier ?? '')}" data-special="${/loresheet|path advantage/i.test(i.folder?.name ?? '') ? '1' : ''}"`)}
     <h4>Flaws <span data-a2c="flaw-count"></span></h4>
     ${a2cItemList('flaw', byName(lib.flaw))}
     <label>Your own flaw <input type="text" name="ownFlaw" placeholder="Name of a free-form flaw (−2 when it complicates things)"></label>
@@ -8889,7 +8899,8 @@ function a2cUpdate (root, lib, ui2) {
   })
   const other = root.querySelector('[name="otherClans"]')?.checked
   root.querySelectorAll('.a2c-list[data-kind="trait"] .a2c-item').forEach((row) => { row.dataset.off = (other || row.dataset.clan === state.clan) && a2cTierAllows(row.dataset.tier, f.key) ? '' : '1' })
-  root.querySelectorAll('.a2c-list[data-kind="merit"] .a2c-item').forEach((row) => { row.dataset.off = a2cTierAllows(row.dataset.tier, f.key) ? '' : '1' })
+  const otherMerits = root.querySelector('[name="otherMerits"]')?.checked
+  root.querySelectorAll('.a2c-list[data-kind="merit"] .a2c-item').forEach((row) => { row.dataset.off = a2cTierAllows(row.dataset.tier, f.key) && (otherMerits || row.dataset.special !== '1' || row.querySelector('input')?.checked) ? '' : '1' })
   const s2 = a2cRead(root, lib)
   set('power-count', `${s2.powers.length} of ${b.powers}`)
   set('trait-count', `${s2.traits.length} of ${b.traits}`)
@@ -8951,6 +8962,18 @@ function a2cBuild (state, lib) {
   const clean = (text) => String(text).replace(/^(?:Physical|Social) Asset\s*\(([^]*)\)\s*$/i, '$1').trim()
   for (const l of state.lifepaths) (l.resourceNames ?? []).forEach((r, j) => { if (a2Int(l.resources[j]) > 0) items.push({ name: clean(r), type: 'resource', img: 'icons/svg/coins.svg', system: { description: `<p>From the ${a2Esc(l.name)} lifepath.</p>`, dots: { value: a2Int(l.resources[j]), max: 5 }, resourceType: kind(r) } }) })
   for (const r of state.resourcesExtra) items.push({ name: r.name || 'Resource', type: 'resource', img: 'icons/svg/coins.svg', system: { description: '', dots: { value: r.dots, max: 5 }, resourceType: r.type || 'physicalAssets' } })
+  // the same Resource from two sources is one Resource with the dots added (5 at most)
+  const seenRes = new Map()
+  for (let i = items.length - 1; i >= 0; i--) if (items[i].type === 'resource') seenRes.set(`${items[i].name.toLowerCase()}|${items[i].system.resourceType}`, null)
+  const merged = []
+  for (const it of items) {
+    if (it.type !== 'resource') { merged.push(it); continue }
+    const key = `${it.name.toLowerCase()}|${it.system.resourceType}`
+    const first = seenRes.get(key)
+    if (first) { first.system.dots.value = Math.min(5, first.system.dots.value + it.system.dots.value); if (!/lifepath/.test(it.system.description)) continue; first.system.description += it.system.description } else { seenRes.set(key, it); merged.push(it) }
+  }
+  items.length = 0
+  items.push(...merged)
   return { update, items, removeTypes: ['clan', 'lifepath', 'discipline', 'clanTrait', 'merit', 'flaw', 'resource', 'nature'] }
 }
 
