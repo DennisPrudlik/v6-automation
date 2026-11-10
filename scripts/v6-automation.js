@@ -1791,7 +1791,8 @@ async function a2Boot () {
       ['character creation', globalThis.a2CreateBoot ?? (typeof a2CreateBoot === 'function' ? a2CreateBoot : null)],
       ['states', globalThis.a2StatesBoot ?? (typeof a2StatesBoot === 'function' ? a2StatesBoot : null)],
       ['moves', globalThis.a2MovesBoot ?? (typeof a2MovesBoot === 'function' ? a2MovesBoot : null)],
-      ['theme', globalThis.a2ThemeBoot ?? (typeof a2ThemeBoot === 'function' ? a2ThemeBoot : null)]]) {
+      ['theme', globalThis.a2ThemeBoot ?? (typeof a2ThemeBoot === 'function' ? a2ThemeBoot : null)],
+      ['story', globalThis.a2StoryBoot ?? (typeof a2StoryBoot === 'function' ? a2StoryBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -9283,6 +9284,9 @@ function a2zMods (actor, t) {
     foe: a2zSide(foeActor),
     roll: { attributes, skills, attack, defence, vsRanged: Boolean(fresh && hint.vsRanged), contested: Boolean(foeActor) || Boolean(ctx.target), selfUuid: actor.uuid, foeUuid: foeActor?.uuid ?? null }
   })
+  // a Blood Bond between the two (alpha2-story)
+  const bond = typeof a2yBondMods === 'function' ? a2yBondMods(actor, foeActor, { attributes, skills, disciplines: (t?.disciplines ?? []).map(key), attack, contested: Boolean(foeActor) }) : null // eslint-disable-line no-undef
+  if (bond) { res.dice += bond.dice; res.notes.push(bond.note) }
   a2zState.last.set(actor.uuid, { at: Date.now(), used: res.used.map((u) => ({ uuid: u.who === 'self' ? actor.uuid : foeActor?.uuid, id: u.id })).filter((u) => u.uuid) })
   return res.dice || res.notes.length ? res : null
 }
@@ -9734,7 +9738,10 @@ async function a2vResolve (attack, defender) {
     if (out.damage) await a2xApplyDamage([defender], { amount: out.damage, margin: 0, source: def.move.label, attackerUuid: attacker?.uuid ?? null, bodyAttack: true, messageId: attack.id, rollIndex: r.index })
     if (out.vitae && attacker) {
       await attacker.update({ 'system.health.value': Math.min(a2Int(vit.max), a2Int(vit.value) + out.vitae) })
-      if (a2Creature(defender) === 'vampire') await defender.update({ 'system.health.value': Math.max(0, a2Int(defender.system.health.value) - out.vitae) })
+      if (a2Creature(defender) === 'vampire') {
+        await defender.update({ 'system.health.value': Math.max(0, a2Int(defender.system.health.value) - out.vitae) })
+        if (typeof a2yDrink === 'function') await a2yDrink(attacker, defender) // eslint-disable-line no-undef
+      }
     }
     if (effect.kind === 'coordinate' && win && attacker) {
       const mine = game.combat?.started ? game.combat.combatants.filter((c) => c.actor && c.actor.uuid !== attacker.uuid && c.token?.disposition === game.combat.combatants.find((x) => x.actor?.uuid === attacker.uuid)?.token?.disposition).map((c) => c.actor) : []
@@ -9780,17 +9787,19 @@ const A2V_HELP = [
   ['/states', 'set or clear states on the selected token'],
   ['/feed, /surge, /frenzy [fear|rage|hunger], /xp', 'the matching tool for the selected token'],
   ['/night, /scene, /award, /masquerade', 'Storyteller: New Night, End Scene, Award XP, Masquerade Tracker'],
-  ['/create', 'character creation for the selected or assigned character']
+  ['/create', 'character creation for the selected or assigned character'],
+  ['/social, /task', 'Storyteller: start a social conflict or a prolonged task'],
+  ['/bonds, /downtime', 'Blood Bonds and downtime actions for the selected token (/v6 downtime reset: Storyteller)']
 ]
 function a2vCommand (text) {
   const m = String(text ?? '').trim().match(/^\/(v6\s+)?([a-z]+)\b\s*(.*)$/i)
   if (!m) return null
   const cmd = m[2].toLowerCase()
   const arg = m[3].trim()
-  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help']
+  const known = ['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'xp', 'night', 'scene', 'award', 'masquerade', 'create', 'help', 'social', 'task', 'bonds', 'downtime']
   if (!known.includes(cmd)) return null
   // without the "/v6" prefix only the unambiguous ones are ours
-  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade'].includes(cmd)) return null
+  if (!m[1] && !['test', 'req', 'act', 'states', 'feed', 'surge', 'frenzy', 'night', 'masquerade', 'social', 'task', 'bonds', 'downtime'].includes(cmd)) return null
   return { cmd, arg }
 }
 function a2vChat (text) {
@@ -9816,6 +9825,10 @@ function a2vChat (text) {
       case 'award': if (gm()) A.tools?.awardXP?.(); break
       case 'masquerade': if (gm()) A.tools?.masquerade?.(); break
       case 'create': A.create?.(actor); break
+      case 'social': if (gm()) A.story?.social?.(); break
+      case 'task': if (gm()) A.story?.task?.(); break
+      case 'bonds': A.story?.bonds?.(actor); break
+      case 'downtime': if (c.arg.toLowerCase() === 'reset') { if (gm()) A.story?.downtimeReset?.() } else A.story?.downtime?.(actor); break
     }
   } catch (e) { console.error('V6 Automation | chat command', e) }
   return false
@@ -9886,6 +9899,523 @@ async function a2ThemeBoot () {
   return true
 }
 globalThis.a2ThemeBoot ??= a2ThemeBoot
+
+// ---- beyond the fight: social conflict, prolonged tasks, Blood Bonds, downtime, complications
+// Social conflict (PG p.121-124): the Storyteller names two sides, their goals and 3, 5
+//   or 7 rounds. Each round is a card: anyone speaks for a side by picking an approach
+//   (the pool is set for them), the card adds up each side's successes, the Storyteller
+//   closes the round, and after the last one the outcome is named for both sides.
+// Prolonged task (PG p.112): a success target (3/5/7/10) and a test limit (3/5/7) on a
+//   card with a progress bar. Successes add up; a painful or bestial failure ends it.
+// Blood Bonds (PG p.135-136): each drink of a vampire's Vitae is logged on the drinker.
+//   Three drinks on different nights inside the donor's interval make stages 1 to 3; a
+//   gap longer than the interval drops a stage at New Night. The stage comes off the
+//   thrall's rolls against the master and is added to the master's Social rolls and
+//   Dominate/Presence against the thrall. Feed attacks and the Bonds window log drinks.
+// Downtime (PG p.112-113): 2 actions between stories; the Resource ones move the dots.
+// Complications (PG p.97): a painful failure's card gets a Complication button with the
+//   four kinds; Expose Vulnerability and Suffer Harm are applied.
+//
+// Settings (world): story (on). Data: world setting social; flags.world.a2task on a task
+// card; flags.world.a2.bonds on the thrall; flags.world.a2.downtime on a character.
+
+const A2Y_APPROACHES = [
+  { id: 'blather', label: 'Blather', pools: [['wits', 'subterfuge']] },
+  { id: 'contradict', label: 'Contradict', pools: [['wits', 'subterfuge']] },
+  { id: 'deceive', label: 'Deceive', pools: [['manipulation', 'subterfuge']] },
+  { id: 'deflect', label: 'Deflect', pools: [['wits', 'knowledge'], ['wits', 'persuasion']] },
+  { id: 'deny', label: 'Deny', pools: [['manipulation', 'persuasion']] },
+  { id: 'factcheck', label: 'Fact check', pools: [['intelligence', 'knowledge']] },
+  { id: 'gossip', label: 'Gossip', pools: [['manipulation', 'investigation']] },
+  { id: 'intimidate', label: 'Intimidate', pools: [['strength', 'persuasion'], ['charisma', 'persuasion'], ['intelligence', 'persuasion']], note: 'A failure can escalate to a fight.' },
+  { id: 'justify', label: 'Justify', pools: [['intelligence', 'investigation']] },
+  { id: 'keepcool', label: 'Keep cool', pools: [['composure', 'expression'], ['composure', 'persuasion']] },
+  { id: 'seduce', label: 'Seduce', pools: [['charisma', 'persuasion']] }
+]
+const A2Y_INTERVAL = { duskborn: 30, neonate: 30, ancilla: 180, elder: 365, methuselah: 36500 } // nights (PG p.135)
+const A2Y_DOWNTIME = [
+  { id: 'info', label: 'Acquire information', text: 'One piece of sensitive information; it may become a Story Asset.' },
+  { id: 'acquire', label: 'Acquire Resources', text: '+1 dot in a Resource, or a new Resource at 1 dot.', res: 'gain' },
+  { id: 'ritual', label: 'Perform a ritual', text: 'A negotiated ritual effect (needs the right Disciplines).' },
+  { id: 'reallocate', label: 'Reallocate Resources', text: 'Move up to 3 dots between Resources you have.', res: 'move' },
+  { id: 'recover', label: 'Recover Resources', text: 'Restore up to 2 spent dots in one Resource, or 1 in each of two.', res: 'recover' },
+  { id: 'masquerade', label: 'Repair the Masquerade', text: 'Spend 3 dots of one Resource (4 if from several) to lower the Masquerade Tracker by 1.', res: 'spend' },
+  { id: 'project', label: 'Work on a project', text: 'Story progress; long projects take several actions.' }
+]
+const A2Y_COMPLICATIONS = [
+  { id: 'lose', label: 'Damage or lose something valuable', icon: 'fa-heart-crack' },
+  { id: 'attention', label: 'Draw attention', icon: 'fa-eye' },
+  { id: 'expose', label: 'Expose vulnerability', icon: 'fa-crosshairs' },
+  { id: 'harm', label: 'Suffer harm', icon: 'fa-droplet' }
+]
+
+// ---- pure rules ----
+// Who took the round. totals: [a, b]. Ties go to the initiator (side 0) unless told otherwise. Pure.
+function a2yRoundWinner (totals, tieTo = 0) { const [a, b] = [a2Int(totals?.[0]), a2Int(totals?.[1])]; return a > b ? 0 : b > a ? 1 : tieTo }
+// The outcome for a side that won `wins` of `rounds` (PG p.123). Pure.
+function a2ySocialOutcome (wins, rounds) {
+  const w = a2Int(wins); const r = Math.max(1, a2Int(rounds))
+  if (w >= r) return { key: 'total', label: 'Total success', text: 'You get everything you wanted.' }
+  if (w * 2 > r) return { key: 'partial', label: 'Partial success', text: 'You get much of it, with a cost or a condition.' }
+  if (w > 0) return { key: 'partialDefeat', label: 'Partial defeat', text: 'You lose, with some mitigation.' }
+  return { key: 'defeat', label: 'Total defeat', text: 'A serious setback: humiliation, lost standing, 1 Willpower, Social Asset dots or the like. It never dictates what your character feels.' }
+}
+// Where a prolonged task stands. rolls: [{ successes, ended }]. Pure.
+function a2yTaskState ({ target = 5, limit = 5, rolls = [] } = {}) {
+  const total = rolls.reduce((t, r) => t + Math.max(0, a2Int(r.successes)), 0)
+  const used = rolls.length
+  const broken = rolls.some((r) => r.ended)
+  const state = broken ? 'ended' : total >= a2Int(target) ? 'done' : used >= a2Int(limit) ? 'failed' : 'open'
+  return { total, used, left: Math.max(0, a2Int(limit) - used), need: Math.max(0, a2Int(target) - total), state }
+}
+// A drink of Vitae on a night. bond: { stage, drinks: [nights], last } → the bond after it. Pure.
+//  interval in nights; ghoul: any drink gives at least stage 1; other3: another bond is already at stage 3.
+function a2yBondDrink (bond, { night = 1, interval = 30, ghoul = false, other3 = false } = {}) {
+  let b = a2yBondDecay(bond ?? { stage: 0, drinks: [], last: null }, night, interval)
+  const drinks = [...(b.drinks ?? [])]
+  const sameNight = drinks.includes(night)
+  if (!sameNight) drinks.push(night)
+  let stage = sameNight ? a2Int(b.stage) : Math.min(3, a2Int(b.stage) + 1)
+  if (ghoul) stage = Math.max(1, stage)
+  let note = sameNight ? 'A second drink in the same night doesn\'t deepen the bond.' : ''
+  if (stage === 3 && other3) { stage = 2; note = 'Stage 3 is possible with only one vampire at a time: it stays at 2.' }
+  return { ...b, stage, drinks: drinks.slice(-3), last: night, note }
+}
+// A gap longer than the interval drops a stage, once per interval missed (PG p.136). Pure.
+function a2yBondDecay (bond, night, interval = 30) {
+  const b = { stage: a2Int(bond?.stage), drinks: [...(bond?.drinks ?? [])], last: bond?.last ?? null }
+  if (b.last === null || b.last === undefined || b.stage <= 0) return b
+  const gaps = Math.floor(Math.max(0, a2Int(night) - a2Int(b.last) - 1) / Math.max(1, a2Int(interval)))
+  if (gaps > 0) { b.stage = Math.max(0, b.stage - gaps); b.last = a2Int(b.last) + gaps * Math.max(1, a2Int(interval)); if (b.stage === 0) b.drinks = [] }
+  return b
+}
+// Dice from a bond on one roll. Pure. role: 'thrall' (rolling against the master) | 'master' (rolling on the thrall).
+function a2yBondDice (stage, role, { social = false, contested = false, attack = false } = {}) {
+  const s = a2Clamp(a2Int(stage), 0, 3)
+  if (!s) return 0
+  if (role === 'thrall') return contested || attack ? -s : 0
+  return social ? s : 0
+}
+
+const a2yState = { hooked: false, pending: new Map(), seen: new Set() }
+function a2yOn () { return a2Enabled() && a2eGet('story', true) !== false }
+function a2yActor () { return globalThis.canvas?.tokens?.controlled?.[0]?.actor ?? game.user.character ?? null }
+function a2yEff (actor, kind, key) { const v = actor?.system?.[kind]?.[key]; return a2Int(v?.effective ?? v?.value) }
+function a2yBestPool (actor, pools) { return [...pools].sort((x, y) => (a2yEff(actor, 'attributes', y[0]) + a2yEff(actor, 'skills', y[1])) - (a2yEff(actor, 'attributes', x[0]) + a2yEff(actor, 'skills', x[1])))[0] }
+function a2yNight () { try { return a2Int(a2tClock().night, 1) } catch (e) { return 1 } }
+function a2yTier (actor) { try { return a2Creature(actor) === 'vampire' ? a2cTierKey('vampire', actor.system?.vampire?.generation?.value) : 'neonate' } catch (e) { return 'neonate' } }
+
+// ---- social conflict ----
+function a2ySocial () { const s = a2eGet('social', null); return s && s.id ? s : null }
+async function a2ySocialSave (s) { return game.settings.set(a2eNs(), a2eKey('social'), s) }
+async function a2ySocialStart () {
+  if (!game.user.isGM) { ui.notifications.warn('The Storyteller starts a social conflict.'); return null }
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: 'Social conflict' },
+    position: { width: 520 },
+    content: `<div class="a2y-dialog"><p class="a2y-hint">For high-stakes debates only: standing, reputation or judgment on the line (PG p.121).</p>
+      <div class="form-group"><label>What is argued</label><input type="text" name="title" placeholder="Before the Sheriff: who answers for the breach?"></div>
+      <fieldset><legend>Side A (speaks first; wins ties)</legend><div class="form-group"><label>Who</label><input type="text" name="a" value="The coterie"></div><div class="form-group"><label>Goal</label><input type="text" name="ag"></div></fieldset>
+      <fieldset><legend>Side B</legend><div class="form-group"><label>Who</label><input type="text" name="b" value="The opposition"></div><div class="form-group"><label>Goal</label><input type="text" name="bg"></div></fieldset>
+      <div class="form-group"><label>Rounds</label><select name="rounds"><option value="3">3: quick, one scene</option><option value="5">5: a complex debate</option><option value="7">7: large or formal (Elysium, Conclave)</option></select></div></div>`,
+    ok: { label: 'Begin', callback: (ev, button) => { const f = button.form.elements; return { title: f.title.value.trim() || 'Social conflict', sides: [{ name: f.a.value.trim() || 'Side A', goal: f.ag.value.trim() }, { name: f.b.value.trim() || 'Side B', goal: f.bg.value.trim() }], rounds: a2Int(f.rounds.value, 3) } } },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return null
+  const s = { id: foundry.utils.randomID(8), ...res, round: 1, log: [], done: false }
+  await a2ySocialSave(s)
+  await a2ySocialCard(s)
+  return s
+}
+async function a2ySocialCard (s) {
+  return ChatMessage.create({ content: `<div class="a2y-social" data-id="${s.id}" data-round="${s.round}"><h4>${a2Esc(s.title)}</h4></div>`, speaker: { alias: 'Storyteller' }, flags: { world: { a2soc: { id: s.id, round: s.round } } } })
+}
+function a2ySocialTotals (s, round) { const out = [0, 0]; for (const r of s.log.filter((x) => x.round === round)) out[r.side] += a2Int(r.successes); return out }
+async function a2ySocialSpeak (side, approachId, cardRound) {
+  const s = a2ySocial()
+  const actor = a2yActor()
+  if (!s || s.done || s.round !== cardRound) { ui.notifications.info('That round is over.'); return null }
+  if (!actor) { ui.notifications.warn('Select the token that speaks.'); return null }
+  const ap = A2Y_APPROACHES.find((x) => x.id === approachId) ?? A2Y_APPROACHES[0]
+  const pool = a2yBestPool(actor, ap.pools)
+  a2yState.pending.set(actor.uuid, { kind: 'social', id: s.id, round: s.round, side, approach: ap.label, at: Date.now() })
+  return a2eOpenRoll(actor, { attributes: [pool[0]], skills: [pool[1]], disciplines: [] })
+}
+async function a2ySocialClose () {
+  const s = a2ySocial()
+  if (!s || s.done || !game.user.isGM) return null
+  const totals = a2ySocialTotals(s, s.round)
+  let tieTo = 0
+  if (totals[0] === totals[1]) {
+    const pick = await foundry.applications.api.DialogV2.wait({ window: { title: 'A tie' }, content: `<p>Both sides have ${totals[0]}. Ties go to the higher Attribute or to the initiator, at your choice (PG p.122).</p>`, buttons: [{ action: '0', label: a2Esc(s.sides[0].name) }, { action: '1', label: a2Esc(s.sides[1].name) }], rejectClose: false }).catch(() => null)
+    if (pick === null || pick === undefined) return null
+    tieTo = a2Int(pick)
+  }
+  const winner = a2yRoundWinner(totals, tieTo)
+  s.wins = [...(s.wins ?? []), winner]
+  if (s.round >= s.rounds) {
+    s.done = true
+    await a2ySocialSave(s)
+    const w = [s.wins.filter((x) => x === 0).length, s.wins.filter((x) => x === 1).length]
+    const o = [a2ySocialOutcome(w[0], s.rounds), a2ySocialOutcome(w[1], s.rounds)]
+    const losers = o.map((x, i) => (x.key === 'defeat' ? [...new Set(s.log.filter((r) => r.side === i).map((r) => r.uuid))] : []))
+    await ChatMessage.create({ content: `<div class="a2y-outcome"><h4>${a2Esc(s.title)}: decided</h4>${[0, 1].map((i) => `<p><strong>${a2Esc(s.sides[i].name)}</strong> won ${w[i]} of ${s.rounds}: <em>${o[i].label}</em>. ${a2Esc(o[i].text)}${s.sides[i].goal ? ` <small>Goal: ${a2Esc(s.sides[i].goal)}</small>` : ''}</p>`).join('')}</div>`, speaker: { alias: 'Storyteller' }, flags: { world: { a2socEnd: { losers: losers.flat() } } } })
+  } else {
+    s.round += 1
+    await a2ySocialSave(s)
+    await a2ySocialCard(s)
+  }
+  return s
+}
+function a2ySocialRender (message, root) {
+  const f = message.flags?.world?.a2soc
+  const box = root.querySelector('.a2y-social')
+  if (!f || !box || box.querySelector('.a2y-sides')) return
+  const s = a2ySocial()
+  if (!s || s.id !== f.id) { box.insertAdjacentHTML('beforeend', '<p class="a2y-dim">This conflict is over.</p>'); return }
+  const live = !s.done && s.round === f.round
+  const totals = a2ySocialTotals(s, f.round)
+  const won = s.wins?.[f.round - 1]
+  const wrap = document.createElement('div')
+  wrap.className = 'a2y-sides'
+  wrap.innerHTML = `<p class="a2y-round">Round ${f.round} of ${s.rounds}${won !== undefined ? `: <strong>${a2Esc(s.sides[won].name)}</strong> takes it` : ''}</p>` + [0, 1].map((i) => {
+    const rolls = s.log.filter((r) => r.round === f.round && r.side === i)
+    return `<div class="a2y-side ${won === i ? 'won' : ''}"><div class="a2y-side-head"><strong>${a2Esc(s.sides[i].name)}</strong><span class="a2y-total">${totals[i]}</span></div>${s.sides[i].goal ? `<small>${a2Esc(s.sides[i].goal)}</small>` : ''}${rolls.map((r) => `<div class="a2y-roll">${a2Esc(r.name)}: ${a2Esc(r.approach)}, ${r.successes}</div>`).join('')}${live ? `<div class="a2y-speak"><select data-side="${i}">${A2Y_APPROACHES.map((a) => `<option value="${a.id}">${a.label}</option>`).join('')}</select><button type="button" data-speak="${i}"><i class="fa-solid fa-comment"></i> Speak</button></div>` : ''}</div>`
+  }).join('') + (live && game.user.isGM ? `<button type="button" data-close="1" ${totals[0] + totals[1] === 0 && !s.log.some((r) => r.round === f.round) ? 'disabled' : ''}><i class="fa-solid fa-gavel"></i> Close the round</button>` : '')
+  wrap.querySelectorAll('button[data-speak]').forEach((b) => b.addEventListener('click', (ev) => { ev.preventDefault(); const i = a2Int(b.dataset.speak); a2ySocialSpeak(i, wrap.querySelector(`select[data-side="${i}"]`).value, f.round) }))
+  wrap.querySelector('button[data-close]')?.addEventListener('click', (ev) => { ev.preventDefault(); a2ySocialClose() })
+  box.append(wrap)
+}
+
+// ---- prolonged tasks ----
+async function a2yTaskStart (preset = {}) {
+  if (!game.user.isGM) { ui.notifications.warn('The Storyteller sets up a prolonged task.'); return null }
+  const attrs = typeof A2L_ATTRS !== 'undefined' ? A2L_ATTRS : []
+  const skills = typeof A2L_SKILLS !== 'undefined' ? A2L_SKILLS : []
+  const opt = (list, cfg, cur) => list.map((k) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${a2Esc(a2TraitLabel(cfg, k))}</option>`).join('')
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: 'Prolonged task' },
+    position: { width: 480 },
+    content: `<div class="a2y-dialog"><div class="form-group"><label>The task</label><input type="text" name="title" placeholder="Crack the ledger's cipher" value="${a2Esc(preset.title ?? '')}"></div>
+      <div class="form-group"><label>Pool</label><select name="attr">${opt(attrs, 'Attributes', preset.test?.attributes?.[0] ?? 'intelligence')}</select><span>+</span><select name="skill">${opt(skills, 'Skills', preset.test?.skills?.[0] ?? 'investigation')}</select></div>
+      <div class="form-group"><label>Successes needed</label><select name="target"><option value="3">3: mildly complex</option><option value="5" selected>5: relatively complex</option><option value="7">7: very complex</option><option value="10">10: extremely complex</option></select></div>
+      <div class="form-group"><label>Tests allowed</label><select name="limit"><option value="3">3: heavy pressure</option><option value="5" selected>5: urgent</option><option value="7">7: time is limited, pressure low</option></select></div>
+      <p class="a2y-hint">Successes add up. A painful or bestial failure ends the task at once (PG p.112).</p></div>`,
+    ok: { label: 'Start', callback: (ev, button) => { const f = button.form.elements; return { title: f.title.value.trim() || 'Prolonged task', test: { attributes: [f.attr.value], skills: [f.skill.value], disciplines: [] }, target: a2Int(f.target.value, 5), limit: a2Int(f.limit.value, 5) } } },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return null
+  return ChatMessage.create({ content: `<div class="a2y-task"><h4>${a2Esc(res.title)}</h4></div>`, speaker: { alias: 'Storyteller' }, flags: { world: { a2task: { v: 1, ...res, rolls: [] } } } })
+}
+function a2yTaskRender (message, root) {
+  const t = message.flags?.world?.a2task
+  const box = root.querySelector('.a2y-task')
+  if (!t || !box || box.querySelector('.a2y-bar')) return
+  const st = a2yTaskState(t)
+  const pct = Math.min(100, Math.round((st.total / Math.max(1, t.target)) * 100))
+  const label = { open: `${st.need} more needed, ${st.left} ${st.left === 1 ? 'test' : 'tests'} left`, done: 'Done.', failed: 'Out of tests: the task fails. The Storyteller decides whether the progress is kept.', ended: 'A painful or bestial failure ends the task.' }[st.state]
+  const pool = [...(t.test.attributes ?? []).map((k) => a2TraitLabel('Attributes', k)), ...(t.test.skills ?? []).map((k) => a2TraitLabel('Skills', k))].join(' + ')
+  box.insertAdjacentHTML('beforeend', `<p class="a2y-dim">${a2Esc(pool)} · ${t.target} successes within ${t.limit} tests</p><div class="a2y-bar ${st.state}"><div style="width:${pct}%"></div><span>${st.total} / ${t.target}</span></div>${t.rolls.map((r, i) => `<div class="a2y-roll">${i + 1}. ${a2Esc(r.name)}: ${r.successes}${r.ended ? ' (ends the task)' : ''}</div>`).join('')}<p class="a2y-state">${label}</p>`)
+  if (st.state === 'open') {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.innerHTML = '<i class="fa-solid fa-dice-d10"></i> Work on it'
+    b.addEventListener('click', (ev) => {
+      ev.preventDefault()
+      const actor = a2yActor()
+      if (!actor) { ui.notifications.warn('Select the token that works on it.'); return }
+      a2yState.pending.set(actor.uuid, { kind: 'task', id: message.id, at: Date.now() })
+      a2eOpenRoll(actor, { attributes: [...t.test.attributes], skills: [...t.test.skills], disciplines: [] })
+    })
+    box.append(b)
+  }
+}
+
+// ---- rolls made from those cards ----
+function a2yOnCreate (message, options, userId) {
+  try {
+    if (userId !== game.user.id) return
+    const roll = message.rolls?.find((r) => r?.options?.a2?.built)
+    const actor = roll ? a2xSpeaker(message) : null
+    const p = actor ? a2yState.pending.get(actor.uuid) : null
+    if (!p || Date.now() - p.at > 180000) return
+    a2yState.pending.delete(actor.uuid)
+    message.update({ 'flags.world.a2yOf': { ...p, uuid: actor.uuid, name: actor.name } })
+  } catch (e) { console.error('V6 Automation | story roll', e) }
+}
+async function a2yOnUpdate (message, change) {
+  try {
+    const p = change?.flags?.world?.a2yOf
+    if (!p || !a2xIsGM() || a2yState.seen.has(message.id)) return
+    a2yState.seen.add(message.id)
+    const roll = message.rolls?.find((r) => r?.options?.a2?.built)
+    if (!roll) return
+    const v = a2RollVerdict(roll)
+    const successes = a2Int(v.successes ?? roll.total)
+    if (p.kind === 'social') {
+      const s = a2ySocial()
+      if (!s || s.id !== p.id || s.done || s.round !== p.round) return
+      s.log.push({ round: p.round, side: p.side, uuid: p.uuid, name: p.name, approach: p.approach, successes })
+      await a2ySocialSave(s)
+    } else if (p.kind === 'task') {
+      const card = game.messages.get(p.id)
+      const t = card?.flags?.world?.a2task
+      if (!t || a2yTaskState(t).state !== 'open') return
+      await card.update({ 'flags.world.a2task.rolls': [...t.rolls, { uuid: p.uuid, name: p.name, successes, ended: Boolean(v.painful || v.bestial) }] })
+    }
+  } catch (e) { console.error('V6 Automation | story roll', e) }
+}
+
+// ---- Blood Bonds ----
+function a2yBonds (actor) { const b = actor?.flags?.world?.a2?.bonds; return Array.isArray(b) ? b : [] }
+// thrall drinks from master (an actor, or just a name).
+async function a2yDrink (thrall, master, { night = null, quiet = false } = {}) {
+  if (!thrall || !master) return null
+  const name = typeof master === 'string' ? master : master.name
+  const uuid = typeof master === 'string' ? null : master.uuid
+  const tier = typeof master === 'string' ? 'neonate' : a2yTier(master)
+  // Duskborn blood can't bond Kindred (PG p.135)
+  if (tier === 'duskborn' && a2Creature(thrall) === 'vampire' && a2yTier(thrall) !== 'duskborn') { if (!quiet) ui.notifications.info('Duskborn blood can\'t bond Kindred (PG p.135).'); return null }
+  const list = a2yBonds(thrall).map((b) => ({ ...b }))
+  let bond = list.find((b) => (uuid && b.uuid === uuid) || b.name === name)
+  if (!bond) { bond = { id: foundry.utils.randomID(8), name, uuid, tier, stage: 0, drinks: [], last: null }; list.push(bond) }
+  const n = night ?? a2yNight()
+  const next = a2yBondDrink(bond, { night: n, interval: A2Y_INTERVAL[bond.tier] ?? 30, ghoul: a2Creature(thrall) === 'ghoul', other3: list.some((b) => b !== bond && a2Int(b.stage) >= 3) })
+  const before = a2Int(bond.stage)
+  Object.assign(bond, { stage: next.stage, drinks: next.drinks, last: next.last })
+  await thrall.update({ 'flags.world.a2.bonds': list })
+  if (!quiet) {
+    const names = ['', 'Fascination', 'Devotion', 'Obsession']
+    await ChatMessage.create({ content: `<div class="a2y-bond"><p><strong>${a2Esc(thrall.name)}</strong> drinks from <strong>${a2Esc(name)}</strong>: ${next.stage > before ? `Blood Bond stage ${next.stage}, ${names[next.stage]} (−${next.stage} against the master's will; PG p.136).` : next.stage ? `the bond stays at stage ${next.stage}.` : `drink ${next.drinks.length} of 3 toward a Blood Bond.`}${next.note ? ` ${a2Esc(next.note)}` : ''}</p></div>`, speaker: { alias: 'Storyteller' }, whisper: game.users.filter((u) => u.isGM || thrall.testUserPermission(u, 'OWNER')).map((u) => u.id) })
+  }
+  return bond
+}
+// Dice for the roll dialog (alpha2-states calls this). → { dice, note } or null
+function a2yBondMods (actor, foe, roll) {
+  if (!a2yOn() || !actor || !foe) return null
+  const mine = a2yBonds(actor).find((b) => (b.uuid && b.uuid === foe.uuid) || b.name === foe.name)
+  if (mine?.stage) { const d = a2yBondDice(mine.stage, 'thrall', { contested: roll.contested, attack: Boolean(roll.attack) }); if (d) return { dice: d, note: `Blood Bond to ${foe.name}, stage ${mine.stage}: ${d} acting against the master's will (PG p.136).` } }
+  const theirs = a2yBonds(foe).find((b) => (b.uuid && b.uuid === actor.uuid) || b.name === actor.name)
+  if (theirs?.stage) { const social = (roll.attributes ?? []).some((k) => ['charisma', 'manipulation'].includes(k)) || (roll.disciplines ?? []).some((k) => ['dominate', 'presence'].includes(k)); const d = a2yBondDice(theirs.stage, 'master', { social }); if (d) return { dice: d, note: `${foe.name} is your thrall, stage ${theirs.stage}: +${d} to command or influence it (PG p.136).` } }
+  return null
+}
+async function a2yBondsOpen (actorLike = null) {
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : a2yActor()
+  if (!actor) { ui.notifications.warn('Select a token first.'); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You can't change ${actor.name}.`); return null }
+  const bonds = a2yBonds(actor)
+  const target = [...(game.user?.targets ?? [])].map((t) => t.actor).find((a) => a && a.uuid !== actor.uuid)
+  const names = ['none yet', '1 Fascination', '2 Devotion', '3 Obsession']
+  const rows = bonds.length ? bonds.map((b, i) => `<tr><td>${a2Esc(b.name)}</td><td><select name="stage${i}">${[0, 1, 2, 3].map((s) => `<option value="${s}" ${a2Int(b.stage) === s ? 'selected' : ''}>${names[s]}</option>`).join('')}</select></td><td class="c">${(b.drinks ?? []).length}/3</td><td class="c">${b.last ?? '–'}</td><td class="c"><input type="checkbox" name="drop${i}" title="Remove this bond"></td></tr>`).join('') : '<tr><td colspan="5"><em>No bonds.</em></td></tr>'
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: `Blood Bonds: ${actor.name}` },
+    position: { width: 560 },
+    content: `<div class="a2y-dialog"><table class="a2y-table"><tr><th>Bound to</th><th>Stage</th><th class="c">Drinks</th><th class="c">Last night</th><th class="c">Drop</th></tr>${rows}</table>
+      <fieldset><legend>A drink tonight (night ${a2yNight()})</legend><div class="form-group"><label>From</label><input type="text" name="from" value="${a2Esc(target?.name ?? '')}" placeholder="${target ? '' : 'Target the donor, or type a name'}"></div><p class="a2y-hint">At least 1 Vitae, no more than an hour old. Three drinks on different nights within the donor's interval (a month for a neonate, six for an ancilla, a year for an elder) make stages 1 to 3 (PG p.135).</p></fieldset></div>`,
+    ok: { label: 'Apply', callback: (ev, button) => { const f = button.form.elements; return { from: f.from.value.trim(), stages: bonds.map((b, i) => a2Int(f[`stage${i}`].value)), drop: bonds.map((b, i) => f[`drop${i}`].checked) } } },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return null
+  const list = bonds.map((b, i) => ({ ...b, stage: res.stages[i] })).filter((b, i) => !res.drop[i])
+  if (JSON.stringify(list) !== JSON.stringify(bonds)) await actor.update({ 'flags.world.a2.bonds': list })
+  if (res.from) await a2yDrink(actor, target && target.name === res.from ? target : res.from)
+  return res
+}
+// New Night (alpha2-tools calls this): bonds left alone too long weaken.
+async function a2yNightBonds (actors, night) {
+  const lines = []
+  for (const a of actors ?? []) {
+    const bonds = a2yBonds(a)
+    if (!bonds.length) continue
+    const next = bonds.map((b) => ({ ...b, ...a2yBondDecay(b, night, A2Y_INTERVAL[b.tier] ?? 30) }))
+    next.forEach((b, i) => { if (b.stage < a2Int(bonds[i].stage)) lines.push(`${a.name}'s bond to ${b.name} weakens to ${b.stage ? `stage ${b.stage}` : 'nothing'}.`) })
+    const kept = next.filter((b) => b.stage > 0 || (b.drinks ?? []).length)
+    if (JSON.stringify(kept) !== JSON.stringify(bonds)) { try { await a.update({ 'flags.world.a2.bonds': kept }) } catch (e) { console.error('V6 Automation | bonds at New Night', e) } }
+  }
+  if (lines.length) await ChatMessage.create({ content: `<div class="a2y-bond"><h4>Blood Bonds</h4>${lines.map((l) => `<p>${a2Esc(l)}</p>`).join('')}</div>`, speaker: { alias: 'Storyteller' }, whisper: game.users.filter((u) => u.isGM).map((u) => u.id) })
+  return lines
+}
+
+// ---- downtime ----
+async function a2yDowntime (actorLike = null) {
+  const actor = actorLike?.documentName === 'Actor' ? actorLike : a2yActor()
+  if (!actor) { ui.notifications.warn('Select your token first.'); return null }
+  if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
+  const used = a2Int(actor.flags?.world?.a2?.downtime?.used)
+  const resources = actor.items.filter((i) => i.type === 'resource')
+  const resOpts = resources.map((r) => `<option value="${r.id}">${a2Esc(r.name)} (${a2Int(r.system?.dots?.value)})</option>`).join('')
+  const res = await foundry.applications.api.DialogV2.prompt({
+    window: { title: `Downtime: ${actor.name}` },
+    position: { width: 560 },
+    content: `<div class="a2y-dialog"><p class="a2y-hint">Normally 2 actions between stories; ${used} used so far (PG p.112). The Storyteller resets the count with /v6 downtime reset.</p>
+      ${A2Y_DOWNTIME.map((d, i) => `<label class="a2y-pick"><input type="radio" name="action" value="${d.id}" ${i === 0 ? 'checked' : ''}> <span><strong>${d.label}</strong><br><small>${d.text}</small></span></label>`).join('')}
+      <fieldset><legend>Resources (for the four Resource actions)</legend>
+        <div class="form-group"><label>Resource</label><select name="res"><option value="">a new one</option>${resOpts}</select><input type="text" name="newName" placeholder="Name of the new Resource"></div>
+        <div class="form-group"><label>Dots</label><input type="number" name="dots" value="1" min="1" max="4"><label>Move them to</label><select name="to"><option value="">–</option>${resOpts}</select></div>
+      </fieldset>
+      <div class="form-group"><label>What you do</label><input type="text" name="note" placeholder="Two weeks leaning on the dockers' union"></div></div>`,
+    ok: { label: 'Take the action', callback: (ev, button) => { const f = button.form.elements; return { action: f.action.value, res: f.res.value, newName: f.newName.value.trim(), dots: Math.max(1, a2Int(f.dots.value, 1)), to: f.to.value, note: f.note.value.trim() } } },
+    rejectClose: false
+  }).catch(() => null)
+  if (!res) return null
+  const def = A2Y_DOWNTIME.find((d) => d.id === res.action)
+  const item = actor.items.get(res.res)
+  const dotsOf = (i) => a2Int(i?.system?.dots?.value)
+  let line = def.text
+  try {
+    if (def.res === 'gain') {
+      if (item) { if (dotsOf(item) >= 5) { ui.notifications.warn(`${item.name} is already at 5 dots.`); return null } await item.update({ 'system.dots.value': dotsOf(item) + 1 }); line = `${item.name} rises to ${dotsOf(item)} dots.` } else { const made = await actor.createEmbeddedDocuments('Item', [{ name: res.newName || 'New Resource', type: 'resource', img: 'icons/svg/coins.svg', system: { description: '', dots: { value: 1, max: 5 }, resourceType: 'physicalAssets' } }]); line = `New Resource: ${made[0].name}, 1 dot.` }
+    } else if (def.res === 'move') {
+      const to = actor.items.get(res.to)
+      const n = Math.min(3, res.dots, dotsOf(item), 5 - dotsOf(to))
+      if (!item || !to || item.id === to.id || n < 1) { ui.notifications.warn('Pick the Resource to take dots from and the one to move them to.'); return null }
+      await item.update({ 'system.dots.value': dotsOf(item) - n }); await to.update({ 'system.dots.value': dotsOf(to) + n }); line = `${n} ${n === 1 ? 'dot' : 'dots'} moved from ${item.name} to ${to.name}.`
+    } else if (def.res === 'recover') {
+      if (!item) { ui.notifications.warn('Pick the Resource to restore.'); return null }
+      const n = Math.min(2, res.dots, 5 - dotsOf(item)); await item.update({ 'system.dots.value': dotsOf(item) + n }); line = `${item.name}: ${n} spent ${n === 1 ? 'dot' : 'dots'} restored (now ${dotsOf(item)}).`
+    } else if (def.res === 'spend') {
+      if (!item || dotsOf(item) < 3) { ui.notifications.warn('Repairing the Masquerade costs 3 dots of one Resource. For several Resources (4 dots), lower them by hand.'); return null }
+      await item.update({ 'system.dots.value': dotsOf(item) - 3 }); line = `${item.name} spends 3 dots (now ${dotsOf(item)}): the Masquerade Tracker goes down by 1.`
+      const masq = globalThis.V6Alpha2?.tools?.masquerade
+      if (game.user.isGM && masq?.clear) await masq.clear(1, `${actor.name} repairs the Masquerade`); else line += ' Storyteller: lower the tracker.'
+    }
+    await actor.update({ 'flags.world.a2.downtime': { used: used + 1 } })
+  } catch (e) { console.error('V6 Automation | downtime', e); ui.notifications.error('The downtime action could not be applied. See the console (F12).'); return null }
+  await ChatMessage.create({ content: `<div class="a2y-downtime"><h4>Downtime: ${a2Esc(def.label)}</h4>${res.note ? `<p><em>${a2Esc(res.note)}</em></p>` : ''}<p>${a2Esc(line)}</p><p class="a2y-dim">Action ${used + 1}${used + 1 > 2 ? ' (more than the usual 2: the Storyteller allows it)' : ' of 2'}.</p></div>`, speaker: ChatMessage.getSpeaker({ actor }) })
+  return res
+}
+async function a2yDowntimeReset () {
+  if (!game.user.isGM) return
+  let n = 0
+  for (const a of game.actors) if (a.flags?.world?.a2?.downtime?.used) { await a.update({ 'flags.world.a2.downtime': { used: 0 } }); n++ }
+  ui.notifications.info(`Downtime actions reset for ${n} ${n === 1 ? 'character' : 'characters'}.`)
+}
+
+// ---- complications on a painful failure ----
+async function a2yComplication (message) {
+  const actor = a2xSpeaker(message)
+  if (!actor) return null
+  const pick = await foundry.applications.api.DialogV2.wait({
+    window: { title: 'Complication' },
+    position: { width: 440 },
+    content: `<div class="a2y-dialog"><p class="a2y-hint">A painful failure brings a complication; player and Storyteller tell it together (PG p.97).</p><div class="form-group"><label>What happens</label><input type="text" name="text" placeholder="The lock-pick snaps off in the door"></div><div class="form-group"><label>How much</label><select name="n"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select><select name="track"><option value="health">Health</option><option value="willpower">Willpower</option></select></div><p class="a2y-dim">"How much" is the dice for Expose Vulnerability (1 or 2) or the points for Suffer Harm (1 to 3).</p></div>`,
+    buttons: A2Y_COMPLICATIONS.map((c) => ({ action: c.id, label: c.label, icon: `fa-solid ${c.icon}`, callback: (ev, button) => ({ kind: c.id, text: button.form.elements.text.value.trim(), n: a2Int(button.form.elements.n.value, 1), track: button.form.elements.track.value }) })),
+    rejectClose: false
+  }).catch(() => null)
+  if (!pick || typeof pick !== 'object') return null
+  const def = A2Y_COMPLICATIONS.find((c) => c.id === pick.kind)
+  let line = def.label
+  try {
+    if (pick.kind === 'expose') { const n = Math.min(2, pick.n); await a2zAddEdge(actor, { label: 'Exposed vulnerability', dice: n, when: 'foe-any' }); line = `Expose vulnerability: an opponent gets +${n} on its next test against ${actor.name}.` } else if (pick.kind === 'harm') {
+      if (pick.track === 'willpower') { const wp = a2Int(actor.system?.willpower?.value); await actor.update({ 'system.willpower.value': Math.max(0, wp - pick.n) }); line = `Suffer harm: ${actor.name} loses ${Math.min(wp, pick.n)} Willpower.` } else { await a2xApplyDamage([actor], { amount: pick.n, margin: 0, ignoreEndurance: true, armour: false, source: 'Complication', chat: false }); line = `Suffer harm: ${actor.name} loses ${pick.n} Health.` }
+    } else if (pick.kind === 'attention') line = 'Draw attention. Storyteller: mark the Masquerade Tracker if mortals noticed.'
+  } catch (e) { console.error('V6 Automation | complication', e) }
+  await message.update({ 'flags.world.a2comp': { kind: pick.kind, line, text: pick.text, by: game.user.name } })
+  return pick
+}
+function a2yComplicationRender (message, root) {
+  const roll = message.rolls?.find((r) => r?.options?.a2?.built)
+  if (!roll || root.querySelector('.a2y-comp')) return
+  const done = message.flags?.world?.a2comp
+  const anchor = root.querySelector('.a2-result') ?? root.querySelector('.message-content')
+  if (done) { anchor?.insertAdjacentHTML('beforeend', `<div class="a2y-comp a2x-line"><strong>Complication:</strong> ${a2Esc(done.line)}${done.text ? ` <em>${a2Esc(done.text)}</em>` : ''}</div>`); return }
+  let v = null
+  try { v = a2RollVerdict(roll) } catch (e) { return }
+  const actor = a2xSpeaker(message)
+  if (!v?.painful || roll.options.a2.frenzyTest || !(actor?.isOwner || game.user.isGM)) return
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.className = 'a2y-comp a2x-btn'
+  b.innerHTML = '<i class="fa-solid fa-burst"></i> Complication'
+  b.title = 'Pick the complication this painful failure brings (PG p.97)'
+  b.addEventListener('click', (ev) => { ev.preventDefault(); a2yComplication(message) })
+  ;(root.querySelector('.a2-actions') ?? anchor)?.append(b)
+}
+
+function a2yRenderChat (message, html) {
+  const root = html instanceof HTMLElement ? html : html?.[0]
+  if (!root || !a2yOn()) return
+  a2ySocialRender(message, root)
+  a2yTaskRender(message, root)
+  a2yComplicationRender(message, root)
+  const end = message.flags?.world?.a2socEnd
+  const box = root.querySelector('.a2y-outcome')
+  if (end?.losers?.length && box && !box.querySelector('button') && game.user.isGM && !message.flags.world.a2socEnd.paid) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.innerHTML = '<i class="fa-solid fa-brain"></i> Total defeat: −1 Willpower for its speakers'
+    b.addEventListener('click', async (ev) => { ev.preventDefault(); for (const u of end.losers) { const a = a2FromUuid(u); if (a) await a.update({ 'system.willpower.value': Math.max(0, a2Int(a.system?.willpower?.value) - 1) }) } await message.update({ 'flags.world.a2socEnd.paid': true }) })
+    box.append(b)
+  }
+}
+
+function a2yInjectStyles () {
+  document.getElementById('v6a-story-style')?.remove()
+  const style = document.createElement('style')
+  style.id = 'v6a-story-style'
+  style.textContent = `
+.a2y-social h4, .a2y-task h4, .a2y-outcome h4, .a2y-downtime h4, .a2y-bond h4 { margin: 0 0 4px; font-weight: 700; }
+.a2y-round { margin: 0 0 6px; }
+.a2y-sides { display: flex; flex-direction: column; gap: 6px; }
+.a2y-side { border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 5px; padding: 5px 8px; }
+.a2y-side.won { border-color: #d2aa5a; box-shadow: inset 0 0 12px rgba(210, 170, 90, 0.18); }
+.a2y-side-head { display: flex; justify-content: space-between; align-items: baseline; }
+.a2y-total { font-size: 20px; font-weight: 700; }
+.a2y-side small, .a2y-dim { opacity: 0.7; font-size: 12px; }
+.a2y-roll { font-size: 12.5px; }
+.a2y-speak { display: flex; gap: 6px; margin-top: 4px; }
+.a2y-speak select { flex: 1; }
+.a2y-speak button { flex: 0 0 auto; width: auto; padding: 0 10px; line-height: 1.6; }
+.a2y-bar { position: relative; height: 20px; border-radius: 10px; overflow: hidden; background: color-mix(in srgb, currentColor 14%, transparent); margin: 4px 0; }
+.a2y-bar div { height: 100%; background: linear-gradient(90deg, #7c121b, #d0303c); transition: width 0.3s; }
+.a2y-bar.done div { background: linear-gradient(90deg, #8a6a24, #d2aa5a); }
+.a2y-bar.failed div, .a2y-bar.ended div { background: #555; }
+.a2y-bar span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px #000; }
+.a2y-state { margin: 4px 0; }
+.a2y-dialog .form-group span { flex: 0 0 auto; padding: 0 6px; }
+.a2y-hint { margin: 4px 0; padding: 4px 8px; border-left: 3px solid #7a0000; background: color-mix(in srgb, currentColor 6%, transparent); font-size: 12.5px; }
+.a2y-pick { display: flex; align-items: flex-start; gap: 8px; margin: 3px 0; }
+.a2y-pick small { opacity: 0.7; }
+.a2y-table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+.a2y-table td, .a2y-table th { padding: 3px 5px; text-align: left; }
+.a2y-table .c { text-align: center; }
+`
+  document.head.appendChild(style)
+}
+
+async function a2StoryBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.story?.booted) return true
+  a2eReg('story', { name: 'Social conflict, tasks, bonds, downtime, complications', hint: 'Round cards for social conflict, progress cards for prolonged tasks, Blood Bond tracking with its dice, the downtime actions, and a Complication button on painful failures.', scope: 'world', config: true, type: Boolean, default: true })
+  a2eReg('social', { scope: 'world', config: false, type: Object, default: {} })
+  a2yInjectStyles()
+  if (!a2yState.hooked) {
+    a2yState.hooked = true
+    Hooks.on('createChatMessage', a2yOnCreate)
+    Hooks.on('updateChatMessage', a2yOnUpdate)
+    Hooks.on('renderChatMessageHTML', (message, html) => { try { a2yRenderChat(message, html) } catch (e) { console.error('V6 Automation | story card', e) } })
+    // the conflict's state changed: redraw its round cards for everyone
+    Hooks.on('updateSetting', (setting) => { if (setting?.key === `${a2eNs()}.${a2eKey('social')}`) for (const m of game.messages.contents.slice(-40)) if (m.flags?.world?.a2soc) ui.chat?.updateMessage?.(m) })
+    Hooks.on('createSetting', (setting) => { if (setting?.key === `${a2eNs()}.${a2eKey('social')}`) for (const m of game.messages.contents.slice(-40)) if (m.flags?.world?.a2soc) ui.chat?.updateMessage?.(m) })
+    Hooks.on('v6a2NewNight', ({ actors, night } = {}) => { if (a2yOn() && game.user.isGM) a2yNightBonds(actors, night).catch((e) => console.error('V6 Automation | bonds', e)) })
+    Hooks.on('getSceneControlButtons', (controls) => {
+      const tools = controls?.tokens?.tools
+      if (!tools || !a2yOn()) return
+      if (game.user?.isGM) {
+        tools['v6a2-social'] = { name: 'v6a2-social', title: 'Social conflict', icon: 'fa-solid fa-comments', order: 107, button: true, onChange: () => a2ySocialStart() }
+        tools['v6a2-task'] = { name: 'v6a2-task', title: 'Prolonged task', icon: 'fa-solid fa-bars-progress', order: 108, button: true, onChange: () => a2yTaskStart() }
+      }
+      tools['v6a2-bonds'] = { name: 'v6a2-bonds', title: 'Blood Bonds', icon: 'fa-solid fa-heart-crack', order: 109, button: true, onChange: () => a2yBondsOpen() }
+      tools['v6a2-downtime'] = { name: 'v6a2-downtime', title: 'Downtime action', icon: 'fa-solid fa-hourglass-half', order: 110, button: true, onChange: () => a2yDowntime() }
+    })
+    try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
+  }
+  api.story = { booted: true, social: a2ySocialStart, closeRound: a2ySocialClose, task: a2yTaskStart, bonds: a2yBondsOpen, drink: a2yDrink, downtime: a2yDowntime, downtimeReset: a2yDowntimeReset, complication: a2yComplication, rules: { roundWinner: a2yRoundWinner, socialOutcome: a2ySocialOutcome, taskState: a2yTaskState, bondDrink: a2yBondDrink, bondDecay: a2yBondDecay, bondDice: a2yBondDice } }
+  console.log('V6 Automation | social conflict, tasks, bonds and downtime loaded')
+  return true
+}
+globalThis.a2StoryBoot ??= a2StoryBoot
 
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)

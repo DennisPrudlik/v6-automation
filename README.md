@@ -36,6 +36,11 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Action menu:** the fist tool opens every combat action: attacks, called shot, stake, decapitate, wrestling (grab, crush, tie up, escape), feed attack, coordinate, demoralize, distract, find flaw, assist, steady aim, cover. Each rolls the right contest and applies the result; one-off edges are used up by the roll they fit.
 - **Chat commands:** `/test wits+awareness 3`, `/req`, `/act`, `/states`, `/feed`, `/frenzy`, `/night` and more; `/v6 help` lists them.
 - **Nightfall look:** one dark look with a blood-red edge and gold display headings for the chat log (dice as tiles, verdicts as banners), journals and the module's windows. Client setting, can be switched off.
+- **Social conflict:** two sides, goals and 3, 5 or 7 rounds; each round is a card where anyone speaks for a side by picking one of the eleven approaches, the card totals the successes, and the outcome is named for both sides at the end.
+- **Prolonged tasks:** a success target and a test limit on a card with a progress bar; a painful or bestial failure ends it.
+- **Blood Bonds:** drinks are logged per donor (feed attacks do it by themselves), stages form over three nights and weaken at New Night; the stage comes off the thrall's rolls against the master and adds to the master's Social rolls on the thrall.
+- **Downtime:** the seven downtime actions; the Resource ones move the dots and Repair the Masquerade lowers the tracker.
+- **Complications:** a painful failure's card gets a Complication button; Expose Vulnerability and Suffer Harm are applied.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.
