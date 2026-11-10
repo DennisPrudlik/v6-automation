@@ -2,7 +2,7 @@
   "id": "v6-automation",
   "title": "V6 Automation",
   "description": "Automation for the wod6e system: Alpha 2.0 rules (dice, Hunger dice, Taking Half, Health, Vitae, 10-box Humanity), pays power costs, applies merit and clan-trait bonuses in the roll dialog, notes Maturing, sets up clans, and imports V6 conversion bundles. Unofficial fan-made automation, not affiliated with or endorsed by the publishers of Vampire: The Masquerade.",
-  "version": "2.6.3",
+  "version": "2.6.4",
   "authors": [
     {
       "name": "Dennis"
@@ -29,5 +29,5 @@
   ],
   "socket": true,
   "manifest": "https://raw.githubusercontent.com/DennisPrudlik/v6-automation/main/module.json",
-  "download": "https://raw.githubusercontent.com/DennisPrudlik/v6-automation/main/releases/v6-automation-2.6.3.zip"
+  "download": "https://raw.githubusercontent.com/DennisPrudlik/v6-automation/main/releases/v6-automation-2.6.4.zip"
 }

@@ -11525,6 +11525,8 @@ globalThis.a2TrackBoot ??= a2TrackBoot
 // approach rolls your best pool, a downtime action opens the downtime window.
 // Shift-click still posts the item to chat, the book icon still opens it.
 // Any other action item with an Attribute in its test becomes clickable the same way.
+// The actions also live in the world compendium "V6 Actions (Alpha 2)", which the magnifying
+// glass on each list searches.
 // Items carry flags.world.a2act { v, kind, ref }. Setting (world): sheetActions (on).
 
 const A2Q_VERSION = 1
@@ -11697,6 +11699,26 @@ async function a2qSyncAll () {
   return n
 }
 
+// The same actions as a world compendium, so the magnifying glass on each list (the system's
+// compendium browser) offers the Alpha 2 actions next to the system's own.
+async function a2qCompendium () {
+  if (!game.user.isGM || !a2qOn()) return null
+  const CC = foundry.documents?.collections?.CompendiumCollection ?? globalThis.CompendiumCollection
+  let pack = game.packs.get('world.v6-actions')
+  if (!pack && CC?.createCompendium) pack = await CC.createCompendium({ name: 'v6-actions', label: 'V6 Actions (Alpha 2)', type: 'Item' })
+  if (!pack) return null
+  const docs = await pack.getDocuments()
+  const have = docs.map((d) => d.flags?.world?.a2act?.ref).filter(Boolean)
+  const data = a2qMissing(a2qCatalog(), have).map(a2qItemData)
+  for (const p of await a2qPackItems()) if (!have.includes(p.flags.world.a2act.ref)) data.push(p)
+  if (!data.length) return pack
+  const locked = pack.locked
+  if (locked) await pack.configure({ locked: false })
+  await Item.implementation.createDocuments(data, { pack: pack.collection })
+  if (locked) await pack.configure({ locked: true })
+  return pack
+}
+
 async function a2ActsBoot () {
   globalThis.V6Alpha2 ??= {}
   const api = globalThis.V6Alpha2
@@ -11718,7 +11740,9 @@ async function a2ActsBoot () {
     document.getElementById('v6a-acts-style')?.remove()
     document.head.appendChild(style)
   }
-  api.acts = { booted: true, sync: a2qSync, syncAll: a2qSyncAll, run: a2qRun, catalog: a2qCatalog }
+  api.acts = { booted: true, compendium: a2qCompendium, sync: a2qSync, syncAll: a2qSyncAll, run: a2qRun, catalog: a2qCatalog }
+  const packUp = () => a2qCompendium().catch((e) => console.error('V6 Automation | action compendium', e))
+  if (game.ready) packUp(); else Hooks.once('ready', packUp)
   if (game.ready) a2qSyncAll().catch((e) => console.error('V6 Automation | action lists', e))
   else Hooks.once('ready', () => a2qSyncAll().catch((e) => console.error('V6 Automation | action lists', e)))
   console.log('V6 Automation | sheet actions loaded')
