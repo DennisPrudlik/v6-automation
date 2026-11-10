@@ -8528,7 +8528,8 @@ async function a2lOnCreate (message, options, userId) {
 }
 async function a2lOnUpdate (message, change) {
   try {
-    const id = change?.flags?.world?.a2reqOf
+    // the tag arriving, or the tagged roll changing afterwards (a reroll, a Beast's Bargain)
+    const id = change?.flags?.world?.a2reqOf ?? ((change?.rolls || change?.flags?.world?.a2) ? message.flags?.world?.a2reqOf : null)
     if (!id || !a2xIsGM()) return
     const card = game.messages.get(id)
     const req = card?.flags?.world?.a2req
@@ -8539,9 +8540,11 @@ async function a2lOnUpdate (message, change) {
     // The player rolled without the hidden Difficulty: judge it here.
     const diff = a2Int(req.test.difficulty)
     const successes = a2Int(v.successes ?? roll.total)
-    const win = req.hideDiff ? (diff <= 0 ? successes > 0 : successes >= diff) : v.win !== false
-    const margin = diff > 0 ? successes - diff : null
-    const text = `${successes} ${successes === 1 ? 'success' : 'successes'}: ${win ? 'win' : 'failure'}${margin !== null ? `, margin ${margin >= 0 ? '+' : ''}${margin}` : ''}${v.critical ? ', critical' : ''}${v.painful ? ', painful' : ''}${v.bestial ? ', bestial' : ''}`
+    let bargain = false
+    try { bargain = Boolean(a2xAct(message, message.rolls.indexOf(roll)).bargain) } catch (e) { /* no actions on this roll */ }
+    const win = bargain || (req.hideDiff ? (diff <= 0 ? successes > 0 : successes >= diff) : v.win !== false)
+    const margin = bargain ? 0 : diff > 0 ? successes - diff : null
+    const text = `${successes} ${successes === 1 ? 'success' : 'successes'}: ${win ? 'win' : 'failure'}${margin !== null ? `, margin ${margin >= 0 ? '+' : ''}${margin}` : ''}${bargain ? ", by a Beast's Bargain" : ''}${v.critical ? ', critical' : ''}${v.painful && !bargain ? ', painful' : ''}${v.bestial && !bargain ? ', bestial' : ''}`
     await card.update({ [`flags.world.a2req.results.${a2lKey(actor.uuid)}`]: { text, win, successes, messageId: message.id } })
   } catch (e) { console.error('V6 Automation | roll request', e) }
 }
