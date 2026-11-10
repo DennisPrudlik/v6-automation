@@ -11964,7 +11964,8 @@ function v6iTidyPage (content, name) {
 function v6iPages (pages) {
   const out = (pages ?? []).map((p) => {
     if ((p.type ?? 'text') !== 'text' || typeof p.text?.content !== 'string') return p
-    const name = v6iPageTitle(p.name)
+    // names as Foundry shows them: no HTML codes, no stray spaces
+    const name = v6iPageTitle(v6iUnescape(p.name).trim())
     return { ...p, name, text: { ...p.text, content: v6iTidyPage(v6iTidyPage(p.text.content, p.name), name) } }
   })
   if (out.length >= 4 && out.every((p) => /^(?:Elder|Ported) Powers: /.test(p.name ?? ''))) out.sort((a, b) => String(a.name).localeCompare(String(b.name)))
