@@ -1796,7 +1796,8 @@ async function a2Boot () {
       ['story', globalThis.a2StoryBoot ?? (typeof a2StoryBoot === 'function' ? a2StoryBoot : null)],
       ['table tools', globalThis.a2TableBoot ?? (typeof a2TableBoot === 'function' ? a2TableBoot : null)],
       ['guide', globalThis.a2GuideBoot ?? (typeof a2GuideBoot === 'function' ? a2GuideBoot : null)],
-      ['tracked powers', globalThis.a2TrackBoot ?? (typeof a2TrackBoot === 'function' ? a2TrackBoot : null)]]) {
+      ['tracked powers', globalThis.a2TrackBoot ?? (typeof a2TrackBoot === 'function' ? a2TrackBoot : null)],
+      ['sheet actions', globalThis.a2ActsBoot ?? (typeof a2ActsBoot === 'function' ? a2ActsBoot : null)]]) {
       if (!boot) continue
       try { await boot() } catch (e) { console.error(`V6 Automation | ${name} failed to load`, e) }
     }
@@ -10062,9 +10063,11 @@ function a2vRenderSheet (app, element) {
     const groups = [...new Set(A2V_MOVES.map((m) => m.group))]
     const box = document.createElement('section')
     box.className = 'a2v-sheet'
-    box.innerHTML = `<header><span>V6 actions</span><a data-a2v-menu title="Open the action menu as a window"><i class="fa-solid fa-up-right-from-square"></i></a></header>
-      <p class="a2v-sheet-hint">Target a token first (hover it, press T) for anything aimed at someone.</p>
-      ${groups.map((g) => { const list = A2V_MOVES.filter((m) => m.group === g && usable(m)); return list.length ? `<div class="a2v-sheet-row"><label>${g}</label><div>${list.map((m) => `<button type="button" data-a2v-move="${m.id}" title="${a2Esc(`${m.pool ? m.pool + '. ' : ''}${m.hint ?? ''}`)}"><i class="fa-solid ${m.icon}"></i> ${a2Esc(m.label)}</button>`).join('')}</div></div>` : '' }).join('')}`
+    box.innerHTML = '<header><span>V6 tools</span><a data-a2v-menu title="Open the action menu as a window"><i class="fa-solid fa-up-right-from-square"></i></a></header>'
+    // without the filled lists below (alpha2-acts), the actions sit here as buttons
+    if (!(typeof a2qOn === 'function' && a2qOn() && actor.items.some((i) => i.type === 'action' && i.flags?.world?.a2act))) { // eslint-disable-line no-undef
+      box.insertAdjacentHTML('beforeend', `<p class="a2v-sheet-hint">Target a token first (hover it, press T) for anything aimed at someone.</p>${groups.map((g) => { const list = A2V_MOVES.filter((m) => m.group === g && usable(m)); return list.length ? `<div class="a2v-sheet-row"><label>${g}</label><div>${list.map((m) => `<button type="button" data-a2v-move="${m.id}" title="${a2Esc(`${m.pool ? m.pool + '. ' : ''}${m.hint ?? ''}`)}"><i class="fa-solid ${m.icon}"></i> ${a2Esc(m.label)}</button>`).join('')}</div></div>` : '' }).join('')}`)
+    }
     // the tools from the token controls, and what the module is tracking for this character
     const A = globalThis.V6Alpha2 ?? {}
     const tools = [
@@ -10865,11 +10868,11 @@ function a2wTokenHooks () {
 function a2wCoterie () { const c = a2eGet('coterie', null); return { name: '', domain: '', haven: '', notes: '', resources: [], ...(c && typeof c === 'object' ? c : {}) } }
 // What kind of shared Resource a dropped item is. Pure.
 function a2wResourceKind (item) {
-  const t = String(item?.system?.type ?? item?.system?.category ?? '')
+  const t = String(item?.system?.resourceType ?? item?.system?.type ?? '')
   if (['physicalAssets', 'socialAssets', 'wealth'].includes(t)) return t
   const n = String(item?.name ?? '')
   if (/wealth|money|fortune/i.test(n)) return 'wealth'
-  if (/haven|domain|herd|servant|retainer|equipment|armou?ry|vehicle|library|property|estate/i.test(n)) return 'physicalAssets'
+  if (/haven|domain|repository|equipment|armou?ry|vehicle|library|property|estate/i.test(n)) return 'physicalAssets'
   return item?.type === 'resource' ? 'socialAssets' : 'physicalAssets'
 }
 // Items dropped on the coterie window: onto the Haven field they name the haven, anywhere else they fill a free Resource row.
@@ -11514,6 +11517,214 @@ async function a2TrackBoot () {
   return true
 }
 globalThis.a2TrackBoot ??= a2TrackBoot
+
+// ---- the sheet's own Actions tab, filled and clickable -----------------------------------
+// The system's Actions tab has six lists (General, Physical, Social, Exploration, Downtime,
+// Humanity) of "action" items. This part puts the Alpha 2 actions into them as real items
+// and makes a click on one do it: an attack opens the roll against your target, a social
+// approach rolls your best pool, a downtime action opens the downtime window.
+// Shift-click still posts the item to chat, the book icon still opens it.
+// Any other action item with an Attribute in its test becomes clickable the same way.
+// Items carry flags.world.a2act { v, kind, ref }. Setting (world): sheetActions (on).
+
+const A2Q_VERSION = 1
+const A2Q_GROUP = { Attack: 'physical', Wrestle: 'physical', 'Team and tricks': 'general', Yourself: 'general' }
+const A2Q_EXTRA = [
+  { ref: 'dodge', kind: 'test', group: 'physical', name: 'Dodge', role: 'defense', act: 'reaction', test: { attributes: ['dexterity'], skills: ['athletics'] }, text: 'Defend against any attack. Costs no reaction (PG p.120).' },
+  { ref: 'parry', kind: 'test', group: 'physical', name: 'Parry', role: 'defense', act: 'reaction', test: { attributes: ['dexterity'], skills: ['fighting'] }, text: 'Defend against a melee attack. Costs no reaction (PG p.120).' },
+  { ref: 'surge', kind: 'tool', group: 'general', name: 'Blood Surge', role: 'utility', act: 'free', vampire: true, text: 'Spend Vitae for extra dice on one test.' },
+  { ref: 'feed', kind: 'tool', group: 'humanity', name: 'Feed', role: 'utility', act: 'action', vampire: true, text: 'Hunt or drink: the feeding window, with Herd and the Masquerade risk.' },
+  { ref: 'frenzy', kind: 'tool', group: 'humanity', name: 'Resist frenzy', role: 'defense', act: 'reaction', vampire: true, text: 'The frenzy test: fear, rage or hunger.' },
+  { ref: 'bonds', kind: 'tool', group: 'humanity', name: 'Blood Bonds', role: 'utility', act: 'none', text: 'Whose blood binds this character, and how strongly.' }
+]
+const A2Q_PACK = ['Investigate', 'Track', 'Follow'] // exploration, taken from the system's own actions
+
+// Every action the module puts on a sheet. Pure. → [{ ref, kind, group, name, role, act, test, text, vampire }]
+function a2qCatalog () {
+  const out = []
+  for (const m of A2V_MOVES) {
+    if (m.id === 'states' || m.self) continue
+    out.push({ ref: m.id, kind: 'move', group: A2Q_GROUP[m.group] ?? 'general', name: m.label, role: m.group === 'Attack' || m.group === 'Wrestle' ? 'attack' : 'utility', act: m.instant ? 'minor' : 'action', test: m.test ? { attributes: [...m.test.attributes], skills: [...m.test.skills], modifier: a2Int(m.modifier) } : null, text: `${m.pool ? m.pool + '. ' : ''}${m.hint ?? ''}`, vampire: Boolean(m.vampire) })
+  }
+  for (const s of A2Y_APPROACHES) out.push({ ref: `soc-${s.id}`, kind: 'social', group: 'social', name: s.label, role: s.id === 'keepcool' ? 'defense' : 'attack', act: 'action', pools: s.pools, text: `${s.pools.map((p) => `${a2Cap(p[0])} + ${a2Cap(p[1])}`).join(' or ')}.${s.note ? ' ' + s.note : ''} The best pool is rolled.` })
+  for (const d of A2Y_DOWNTIME) out.push({ ref: `dt-${d.id}`, kind: 'downtime', group: 'downtime', name: d.label, role: 'utility', act: 'downtime', text: d.text })
+  out.push(...A2Q_EXTRA.map((x) => ({ ...x })))
+  return out
+}
+// The item to create for one catalogue entry. Pure.
+function a2qItemData (c) {
+  const first = c.test ?? (c.pools ? { attributes: [...new Set(c.pools.map((p) => p[0]))], skills: [...new Set(c.pools.map((p) => p[1]))] } : { attributes: [], skills: [] })
+  const mod = a2Int(c.test?.modifier)
+  return {
+    name: c.name,
+    type: 'action',
+    system: {
+      description: `<p>${a2Esc(c.text ?? '')}</p>`,
+      source: { book: 'V6 Alpha 2', page: '' },
+      group: c.group,
+      role: c.role ?? 'utility',
+      actionType: c.group === 'social' ? 'social' : c.group === 'physical' ? 'physical' : 'mental',
+      activation: { activationType: ['action', 'reaction', 'downtime'].includes(c.act) ? c.act : 'action' },
+      test: { description: c.pools?.length > 1 ? c.pools.map((p) => `${a2Cap(p[0])} + ${a2Cap(p[1])}`).join(' or ') : '', attributes: first.attributes ?? [], skills: first.skills ?? [], disciplines: [], modifier: { valueSource: 'flat', value: Math.abs(mod), valueTrait: '', mode: mod < 0 ? 'subtract' : 'add' } }
+    },
+    flags: { world: { a2act: { v: A2Q_VERSION, kind: c.kind, ref: c.ref } } }
+  }
+}
+// Which catalogue entries an actor still lacks. Pure. have: refs already on the sheet.
+function a2qMissing (catalog, have, { vampire = true } = {}) {
+  const set = new Set(have)
+  return catalog.filter((c) => !set.has(c.ref) && (vampire || !c.vampire))
+}
+
+const a2qState = { hooked: false, busy: new Set() }
+function a2qOn () { return a2Enabled() && a2eGet('sheetActions', true) !== false }
+function a2qHave (actor) { return actor.items.filter((i) => i.type === 'action' && i.flags?.world?.a2act?.ref).map((i) => i.flags.world.a2act.ref) }
+function a2qFits (actor) { return actor?.documentName === 'Actor' && actor.type !== 'npc' && Boolean(a2Rules(actor)) }
+async function a2qPackItems () {
+  const out = []
+  try {
+    const pack = game.packs.get('wod6e.actions')
+    const docs = pack ? await pack.getDocuments() : []
+    for (const n of A2Q_PACK) {
+      const d = docs.find((x) => x.name === n)
+      if (!d) continue
+      const o = d.toObject()
+      delete o._id
+      o.flags = { ...(o.flags ?? {}), world: { ...(o.flags?.world ?? {}), a2act: { v: A2Q_VERSION, kind: 'test', ref: `x-${n.toLowerCase()}` } } }
+      out.push(o)
+    }
+  } catch (e) { console.error('V6 Automation | system actions', e) }
+  return out
+}
+async function a2qSync (actor, { quiet = true } = {}) {
+  if (!a2qFits(actor) || !actor.isOwner || a2qState.busy.has(actor.id)) return 0
+  a2qState.busy.add(actor.id)
+  try {
+    const have = a2qHave(actor)
+    const vampire = a2Creature(actor) === 'vampire'
+    const data = a2qMissing(a2qCatalog(), have, { vampire }).map(a2qItemData)
+    for (const p of await a2qPackItems()) if (!have.includes(p.flags.world.a2act.ref)) data.push(p)
+    if (data.length) await actor.createEmbeddedDocuments('Item', data)
+    if (!quiet) ui.notifications.info(data.length ? `${actor.name}: ${data.length} actions added to the Actions tab.` : `${actor.name} already has every action.`)
+    return data.length
+  } finally { a2qState.busy.delete(actor.id) }
+}
+function a2qBest (actor, keys, kind) {
+  const val = (k) => { const t = actor.system?.[kind]?.[k]; return a2Int(t?.effective ?? t?.value) }
+  return [...(keys ?? [])].sort((x, y) => val(y) - val(x))[0]
+}
+// Do what an action item stands for. → true when the module handled it.
+async function a2qRun (actor, item) {
+  const f = item?.flags?.world?.a2act
+  const A = globalThis.V6Alpha2 ?? {}
+  if (!actor?.isOwner) { ui.notifications.warn(`You don't own ${actor?.name}.`); return true }
+  if (f?.kind === 'move') { await a2vRun(actor, f.ref); return true }
+  if (f?.kind === 'downtime') { await A.story?.downtime?.(actor); return true }
+  if (f?.kind === 'tool') {
+    if (f.ref === 'surge') await A.tools?.bloodSurge?.(actor)
+    else if (f.ref === 'feed') await A.tools?.feed?.(actor)
+    else if (f.ref === 'frenzy') await a2xFrenzyTest(actor, {})
+    else if (f.ref === 'bonds') await A.story?.bonds?.(actor)
+    return true
+  }
+  const t = item.system?.test ?? {}
+  if (f?.kind === 'social') {
+    const s = A2Y_APPROACHES.find((x) => `soc-${x.id}` === f.ref)
+    const p = s ? a2yBestPool(actor, s.pools) : null
+    if (p) { await a2eOpenRoll(actor, { attributes: [p[0]], skills: [p[1]], disciplines: [] }); return true }
+  }
+  if (!(t.attributes?.length || t.skills?.length || t.disciplines?.length)) return false
+  // alternatives are listed side by side: roll the best Attribute with the best Skill
+  const test = { attributes: t.attributes?.length ? [a2qBest(actor, t.attributes, 'attributes')] : [], skills: t.skills?.length ? [a2qBest(actor, t.skills, 'skills')] : [], disciplines: [...(t.disciplines ?? [])] }
+  const mv = a2Int(t.modifier?.value)
+  if (mv && (t.modifier?.valueSource ?? 'flat') === 'flat') test.modifier = { valueSource: 'flat', value: mv, mode: t.modifier.mode === 'subtract' ? 'subtract' : 'add' }
+  await a2eOpenRoll(actor, test)
+  return true
+}
+function a2qPoolText (actor, item) {
+  const f = item.flags?.world?.a2act
+  if (f?.kind === 'downtime') return 'downtime'
+  if (f?.kind === 'tool') return ''
+  if (f?.kind === 'move') { const m = A2V_MOVES.find((x) => x.id === f.ref); return m?.pool ?? '' }
+  const t = item.system?.test ?? {}
+  let a = t.attributes ?? []
+  let s = t.skills ?? []
+  if (f?.kind === 'social') { const ap = A2Y_APPROACHES.find((x) => `soc-${x.id}` === f.ref); const p = ap ? a2yBestPool(actor, ap.pools) : null; if (p) { a = [p[0]]; s = [p[1]] } }
+  const parts = [a.length ? a2Cap(a2qBest(actor, a, 'attributes')) : null, s.length ? a2Cap(a2qBest(actor, s, 'skills')) : null].filter(Boolean)
+  const mv = a2Int(t.modifier?.value)
+  return parts.join(' + ') + (mv ? ` ${t.modifier.mode === 'subtract' ? '−' : '+'}${mv}` : '')
+}
+function a2qRenderSheet (app, element) {
+  try {
+    const actor = app?.document ?? app?.actor
+    if (!a2qOn() || actor?.documentName !== 'Actor') return
+    const root = element instanceof HTMLElement ? element : element?.[0]
+    const tab = root?.querySelector('section.actions-section, section.tab[data-tab="actions"]')
+    if (!tab) return
+    for (const row of tab.querySelectorAll('.action-row[data-item-id]')) {
+      if (row.dataset.a2q) continue
+      const item = actor.items.get(row.dataset.itemId)
+      const t = item?.system?.test ?? {}
+      if (!item || !(item.flags?.world?.a2act || t.attributes?.length || t.skills?.length)) continue
+      row.dataset.a2q = '1'
+      row.classList.add('a2q-row')
+      const label = row.querySelector('button.sheet-section-label, .sheet-section-label')
+      if (!label) continue
+      label.title = 'Click: do it. Shift-click: post to chat.'
+      const pool = a2qPoolText(actor, item)
+      if (pool) { const s = document.createElement('span'); s.className = 'a2q-pool'; s.textContent = pool; row.append(s) }
+      label.addEventListener('click', (ev) => {
+        if (ev.shiftKey || !actor.isOwner) return
+        ev.preventDefault(); ev.stopImmediatePropagation()
+        a2qRun(actor, item).catch((e) => console.error('V6 Automation | sheet action', e))
+      }, true)
+    }
+    // the header of the V6 block offers the fill when something is missing
+    const head = tab.querySelector('.a2v-sheet header')
+    if (head && !head.querySelector('[data-a2q-fill]') && a2qFits(actor) && actor.isOwner && a2qMissing(a2qCatalog(), a2qHave(actor), { vampire: a2Creature(actor) === 'vampire' }).length) {
+      const a = document.createElement('a')
+      a.dataset.a2qFill = '1'
+      a.innerHTML = '<i class="fa-solid fa-list-check"></i> Fill the action lists'
+      a.addEventListener('click', (ev) => { ev.preventDefault(); a2qSync(actor, { quiet: false }) })
+      head.insertBefore(a, head.lastElementChild)
+    }
+  } catch (e) { console.error('V6 Automation | sheet actions', e) }
+}
+async function a2qSyncAll () {
+  if (!game.user.isGM || !a2qOn()) return 0
+  let n = 0
+  for (const a of game.actors) { if (a2qFits(a) && a.hasPlayerOwner) { try { n += await a2qSync(a) } catch (e) { console.error('V6 Automation | action lists', a.name, e) } } }
+  return n
+}
+
+async function a2ActsBoot () {
+  globalThis.V6Alpha2 ??= {}
+  const api = globalThis.V6Alpha2
+  if (api.acts?.booted) return true
+  a2eReg('sheetActions', { name: 'Actions on the character sheet', hint: 'Fill the six lists of the sheet\'s Actions tab with the Alpha 2 actions for every player character, and make a click on an action do it (Shift-click posts it to chat).', scope: 'world', config: true, type: Boolean, default: true })
+  if (!a2qState.hooked) {
+    a2qState.hooked = true
+    Hooks.on('renderActorSheetV2', a2qRenderSheet)
+    Hooks.on('updateActor', (actor, changes) => { if (changes?.ownership && game.users?.activeGM?.isSelf && a2qOn() && a2qFits(actor) && actor.hasPlayerOwner) a2qSync(actor).catch(() => {}) })
+    const style = document.createElement('style')
+    style.id = 'v6a-acts-style'
+    style.textContent = `
+.a2q-row { display: flex; align-items: center; gap: 6px; }
+.a2q-row .sheet-section-label { flex: 1; text-align: left; cursor: pointer; }
+.a2q-row .sheet-section-label:hover .item-name { color: var(--v6-gold, #d2aa5a); }
+.a2q-pool { flex: 0 0 auto; font-size: 11px; opacity: 0.65; white-space: nowrap; padding-right: 4px; }
+.a2v-sheet header a[data-a2q-fill] { font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: auto; margin-right: 10px; }
+`
+    document.getElementById('v6a-acts-style')?.remove()
+    document.head.appendChild(style)
+  }
+  api.acts = { booted: true, sync: a2qSync, syncAll: a2qSyncAll, run: a2qRun, catalog: a2qCatalog }
+  if (game.ready) a2qSyncAll().catch((e) => console.error('V6 Automation | action lists', e))
+  else Hooks.once('ready', () => a2qSyncAll().catch((e) => console.error('V6 Automation | action lists', e)))
+  console.log('V6 Automation | sheet actions loaded')
+  return true
+}
+globalThis.a2ActsBoot ??= a2ActsBoot
 
 // ---------------------------------------------------------------------------
 // V6 Conversion Importer (Foundry v13/v14, wod6e)
