@@ -67,6 +67,7 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Importer, compare first:** tick "Only compare" and the importer writes nothing; it shows per bundle what an import would create, change or leave alone, down to the field, so your own edits aren't overwritten unseen.
 - **Hard to trip up:** a double click on a card button counts once (no second Willpower for one reroll, no damage applied twice); a character or item name shows as written everywhere, also in the notification bars; Torpor ticked on a token and the Torpor window agree.
 - **Rerolls are followed:** a Willpower reroll or a Beast's Bargain after a result was already acted on is not lost. A grab, stake or trick is settled anew (a miss that became a hit lands, a hold that no longer stands is taken off); a power's card shows the new result, effects that waited for a won test land, and a target that had resisted is looked at again; tests to rise from torpor, stay awake or Justify, and rolls counted on a social conflict or a prolonged task, follow too. Where damage or Vitae already went in, the card tells the Storyteller what to put right.
+- **Private Storyteller rolls:** when the Storyteller rolls a defence in private, the attacking player's card says so and leaves the damage to the Storyteller, whose client sees both rolls; a damage request from a defended attack is not applied.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.

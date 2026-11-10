@@ -1556,6 +1556,13 @@ async function a2DamageActor (actor, amount, { baneful = false, note = true } = 
     upd['system.health.value'] = cur - vitaeLost
   }
   await actor.update(upd, { a2Damage: true })
+  // every box baneful with Vitae left is torpor (PG p.100): mark it, whichever way the damage came
+  // (a card, the sheet, a macro), so the token shows it and New Night knows
+  if (a2Creature(actor) === 'vampire' && res.allBaneful && a2Int(actor.system?.health?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
+    let night = 1
+    try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
+    try { await actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }) } catch (e) { console.error('V6 Alpha 2 | torpor', e) }
+  }
   if (note) {
     const lines = [`${amount}${baneful && rules.baneful ? ' baneful' : ''} damage${res.reduced ? `, Vampiric Endurance −${res.reduced}` : ''}: Health ${res.value} of ${res.max - res.baneful}${res.baneful ? ` (${res.baneful} baneful)` : ''}.`]
     if (res.toBaneful) lines.push(`${res.toBaneful} damage past an empty track became baneful (PG p.100).`)
@@ -1617,6 +1624,12 @@ function a2UpdateActor (actor, changes, options, userId) {
   const hitZero = before.value > 0 && now.value === 0
   const allBaneful = now.baneful >= now.max && before.baneful < before.max
   if (hitZero || allBaneful) a2Note(actor, `${actor.name}: Health`, a2ZeroHealthLines(actor, now))
+  // the boxes crossed out by hand on the sheet: the same torpor as from damage (PG p.100)
+  if (allBaneful && now.max > 0 && a2Creature(actor) === 'vampire' && a2Int(actor.system?.health?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
+    let night = 1
+    try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
+    actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }).catch((e) => console.error('V6 Alpha 2 | torpor', e))
+  }
 }
 
 // ---- Humanity migration --------------------------------------------------------
@@ -2559,6 +2572,17 @@ function a2xVerdict (message, roll) {
   return { opp, v: a2RollVerdict(roll, opp ? { successes: opp.successes, tieWin: opp.compare.win } : null) }
 }
 
+// The Storyteller rolling in private: the other side of this contested test was rolled, but its
+// numbers are not shown to this user. Only the Storyteller then knows who won.
+function a2xHiddenOpp (message, roll) {
+  try {
+    if (game.user.isGM) return false
+    const id = roll?.options?.a2?.vsMessage || message?.flags?.world?.a2vs || null
+    const mine = id ? game.messages.get(id) : null
+    if (mine && mine.isContentVisible === false) return true
+    return game.messages.contents.slice(-80).some((m) => m.id !== message?.id && m.isContentVisible === false && m.rolls?.some((r) => r?.options?.a2?.vsMessage === message?.id))
+  } catch (e) { return false }
+}
 // Did the other side of a contested test strike a Beast's Bargain? Its failure is then a basic win (PG p.98).
 function a2xOppBargain (opp) {
   try { return Boolean(opp && a2xAct(opp.message, (opp.message.rolls ?? []).indexOf(opp.roll)).bargain) } catch (e) { return false }
@@ -2580,6 +2604,8 @@ function a2xDecorateBlock (message, roll, i, block) {
     const oi = (opp.message.rolls ?? []).indexOf(opp.roll)
     if (a2xAct(opp.message, oi).bargain) lines.push(`${opp.name} struck a Beast's Bargain: that failure became a basic win, margin 0 (PG p.98).`)
   }
+  const hiddenOpp = !opp && a2xHiddenOpp(message, roll)
+  if (hiddenOpp) lines.push('The other side rolled in private: the Storyteller sees who won, and applies what follows.')
   if (a2.frenzyTest) lines.push(a2xFrenzyLine(a2.frenzyTest, v, Boolean(act.bargain), actor))
   for (const d of act.damage ?? []) lines.push(`Damage applied: ${d.text}.`)
   if (lines.length) {
@@ -2630,7 +2656,7 @@ function a2xDecorateBlock (message, roll, i, block) {
   // a wrestling move, a feed or a trick resolves on its own card: no weapon damage to apply here
   const moveKind = message.flags?.world?.a2def?.move?.effect?.kind
   const byMove = Boolean(moveKind) && (!['stake', 'behead'].includes(moveKind) || message.flags?.world?.a2def?.settled === true)
-  if (info && !byPowerCard && !byMove && (game.user.isGM || owner) && (v.win !== false || act.bargain) && !a2xOppBargain(opp)) {
+  if (info && !byPowerCard && !byMove && (game.user.isGM || owner) && (v.win !== false || act.bargain) && !a2xOppBargain(opp) && !hiddenOpp) {
     btn('fa-solid fa-burst', 'Apply damage', `Weapon damage + margin to the targeted tokens, or the selected ones (PG p.116). ${info.label}.`, () => a2xPromptCardDamage(message, i)).dataset.a2x = 'damage'
   }
   if (bar.childElementCount) block.append(bar)
@@ -2737,6 +2763,15 @@ async function a2xOnSocket (data, senderId) {
     if (data.op === 'damage') {
       const src = data.opts?.messageId ? game.messages.get(data.opts.messageId) : null
       if (src && !a2xUserOwnsSpeaker(user, src) && src.author?.id !== user.id) { console.warn('V6 Alpha 2 | damage request refused for', user.name); return }
+      // the Storyteller's client sees every roll: damage asked for from an attack that was defended is not applied
+      try {
+        const idx = Number.isInteger(data.opts?.rollIndex) ? data.opts.rollIndex : a2xFirstA2Roll(src)
+        const roll = src?.rolls?.[idx]
+        if (roll?.options?.a2?.built) {
+          const { v, opp } = a2xVerdict(src, roll)
+          if (opp && ((v.win === false && !a2xAct(src, idx).bargain) || a2xOppBargain(opp))) { v6aNote.warn(`${user.name} asked for damage from an attack that was defended: not applied.`); return }
+        }
+      } catch (e) { console.error('V6 Alpha 2 | damage request check', e) }
       await a2xApplyDamage(data.targets, { ...(data.opts ?? {}), requester: user.id })
     } else if (data.op === 'message') {
       const m = game.messages.get(data.id)
@@ -3420,6 +3455,7 @@ async function a2xPromptCardDamageNow (message, i) {
   const act = a2xAct(message, i)
   const { v } = a2xVerdict(message, roll)
   if (v.win === false && !act.bargain) { v6aNote.info('The attack failed: no damage (PG p.116).'); return null }
+  if (a2xHiddenOpp(message, roll)) { v6aNote.info('The defence was rolled in private: the Storyteller applies the damage.'); return null }
   if (a2xOppBargain(a2xVerdict(message, roll).opp)) { v6aNote.info("The defender's Beast's Bargain turned its failure into a win: the attack misses, no damage (PG p.98)."); return null }
   const margin = act.bargain ? 0 : v.win === true ? Math.max(0, a2Int(v.margin)) : a2Int(v.successes)
   const marginNote = act.bargain ? "Beast's Bargain: a basic win has no margin (PG p.19)." : v.win === true ? '' : 'No defence roll is linked, so the margin is all your successes. If the target defended, use Compare first (PG p.116, p.120).'
@@ -8647,7 +8683,8 @@ async function a2lRollTest (test, { actor = null, label = '', request = null } =
   if (request) {
     const at = Date.now()
     a2lState.pendingReq.set(actor.uuid, { id: request, at })
-    a2eDialogGuard(new Set(foundry.applications.instances.keys()), () => { if (a2lState.pendingReq.get(actor.uuid)?.at === at) a2lState.pendingReq.delete(actor.uuid) }).catch(() => {})
+    a2eDialogGuard(new Set(foundry.applications.instances.keys()), () => { if (a2lState.pendingReq.get(actor.uuid)?.at === at) a2lState.pendingReq.delete(actor.uuid) }).catch(() => {})    // a roll the Storyteller asked for is a plain test: with a token targeted and a Fighting pool it would otherwise start an attack
+    try { if (typeof a2oPlainNext === 'function') a2oPlainNext(actor) } catch (e) { /* opposed tests are off */ }
   }
   const t = { attributes: test.attributes ?? [], skills: test.skills ?? [], disciplines: test.disciplines ?? [] }
   if (test.difficulty !== undefined && test.difficulty !== null) t.difficulty = a2Int(test.difficulty)
@@ -9459,7 +9496,9 @@ function a2cBuild (state, lib) {
   if (f.generation) update['system.vampire.generation.value'] = f.generation
   update['system.vampire.clan.name'] = state.clan
   update['system.vampire.humanity.value'] = state.humanity
+  update['system.vampire.humanity.max'] = 10 // the Alpha 2 track, also on a sheet that was never converted
   update['system.vampire.nature.value'] = 0
+  update['system.vampire.nature.max'] = Math.max(1, 10 - a2Int(state.humanity, 6))
   const wp = state.attrs.composure + state.attrs.resolve
   update['system.willpower.value'] = wp
   update['system.willpower.max'] = wp
@@ -11461,7 +11500,7 @@ async function a2wNpcCreate (o) {
   if (creature === 'vampire') {
     const genMod = a2GenModifier(o.gen)
     try { tier = a2cTierKey('vampire', o.gen) } catch (e) { /* neonate */ }
-    system.vampire = { generation: { value: o.gen }, humanity: { value: a2wNpcHumanity(tier), max: 10 }, nature: { value: 0 }, clan: { name: o.clan ?? '' }, disciplines: {} }
+    system.vampire = { generation: { value: o.gen }, humanity: { value: a2wNpcHumanity(tier), max: 10 }, nature: { value: 0, max: Math.max(1, 10 - a2wNpcHumanity(tier)) }, clan: { name: o.clan ?? '' }, disciplines: {} }
     system.health = { value: 5 + 5 * genMod, max: 5 + 5 * genMod }
     const clan = o.clan ? game.items.find((i) => i.type === 'clan' && i.name === o.clan) : null
     if (clan) { const d = clan.toObject(); delete d._id; delete d.folder; items.push(d); for (const k of clan.system?.disciplines ?? []) system.vampire.disciplines[k] = { value: st.discipline, visible: true } }
