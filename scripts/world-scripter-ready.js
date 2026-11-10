@@ -8065,13 +8065,13 @@ function a2lLinkable (name) {
   return /^[A-ZÀ-Þ"“'(]/.test(n)
 }
 function a2lNameRegex (names) {
-  const list = [...new Set(names.filter(a2lLinkable))].sort((a, b) => b.length - a.length).slice(0, 400)
+  const list = [...new Set(names.filter(a2lLinkable))].sort((a, b) => b.length - a.length).slice(0, 1500)
   if (!list.length) return null
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`(?<![\\p{L}\\p{N}])(${list.map(esc).join('|')})(?![\\p{L}\\p{N}])`, 'gu')
 }
 
-const a2lState = { hooked: false, index: null, loading: null, pendingReq: new Map() }
+const a2lState = { hooked: false, index: null, loading: null, items: null, pendingReq: new Map() }
 function a2lOn () { return a2eGet('journalLinks', true) !== false }
 
 // Which book does a journal belong to, and who is in that book?
@@ -8148,6 +8148,7 @@ function a2lEnhance (root, entry, page) {
       })))
     }
   }
+  try { if (a2eGet('journalItems', true) !== false) a2lLinkItems(root) } catch (e) { console.error('V6 Automation | item links', e) }
   if (root.dataset.v6Names === '1') return
   const link = (index) => {
     if (root.dataset.v6Names === '1' || !root.isConnected) return
@@ -8174,6 +8175,101 @@ function a2lEnhance (root, entry, page) {
   }
   if (a2lState.index) link(a2lState.index)
   else a2lLoadIndex().then(link).catch(() => {})
+}
+
+// ---- items: every power, clan trait, merit and flaw named on a page links to its item ----
+const A2L_ITEM_TYPES = ['discipline', 'clanTrait', 'merit', 'flaw', 'lifepath', 'clan', 'nature']
+const A2L_ITEM_ICON = { discipline: 'fa-bolt', clanTrait: 'fa-dna', merit: 'fa-star', flaw: 'fa-heart-crack', lifepath: 'fa-road', clan: 'fa-users', nature: 'fa-scale-balanced' }
+// A name as it stands in a cell or in bold: without dots, a trailing colon or full stop. Pure.
+function a2lItemKey (text) { return String(text ?? '').replace(/[●○•]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\s"“”']+|[\s"“”':.,;]+$/g, '').toLowerCase() }
+// Is a name distinctive enough to link in running text? Two words, or one long one. Pure.
+function a2lProseName (name) { const n = String(name ?? '').trim(); return /^[A-ZÀ-Þ]/.test(n) && /\s/.test(n) && n.length >= 7 }
+// A one-word name ("Command", "Routine", "Sheriff") is also an ordinary word: it links only in a
+// table whose header says the column holds powers, merits and the like. Pure.
+function a2lPlainWord (name) { return !/\s/.test(String(name ?? '').trim()) }
+const A2L_ITEM_HEAD = /power|merit|flaw|trait|ritual|ceremon|advantage|loresheet|clan\b|path\b|item|name/i
+function a2lItemIndex () {
+  if (a2lState.items) return a2lState.items
+  const byKey = new Map()
+  const archived = (i) => { for (let f = i.folder, n = 0; f && n < 6; f = f.folder, n++) if (/archive/i.test(f.name ?? '')) return true; return false }
+  const rank = (i) => A2L_ITEM_TYPES.indexOf(i.type) * 10 + (/^(?:ported|elder)/i.test(i.folder?.name ?? '') ? 1 : 0)
+  for (const i of game.items ?? []) {
+    if (!A2L_ITEM_TYPES.includes(i.type) || archived(i)) continue
+    const key = a2lItemKey(i.name)
+    if (key.length < 3) continue
+    const cur = byKey.get(key)
+    if (!cur || rank(i) < cur.rank) byKey.set(key, { uuid: i.uuid, id: i.id, name: i.name, type: i.type, rank: rank(i) })
+  }
+  const prose = [...byKey.values()].filter((x) => ['discipline', 'clanTrait', 'merit', 'flaw'].includes(x.type) && a2lProseName(x.name)).map((x) => x.name)
+  a2lState.items = { byKey, regex: a2lNameRegex(prose) }
+  return a2lState.items
+}
+function a2lItemLink (doc, ref, shown, { iconOnly = false } = {}) {
+  const a = doc.createElement('a')
+  a.className = `content-link v6-item${iconOnly ? ' v6-item-icon' : ''}`
+  a.setAttribute('draggable', 'true')
+  a.setAttribute('data-link', '')
+  a.dataset.uuid = ref.uuid
+  a.dataset.id = ref.id
+  a.dataset.type = 'Item'
+  a.dataset.tooltip = `Open ${ref.name}`
+  a.innerHTML = `<i class="fa-solid ${A2L_ITEM_ICON[ref.type] ?? 'fa-suitcase'}"></i>`
+  if (!iconOnly) a.appendChild(doc.createTextNode(shown))
+  return a
+}
+function a2lLinkItems (root) {
+  if (root.dataset.v6Items === '1') return
+  root.dataset.v6Items = '1'
+  const idx = a2lItemIndex()
+  if (!idx.byKey.size) return
+  const doc = root.ownerDocument
+  let made = 0
+  // 1. a whole cell, a bold or italic run, or a list term that is exactly an item's name
+  for (const el of root.querySelectorAll('td, th, strong, b, em, dt')) {
+    if (made >= 400) break
+    if (el.closest('a, h1, h2, h3, h4, h5, h6, thead') || el.querySelector('a, table, p, ul, ol')) continue
+    const text = el.textContent ?? ''
+    if (text.length < 3 || text.length > 60) continue
+    const ref = idx.byKey.get(a2lItemKey(text))
+    if (!ref) continue
+    if (a2lPlainWord(ref.name)) {
+      const cell = el.closest('td')
+      const table = cell?.closest('table')
+      const col = cell ? [...cell.parentElement.children].indexOf(cell) : -1
+      const head = table?.querySelector('thead tr, tr')?.children?.[col]?.textContent ?? ''
+      if (!cell || !A2L_ITEM_HEAD.test(head)) continue
+    }
+    // keep the element, wrap what is in it
+    const a = a2lItemLink(doc, ref, '')
+    while (el.firstChild) a.appendChild(el.firstChild)
+    el.appendChild(a)
+    made++
+  }
+  // 2. a heading that is an item's name gets a small link after it
+  for (const h of root.querySelectorAll('h2, h3, h4, h5')) {
+    if (h.querySelector('a.v6-item') || h.classList.contains('v6-dup')) continue
+    const ref = idx.byKey.get(a2lItemKey(h.textContent))
+    if (ref && !(a2lPlainWord(ref.name) && ['lifepath', 'clan', 'nature'].includes(ref.type))) { h.appendChild(doc.createTextNode(' ')); h.appendChild(a2lItemLink(doc, ref, '', { iconOnly: true })); made++ }
+  }
+  // 3. distinctive names in running text, first mention on the page
+  if (idx.regex) {
+    const seen = new Set()
+    for (const node of a2lTextNodes(root)) {
+      if (made >= 500) break
+      if (node.parentElement?.closest?.('a')) continue
+      const finds = []
+      idx.regex.lastIndex = 0
+      let m
+      while ((m = idx.regex.exec(node.nodeValue))) {
+        const ref = idx.byKey.get(a2lItemKey(m[1]))
+        if (!ref || seen.has(ref.uuid)) continue
+        seen.add(ref.uuid)
+        finds.push({ index: m.index, length: m[0].length, make: (d, shown) => a2lItemLink(d, ref, shown) })
+        made++
+      }
+      a2lSplice(node, finds)
+    }
+  }
 }
 
 // Who rolls when a chip is clicked: the selected token, your character, or your only character.
@@ -8353,6 +8449,10 @@ a.v6-roll { display: inline; padding: 0.05em 0.4em; border-radius: 4px; border: 
 a.v6-roll:hover { background: color-mix(in srgb, #b3261e 22%, transparent); text-shadow: none; }
 a.v6-roll i { font-size: 0.85em; opacity: 0.8; margin-right: 0.3em; }
 a.v6-actor { cursor: pointer; white-space: nowrap; }
+a.v6-item i { font-size: 0.8em; opacity: 0.75; margin-right: 0.3em; }
+a.v6-item.v6-item-icon { padding: 0 4px; font-size: 0.6em; vertical-align: middle; }
+a.v6-item.v6-item-icon i { margin: 0; }
+td > a.v6-item, th > a.v6-item { display: inline-block; white-space: normal; }
 a.v6-actor i { font-size: 0.8em; opacity: 0.7; margin-right: 0.25em; }
 .a2l-request h4 { margin: 0 0 2px; font-weight: 700; }
 .a2l-request p { margin: 0 0 6px; }
@@ -8371,11 +8471,13 @@ async function a2LinksBoot () {
   const api = globalThis.V6Alpha2
   if (api.links?.booted) return true
   a2eReg('journalLinks', { name: 'Clickable journals', hint: 'Tests written in V6 journal pages become roll buttons, and character names become links to their sheets.', scope: 'client', config: true, type: Boolean, default: true, requiresReload: true })
+  a2eReg('journalItems', { name: 'Journals: link powers, traits, merits and flaws', hint: 'Every power, clan trait, merit or flaw named in a V6 journal page links to its item: click to open it, drag it onto a sheet.', scope: 'client', config: true, type: Boolean, default: true, requiresReload: true })
   a2lInjectStyles()
   if (!a2lState.hooked) {
     a2lState.hooked = true
     document.addEventListener('click', a2lOnClick, true)
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2lRenderChat(message, html) } catch (e) { console.error('V6 Automation | request card', e) } })
+    for (const h of ['createItem', 'deleteItem', 'updateItem']) Hooks.on(h, (i, ch) => { if (!i.parent && (h !== 'updateItem' || 'name' in (ch ?? {}) || 'folder' in (ch ?? {}))) a2lState.items = null })
     Hooks.on('createChatMessage', a2lOnCreate)
     Hooks.on('updateChatMessage', a2lOnUpdate)
     Hooks.on('getSceneControlButtons', (controls) => {
@@ -8385,7 +8487,7 @@ async function a2LinksBoot () {
     })
     try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
   }
-  api.links = { booted: true, rollTest: a2lRollTest, openActor: a2lOpenActor, rules: { findTests: a2lFindTests, linkable: a2lLinkable } }
+  api.links = { booted: true, rollTest: a2lRollTest, openActor: a2lOpenActor, rules: { findTests: a2lFindTests, linkable: a2lLinkable, itemKey: a2lItemKey, proseName: a2lProseName } }
   api.request = Object.assign((opts) => (opts?.test ? a2lRequest(opts) : a2lRequestDialog(opts ?? {})), { dialog: a2lRequestDialog, post: a2lRequest })
   console.log('V6 Automation | journal links and roll requests loaded')
   return true
