@@ -13771,6 +13771,13 @@ async function runV6Importer (opts = {}) {
   let advCache = null
   const log = (m) => console.log(`V6 Importer | ${m}`)
   const note = (m) => { ui.notifications.info(m); log(m) }
+  // a comparison says so at once and shows how far it is (the bar needs Foundry 13 or later)
+  let bar = null
+  if (dry && !opts.quiet) {
+    const msg = `Comparing ${choice.list.length} ${choice.list.length === 1 ? 'bundle' : 'bundles'} with what is there. Nothing is written; this takes a few seconds.`
+    try { bar = ui.notifications.info(msg, { progress: true }) } catch (e) { ui.notifications.info(msg) }
+  }
+  const step = (pct, message) => { try { bar?.update?.(message ? { pct, message } : { pct }) } catch (e) { /* only a progress bar */ } }
 
   // ---------- helpers ----------
   const byKey = (collection) => { const map = new Map(); for (const d of collection) { const k = d.getFlag('world', FLAG); if (k) map.set(k, d) } return map }
@@ -14026,6 +14033,7 @@ async function runV6Importer (opts = {}) {
     note(`${data.name}: Adventure ${old ? 'updated' : 'created'} in the "V6 Conversion" compendium (${counts}).`)
   }
 
+  let done = 0
   for (const f of choice.list) {
     try {
       const bundle = JSON.parse(await f.text())
@@ -14033,6 +14041,7 @@ async function runV6Importer (opts = {}) {
       const toWorld = bundle.target === 'world' || choice.mode === 'world'
       if (dry) {
         log(`Comparing "${bundle.name}"…`)
+        step(done / choice.list.length, `Comparing "${bundle.name}" (${done + 1} of ${choice.list.length}). Nothing is written.`)
         const images = await mirrorAll(bundle)
         const rows = []
         if (toWorld) await importToWorld(rewrite(bundle), rows); else await importToAdventure(rewrite(bundle), rows)
@@ -14044,9 +14053,10 @@ async function runV6Importer (opts = {}) {
       const data = rewrite(bundle)
       if (toWorld) await importToWorld(data)
       else await importToAdventure(data)
-    } catch (err) { ui.notifications.error(`${dry ? 'Comparing' : 'Import of'} ${f.name} failed: ${err.message}`); console.error(err) }
+    } catch (err) { ui.notifications.error(`${dry ? 'Comparing' : 'Import of'} ${f.name} failed: ${err.message}`); console.error(err) } finally { done += 1 }
   }
   if (dry) {
+    step(1)
     if (!opts.quiet) v6iShowReport(report)
     return report
   }
