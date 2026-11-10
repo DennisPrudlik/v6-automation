@@ -9955,7 +9955,12 @@ async function a2vRun (actor, id) {
   if (!actor.isOwner) { ui.notifications.warn(`You don't own ${actor.name}.`); return null }
   const target = a2vTarget(actor)
   if (move.target && !target) { ui.notifications.warn(`${move.label}: target a token first (T).`); return null }
-  if (move.needs && target && !a2zHas(target, move.needs)) ui.notifications.info(`${move.label} is for a target you hold. Rolling anyway.`)
+  // crushing and tying up need the hold first (PG p.118-119); the Storyteller can wave it through
+  if (move.needs && target && !a2zHas(target, move.needs)) {
+    if (!game.user.isGM) { ui.notifications.warn(`${move.label}: you have to hold ${target.name} first. Grab it, then try again (PG p.118).`); return null }
+    const go = await foundry.applications.api.DialogV2.confirm({ window: { title: move.label }, content: `<p><strong>${a2Esc(target.name)}</strong> isn't held. ${a2Esc(move.label)} is for a target you hold (PG p.118).</p><p>Roll anyway?</p>`, rejectClose: false }).catch(() => false)
+    if (!go) return null
+  }
   if (move.instant) return a2vInstant(actor, move, target)
   const before = new Set(foundry.applications.instances.keys())
   const token = move.effect || move.defences ? a2oSetMove(actor, { id: move.id, label: move.label, melee: Boolean(move.melee), defences: move.defences ?? null, effect: move.effect ?? null }) : null
@@ -11661,17 +11666,19 @@ globalThis.a2TrackBoot ??= a2TrackBoot
 // glass on each list searches.
 // Items carry flags.world.a2act { v, kind, ref }. Setting (world): sheetActions (on).
 
-const A2Q_VERSION = 1
+const A2Q_VERSION = 2 // 2: Investigate, Track and Follow by the Alpha 2 rules
 const A2Q_GROUP = { Attack: 'physical', Wrestle: 'physical', 'Team and tricks': 'general', Yourself: 'general' }
 const A2Q_EXTRA = [
   { ref: 'dodge', kind: 'test', group: 'physical', name: 'Dodge', role: 'defense', act: 'reaction', test: { attributes: ['dexterity'], skills: ['athletics'] }, text: 'Defend against any attack. Costs no reaction (PG p.120).' },
   { ref: 'parry', kind: 'test', group: 'physical', name: 'Parry', role: 'defense', act: 'reaction', test: { attributes: ['dexterity'], skills: ['fighting'] }, text: 'Defend against a melee attack. Costs no reaction (PG p.120).' },
+  { ref: 'x-investigate', kind: 'test', group: 'exploration', name: 'Investigate', role: 'utility', act: 'action', test: { attributes: ['intelligence', 'wits'], skills: ['investigation'] }, text: 'Intelligence or Wits + Investigation against how well it is hidden: in plain sight 2, tucked away 3, well camouflaged 5, behind a password or cipher 7. A painful failure turns up something misleading.' },
+  { ref: 'x-track', kind: 'test', group: 'exploration', name: 'Track', role: 'utility', act: 'action', test: { attributes: ['wits'], skills: ['survival'] }, text: 'Wits + Survival against a Difficulty, or against the target\'s Wits + Survival if it hid its trail. The second failure loses the trail for the scene; a painful failure spoils it.' },
+  { ref: 'x-follow', kind: 'test', group: 'exploration', name: 'Follow', role: 'utility', act: 'action', test: { attributes: ['wits'], skills: ['awareness'] }, text: 'Wits + Awareness; the target must be sensed and not Far Away. The first failure loses it briefly, the second for good; on a painful failure it spots you.' },
   { ref: 'surge', kind: 'tool', group: 'general', name: 'Blood Surge', role: 'utility', act: 'free', vampire: true, text: 'Spend Vitae for extra dice on one test.' },
   { ref: 'feed', kind: 'tool', group: 'humanity', name: 'Feed', role: 'utility', act: 'action', vampire: true, text: 'Hunt or drink: the feeding window, with Herd and the Masquerade risk.' },
   { ref: 'frenzy', kind: 'tool', group: 'humanity', name: 'Resist frenzy', role: 'defense', act: 'reaction', vampire: true, text: 'The frenzy test: fear, rage or hunger.' },
   { ref: 'bonds', kind: 'tool', group: 'humanity', name: 'Blood Bonds', role: 'utility', act: 'none', text: 'Whose blood binds this character, and how strongly.' }
 ]
-const A2Q_PACK = ['Investigate', 'Track', 'Follow'] // exploration, taken from the system's own actions
 
 // Every action the module puts on a sheet. Pure. → [{ ref, kind, group, name, role, act, test, text, vampire }]
 function a2qCatalog () {
@@ -11710,35 +11717,35 @@ function a2qMissing (catalog, have, { vampire = true } = {}) {
   return catalog.filter((c) => !set.has(c.ref) && (vampire || !c.vampire))
 }
 
+// Updates for the module's own action items that were written by an older version. Pure.
+function a2qStale (items, catalog) {
+  const out = []
+  for (const i of items ?? []) {
+    const f = i.flags?.world?.a2act
+    if (i.type !== 'action' || !f?.ref || a2Int(f.v) >= A2Q_VERSION) continue
+    const c = catalog.find((x) => x.ref === f.ref)
+    if (!c) continue
+    const d = a2qItemData(c)
+    out.push({ _id: i.id ?? i._id, name: d.name, 'system.description': d.system.description, 'system.source': d.system.source, 'system.group': d.system.group, 'system.test': d.system.test, 'flags.world.a2act': d.flags.world.a2act })
+  }
+  return out
+}
 const a2qState = { hooked: false, busy: new Set(), filled: new Set() }
 function a2qOn () { return a2Enabled() && a2eGet('sheetActions', true) !== false }
 function a2qHave (actor) { return actor.items.filter((i) => i.type === 'action' && i.flags?.world?.a2act?.ref).map((i) => i.flags.world.a2act.ref) }
 function a2qFits (actor) { return actor?.documentName === 'Actor' && actor.type !== 'npc' && Boolean(a2Rules(actor)) }
-async function a2qPackItems () {
-  const out = []
-  try {
-    const pack = game.packs.get('wod6e.actions')
-    const docs = pack ? await pack.getDocuments() : []
-    for (const n of A2Q_PACK) {
-      const d = docs.find((x) => x.name === n)
-      if (!d) continue
-      const o = d.toObject()
-      delete o._id
-      o.flags = { ...(o.flags ?? {}), world: { ...(o.flags?.world ?? {}), a2act: { v: A2Q_VERSION, kind: 'test', ref: `x-${n.toLowerCase()}` } } }
-      out.push(o)
-    }
-  } catch (e) { console.error('V6 Automation | system actions', e) }
-  return out
-}
 async function a2qSync (actor, { quiet = true } = {}) {
   if (!a2qFits(actor) || !actor.isOwner || a2qState.busy.has(actor.id)) return 0
   a2qState.busy.add(actor.id)
   try {
     const have = a2qHave(actor)
     const vampire = a2Creature(actor) === 'vampire'
-    const data = a2qMissing(a2qCatalog(), have, { vampire }).map(a2qItemData)
-    for (const p of await a2qPackItems()) if (!have.includes(p.flags.world.a2act.ref)) data.push(p)
+    const catalog = a2qCatalog()
+    const data = a2qMissing(catalog, have, { vampire }).map(a2qItemData)
     if (data.length) await actor.createEmbeddedDocuments('Item', data)
+    // actions from an older version of the module follow the catalogue
+    const upd = a2qStale(actor.items, catalog)
+    if (upd.length) await actor.updateEmbeddedDocuments('Item', upd)
     if (!quiet) ui.notifications.info(data.length ? `${actor.name}: ${data.length} actions added to the Actions tab.` : `${actor.name} already has every action.`)
     return data.length
   } finally { a2qState.busy.delete(actor.id) }
@@ -11827,7 +11834,8 @@ function a2qRenderSheet (app, element) {
     const mine = game.users?.activeGM ? game.users.activeGM.isSelf : true
     if (mine && a2qFits(actor) && actor.isOwner && !actor.pack && !a2qState.filled.has(actor.id)) {
       a2qState.filled.add(actor.id)
-      if (a2qMissing(a2qCatalog(), a2qHave(actor), { vampire: a2Creature(actor) === 'vampire' }).length) a2qSync(actor).catch((e) => console.error('V6 Automation | action lists', e))
+      const cat = a2qCatalog()
+      if (a2qMissing(cat, a2qHave(actor), { vampire: a2Creature(actor) === 'vampire' }).length || a2qStale(actor.items, cat).length) a2qSync(actor).catch((e) => console.error('V6 Automation | action lists', e))
     }
   } catch (e) { console.error('V6 Automation | sheet actions', e) }
 }
@@ -11848,12 +11856,14 @@ async function a2qCompendium () {
   if (!pack) return null
   const docs = await pack.getDocuments()
   const have = docs.map((d) => d.flags?.world?.a2act?.ref).filter(Boolean)
-  const data = a2qMissing(a2qCatalog(), have).map(a2qItemData)
-  for (const p of await a2qPackItems()) if (!have.includes(p.flags.world.a2act.ref)) data.push(p)
-  if (!data.length) return pack
+  const catalog = a2qCatalog()
+  const data = a2qMissing(catalog, have).map(a2qItemData)
+  const upd = a2qStale(docs, catalog)
+  if (!data.length && !upd.length) return pack
   const locked = pack.locked
   if (locked) await pack.configure({ locked: false })
-  await Item.implementation.createDocuments(data, { pack: pack.collection })
+  if (data.length) await Item.implementation.createDocuments(data, { pack: pack.collection })
+  if (upd.length) await Item.implementation.updateDocuments(upd, { pack: pack.collection })
   if (locked) await pack.configure({ locked: true })
   return pack
 }
@@ -12037,13 +12047,15 @@ async function runV6Importer (opts = {}) {
     for (const c of chunk(upd, 100)) await Item.updateDocuments(c, { recursive: false, diff: false })
     if (data.items?.length) note(`${data.name}: ${newItems.length} items created, ${upd.length} updated.`)
 
-    const actors = byKey(game.actors); let ac = 0; let au = 0
+    const actors = byKey(game.actors); let ac = 0; let au = 0; const kept = []
     for (const e of data.actors ?? []) {
       const d = meta(e); const ex = actors.get(e.key)
+      // a character a player owns is in play: a re-import would wipe its items and what it has tracked
+      if (ex?.hasPlayerOwner) { kept.push(ex.name); continue }
       if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
       if (ex) { const embedded = d.items ?? []; delete d.items; await ex.update(d, { recursive: false, diff: false }); await ex.deleteEmbeddedDocuments('Item', ex.items.map((i) => i.id)); if (embedded.length) await ex.createEmbeddedDocuments('Item', embedded); au++ } else { await Actor.create(d); ac++ }
     }
-    if (data.actors?.length) note(`${data.name}: ${ac} actors created, ${au} updated.`)
+    if (data.actors?.length) note(`${data.name}: ${ac} actors created, ${au} updated.${kept.length ? ` Left alone, because a player owns them: ${kept.join(', ')}.` : ''}`)
 
     const journals = byKey(game.journal); let jc = 0; let ju = 0
     for (const e of data.journals ?? []) {
@@ -12096,9 +12108,10 @@ async function runV6Importer (opts = {}) {
       folders, items, actors, journal, scenes, flags: { world: { [FLAG]: data.slug } }
     }
     const old = (await pack.getDocuments()).find((a) => a.getFlag('world', FLAG) === data.slug)
-    if (old) await old.delete()
+    // the new one first: if Foundry rejects it, the old Adventure is still there
     const made = await CONFIG.Adventure.documentClass.create(adv, { pack: pack.collection })
     if (!made) throw new Error('Foundry rejected the Adventure data (see the console for the field)')
+    if (old) await old.delete()
     note(`${data.name}: Adventure ${old ? 'updated' : 'created'} in the "V6 Conversion" compendium (${counts}).`)
   }
 
