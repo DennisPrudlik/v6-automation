@@ -1347,6 +1347,36 @@ function a2DecorateVampireSheet (app, root, actor) {
     hs.querySelectorAll('.a2-humanity').forEach((e) => e.remove())
     hs.append(a2HumanityTracker(actor, editable, rules, creature))
   }
+  a2SkillDots(root, actor, editable)
+}
+
+// The system sheet always draws five dots for a Skill, whatever its maximum. Above the neonate limit
+// (ancillae 7, elders 8, the house Methuselah tier 10) redraw the row with one dot per point of the
+// maximum, in groups of five like the Discipline rows. Rows that stop at 5 are left to the system.
+function a2SkillDots (root, actor, editable) {
+  const skills = actor.system?.skills
+  if (!skills) return
+  root.querySelectorAll('.sheet-section-row[data-skill]').forEach((row) => {
+    const key = row.dataset.skill
+    const skill = skills[key]
+    const box = row.querySelector('.dot-tracker')
+    if (!skill || !box) return
+    const value = Number(skill.value) || 0
+    const max = Math.min(10, Math.max(Number(skill.max) || 5, value))
+    row.classList.toggle('a2-skill-wide', max > 5)
+    if (max <= 5) return
+    const effective = Number.isFinite(Number(skill.effective)) ? Number(skill.effective) : value
+    const lo = Math.min(value, effective); const hi = Math.max(value, effective)
+    const label = row.querySelector('.skill-name')?.textContent?.trim() || key
+    const dots = a2Boxes(max, (i) => {
+      const modified = i > lo && i <= hi
+      const cls = `dot-tracker-space resource-tracker-space${i <= effective ? ' filled' : ''}${modified ? ' modified' : ''}`
+      const title = `${label}: ${i}${modified ? ' (modified by a condition)' : ''}`
+      const act = editable ? ` data-action="setTrackerValue" data-resource-path="system.skills.${key}" data-value="${i}"` : ' disabled'
+      return `<button type="button" class="${cls}"${act} title="${title}"></button>`
+    })
+    box.innerHTML = a2Grouped(dots).replaceAll('class="resource-tracker-group"', 'class="dot-tracker-group resource-tracker-group"')
+  })
 }
 
 function a2DecorateVitae (section, actor, rules, creature) {
@@ -1790,6 +1820,9 @@ function a2InjectStyles () {
 .actor.sheet .a2-humanity { padding: 4px 16px 8px; }
 .actor.sheet .a2-humanity .resource-tracker-header .a2-subnote { margin: 0 0 0 auto; }
 .actor.sheet .resource-tracker-space.a2-square { border-radius: 3px; }
+.actor.sheet .sheet-section-row.a2-skill-wide .dot-tracker { display: flex; flex-wrap: nowrap; gap: 5px; }
+.actor.sheet .sheet-section-row.a2-skill-wide .dot-tracker-group { display: flex; flex-wrap: nowrap; gap: 2px; }
+.actor.sheet .sheet-section-row.a2-skill-wide .dot-tracker-space { width: 12px; height: 12px; min-width: 12px; padding: 0; }
 .actor.sheet .resource-tracker-space.a2-violation::after { content: ''; position: absolute; top: 50%; left: -3px; width: calc(100% + 6px); height: 2px; background: var(--tracker-text, currentColor); transform: translateY(-50%) rotate(-45deg); }
 .actor.sheet.npc .a2-roll { margin-left: 4px; cursor: pointer; }
 `
