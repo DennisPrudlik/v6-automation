@@ -1666,8 +1666,7 @@ function a2ZeroHealthLines (actor, st) {
     if (allBaneful) out.push(vitae > 0 ? 'All Health is baneful: torpor (PG p.100).' : 'All Health is baneful and no Vitae is left: Final Death (PG p.101).')
     else if (st.value === 0) out.push('0 Health: Physical Attributes impaired, −2 dice to pools using them, until 1 Health is regained (PG p.101).')
     if (a2NpcInfo(actor)) {
-      if (allBaneful && vitae > 0) out.push('NPC in torpor: further baneful damage can destroy it (ST p.42).')
-      else if (st.value === 0) out.push(`NPC at 0 Health: it risks a hunger frenzy, Difficulty ${2 * a2ActorGenMod(actor)} (ST p.41).`)
+      if (allBaneful) { if (vitae > 0) out.push('NPC in torpor: further baneful damage can destroy it (ST p.42).') } else if (st.value === 0) out.push(`NPC at 0 Health: it risks a hunger frenzy, Difficulty ${2 * a2ActorGenMod(actor)} (ST p.41).`)
     }
   } else if (st.value === 0) {
     out.push(creature === 'other' ? '0 Health: whether it dies depends on the creature and the cause (ST p.42).' : '0 Health: a mortal dies (PG p.101).')
@@ -4692,6 +4691,7 @@ async function a2tVictimLocal ({ uuid, vitaeLoss = 0, bloodLeft = null, damage =
   if (Object.keys(upd).length) await victim.update(upd)
   if (a2Int(damage) > 0) await a2DamageActor(victim, a2Int(damage))
   if (killed) {
+    try { if (victim.type === 'npc' || (victim.type === 'vampire' && a2Creature(victim) !== 'vampire')) await victim.update({ 'system.health.value': 0 }) } catch (e) { console.error('V6 Automation | drained victim', e) }
     const dead = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
     try { if (!victim.statuses?.has?.(dead)) await victim.toggleStatusEffect(dead, { active: true, overlay: true }) } catch (e) { console.error('V6 Automation | drained victim', e) }
   }
@@ -5039,7 +5039,7 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
     if (rules?.vitae && res.vitae !== vitae) upd['system.vitae.value'] = res.vitae
     if (s.willpower && res.willpower !== wpBefore) upd['system.willpower.value'] = res.willpower
     if (res.health.value !== health.value || res.health.baneful !== health.baneful) { upd['system.health.value'] = res.health.value; upd['system.health.disabled'] = res.health.baneful }
-    if (res.torpor && (!prevTorpor || prevTorpor.reason !== res.torpor.reason)) upd['flags.world.a2.torpor'] = { reason: res.torpor.reason, since: night }
+    if (res.torpor && !res.finalDeath && (!prevTorpor || prevTorpor.reason !== res.torpor.reason)) upd['flags.world.a2.torpor'] = { reason: res.torpor.reason, since: night }
     if (!res.torpor && prevTorpor) a2Unset(upd, 'flags.world.a2.torpor')
     if (res.bloodLeft !== null && res.bloodLeft !== (actor.flags?.world?.a2?.bloodLeft ?? null)) {
       if (res.bloodLeft >= 10) a2Unset(upd, 'flags.world.a2.bloodLeft')
@@ -5051,12 +5051,16 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
       if (fresh.length !== bags.length) { upd['flags.world.a2.bloodBags'] = fresh; parts.push(`${a2Plural(bags.length - fresh.length, 'stored blood bag batch', 'stored blood bag batches')} went stale`) }
     }
     if (Object.keys(upd).length) await actor.update(upd, { a2Damage: true, a2tNewNight: true })
+    if (res.finalDeath) {
+      const dead = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
+      try { if (!actor.statuses?.has?.(dead)) await actor.toggleStatusEffect(dead, { active: true, overlay: true }) } catch (e) { console.error('V6 Automation | Final Death', e) }
+    }
     if (creature === 'vampire') {
       const total = a2ActorVitaeTotal(actor)
       const override = actor.flags?.world?.a2?.hungerOverride
       const hungerAfter = override !== null && override !== undefined && Number.isFinite(Number(override)) ? a2Clamp(a2Int(override), 0, 5) : a2HungerFromVitae(res.vitae, total)
       if (res.rose) parts.push(`rose: Vitae ${vitae} → ${res.vitae}, Hunger ${hungerBefore} → ${hungerAfter}`)
-      else if (res.finalDeath) parts.push('Final Death')
+      else if (res.finalDeath) { /* its own line below says so */ }
       else parts.push(`in torpor${res.vitae !== vitae ? `, Vitae ${vitae} → ${res.vitae}` : ''}`)
       if (res.rose && res.vitae * 2 < total) parts.push('below half Vitae: helpless prey in sight can set off a hunger frenzy (PG p.145)')
     } else if (res.healed) parts.push(`Health ${health.value} → ${res.health.value} (rest)`)
@@ -8073,6 +8077,9 @@ function a2pHooks () {
   // A power's condition taken off some other way (the bin on the sheet, End Scene on the system's
   // chronicle bar, its last use) left its status icons on the token: take those off with it.
   let statusChain = Promise.resolve()
+  const gone = (uuid) => { try { if (uuid && a2pOn() && a2pIsActiveGM()) a2pEndWhere((ap) => ap.source === uuid, 'its user is gone').catch((e) => console.error('V6 Automation | powers of a deleted creature', e)) } catch (e) { console.error('V6 Automation | powers of a deleted creature', e) } }
+  Hooks.on('deleteActor', (actor) => gone(actor?.uuid))
+  Hooks.on('deleteToken', (doc) => { if (doc && !doc.actorLink) gone(doc.actor?.uuid ?? `${doc.uuid}.Actor.${doc.actorId}`) })
   Hooks.on('deleteItem', (item, options) => {
     try {
       if (!a2pOn() || !a2pIsActiveGM() || options?.a2pEnd) return
@@ -9495,7 +9502,7 @@ function a2kStats (actor) {
   return { wits: a2Int(w?.effective ?? w?.value), physical: null }
 }
 function a2kInitFor (actor) {
-  return a2kInitiative({ ...a2kStats(actor), player: Boolean(actor?.hasPlayerOwner) })
+  return a2kInitiative({ ...a2kStats(actor), player: a2IsPC(actor) })
 }
 function a2kPatch () {
   if (a2kState.patched) return
@@ -11906,10 +11913,10 @@ function a2wPatchBars () {
 function a2wTokenHooks () {
   Hooks.on('preCreateToken', (doc) => {
     try {
-      if (a2eGet('tokenSetup', true) === false || !a2Enabled() || !doc.actor || doc.actor.type !== 'vampire') return
+      if (a2eGet('tokenSetup', true) === false || !a2Enabled() || !doc.actor || (doc.actor.type !== 'vampire' && doc.actor.type !== 'npc')) return
       const rules = a2Rules(doc.actor) ?? {}
       const upd = { displayBars: CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER, bar1: { attribute: 'health' } }
-      upd.bar2 = { attribute: rules.vitae ? 'vitae' : 'willpower' }
+      upd.bar2 = { attribute: doc.actor.type === 'vampire' && rules.vitae ? 'vitae' : 'willpower' }
       doc.updateSource(upd)
     } catch (e) { console.error('V6 Automation | token setup', e) }
   })
@@ -11922,10 +11929,11 @@ function a2wTokenHooks () {
       // torpor from the tools shows as the Torpor state
       if (a2 && 'torpor' in a2 && typeof a2zSet === 'function' && typeof a2zHas === 'function') { const on = Boolean(actor.flags?.world?.a2?.torpor); if (a2zHas(actor, 'torpor') !== on) a2zSet(actor, 'torpor', on) }
       // a mortal, ghoul or animal at 0 Health is down (ST p.42)
-      if (changes?.system?.health && actor.type === 'vampire') {
-        const c = a2Creature(actor)
+      const simple = actor.type === 'npc' ? String(actor.system?.creatureKind ?? 'human') : null
+      if (changes?.system?.health && (actor.type === 'vampire' || (simple && simple !== 'vampire' && simple !== 'other'))) {
+        const c = simple ?? a2Creature(actor)
         if (c !== 'vampire') {
-          const dead = a2ActorHealth(actor).value === 0
+          const dead = simple ? a2Int(actor.system?.health?.value) === 0 : a2ActorHealth(actor).value === 0
           const id = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
           if (Boolean(actor.statuses?.has?.(id)) !== dead) actor.toggleStatusEffect(id, { active: dead, overlay: true })
           const cb = game.combat?.combatants?.find?.((x) => x.actor?.uuid === actor.uuid)
@@ -12835,7 +12843,7 @@ function a2qRenderSheet (app, element) {
 async function a2qSyncAll () {
   if (!game.user.isGM || !a2qOn()) return 0
   let n = 0
-  for (const a of game.actors) { if (a2qFits(a) && a.hasPlayerOwner) { try { n += await a2qSync(a) } catch (e) { console.error('V6 Automation | action lists', a.name, e) } } }
+  for (const a of game.actors) { if (a2qFits(a) && a2IsPC(a)) { try { n += await a2qSync(a) } catch (e) { console.error('V6 Automation | action lists', a.name, e) } } }
   return n
 }
 
@@ -12870,7 +12878,7 @@ async function a2ActsBoot () {
     a2qState.hooked = true
     Hooks.on('renderActorSheetV2', a2qRenderSheet)
     Hooks.on('createActor', (actor, options, userId) => { if ((game.users?.activeGM ? game.users.activeGM.isSelf : userId === game.user.id) && a2qOn() && a2qFits(actor) && !actor.pack) a2qSync(actor).catch(() => {}) })
-    Hooks.on('updateActor', (actor, changes) => { if (changes?.ownership && game.users?.activeGM?.isSelf && a2qOn() && a2qFits(actor) && actor.hasPlayerOwner) a2qSync(actor).catch(() => {}) })
+    Hooks.on('updateActor', (actor, changes) => { if (changes?.ownership && game.users?.activeGM?.isSelf && a2qOn() && a2qFits(actor) && a2IsPC(actor)) a2qSync(actor).catch(() => {}) })
     const style = document.createElement('style')
     style.id = 'v6a-acts-style'
     style.textContent = `
