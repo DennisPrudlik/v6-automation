@@ -257,6 +257,13 @@ function v6aHooks () {
     const upd = { 'system.vampire.clan.name': item.name }
     for (const key of item.system?.disciplines ?? []) upd[`system.vampire.disciplines.${key}.visible`] = true
     await actor.update(upd)
+    // A sheet holds one clan. A second clan dropped on it used to sit beside the first: the name on
+    // the sheet said the new one while clan traits, frenzy and in-clan costs still read the old.
+    const old = actor.items.filter((i) => i.type === 'clan' && i.id !== item.id)
+    if (old.length) {
+      await actor.deleteEmbeddedDocuments('Item', old.map((i) => i.id))
+      v6aNote.info(`${actor.name}: ${item.name} replaces ${old.map((i) => i.name).join(', ')} as the clan.`)
+    }
   })
 
   Hooks.on('preUpdateActor', (actor, changes, options) => {
@@ -658,6 +665,14 @@ function a2Creature (actor) {
   return A2_CREATURES.includes(c) ? c : 'vampire'
 }
 function a2Rules (actor) { return A2_CREATURE_RULES[a2Creature(actor)] ?? null }
+// A player character: owned by a player, or the character a user plays, the Storyteller's own too.
+// Foundry's hasPlayerOwner is false for a sheet only the GM owns, so the Storyteller's character was
+// left out of XP awards, the New Night's ticks and the dashboard.
+function a2IsPC (actor) {
+  if (!actor) return false
+  if (actor.hasPlayerOwner) return true
+  try { return Boolean(globalThis.game?.users?.some((u) => u.character?.id === actor.id)) } catch (e) { return false }
+}
 function a2NpcInfo (actor) { return actor?.flags?.world?.a2?.npc ?? null }
 function a2ActorGenMod (actor) {
   return a2Creature(actor) === 'vampire' ? a2GenModifier(actor.system?.vampire?.generation?.value) : 0
@@ -1890,6 +1905,45 @@ async function a2Migrate110b ({ dryRun = false } = {}) {
   }
   return report
 }
+// Step 3 (2.9.7). When 1.1.0 retired the "nature" items it gave every sheet a bare Humanity item of
+// its own. That one lacks what this module kept on the old item: the rank modifier as a bonus to
+// tick in the roll window (flags.world.v6auto, PG p.126) and the Path's data (flags.world.a2).
+// Both are copied from the Path of the same name among the world's Items.
+function a2PathFlags110 (item, lib) {
+  const have = item?.flags?.world ?? {}
+  const src = lib?.flags?.world ?? {}
+  const upd = {}
+  if (!have.v6auto && src.v6auto) upd['flags.world.v6auto'] = foundry.utils.deepClone(src.v6auto)
+  if (!have.a2 && src.a2) upd['flags.world.a2'] = foundry.utils.deepClone(src.a2)
+  return Object.keys(upd).length ? upd : null
+}
+async function a2Migrate110c ({ dryRun = false, actors = null } = {}) {
+  const only = Array.isArray(actors)
+  const report = { actors: 0, items: 0 }
+  if (!a2Native() || !game.user.isGM || (game.users.activeGM && game.users.activeGM.id !== game.user.id)) return report
+  const KEY = 'a2m110'
+  if (!game.settings.settings.has(`v6-automation.${KEY}`)) game.settings.register('v6-automation', KEY, { scope: 'world', config: false, type: Number, default: 0 })
+  const done = game.settings.get('v6-automation', KEY)
+  if (!only && (done < 2 || done >= 3)) return report // steps 1 and 2 first; this one runs once
+  const lib = new Map(game.items.filter((i) => i.type === 'path').map((i) => [i.name, i]))
+  if (!lib.size) return report // no Paths among the world's Items yet (the rules bundle is not imported): try again next time
+  const list = only ? actors : [...game.actors]
+  if (!only) for (const scene of game.scenes) for (const tok of scene.tokens) if (!tok.actorLink && tok.actor) list.push(tok.actor)
+  for (const actor of list) {
+    if (actor?.type !== 'vampire') continue
+    const upds = actor.items.filter((i) => i.type === 'path').map((i) => { const u = a2PathFlags110(i, lib.get(i.name)); return u ? { _id: i.id, ...u } : null }).filter(Boolean)
+    if (!upds.length) continue
+    report.actors++
+    report.items += upds.length
+    if (!dryRun) await actor.updateEmbeddedDocuments('Item', upds)
+  }
+  if (!only && !dryRun) {
+    await game.settings.set('v6-automation', KEY, 3)
+    if (report.items) v6aNote.info(`V6 Automation: the Humanity and Path rank modifier is back as a bonus to tick on ${report.actors} sheets (wod6e 1.1.0 had replaced the items that carried it).`)
+    console.log('V6 Automation | wod6e 1.1.0 step 3', report)
+  }
+  return report
+}
 async function a2Migrate110 ({ force = false, dryRun = false, actors = null } = {}) {
   const only = Array.isArray(actors)
   const report = { actors: 0, humanity: 0, items: 0, embedded: 0, packs: 0, tokens: 0, skipped: 0 }
@@ -2094,6 +2148,8 @@ function a2Hooks () {
   })
   Hooks.on('createActor', (actor, options, userId) => {
     if (a2Enabled() && game.user.id === userId && game.user.isGM && actor.type === 'vampire') a2MigrateHumanity({ actors: [actor] }).then(a2ReportMigration)
+    // the system's bare Humanity item on a new sheet: give it the rank modifier bonus and the Path's data
+    if (a2Enabled() && a2Native() && game.user.id === userId && game.user.isGM && actor.type === 'vampire') a2Migrate110c({ actors: [actor] }).catch((e) => console.error('V6 Automation | Path item', e))
     // a sheet in the 1.0.11 shape (Health still in our flag): bring it over like the rest of the world
     const f = actor.flags?.world?.a2
     if (a2Enabled() && a2Native() && game.user.id === userId && game.user.isGM && actor.type === 'vampire' && f?.health && !f.m110) a2Migrate110({ actors: [actor] }).catch((e) => console.error('V6 Automation | wod6e 1.1.0 migration', actor.name, e))
@@ -2128,6 +2184,7 @@ async function a2Boot () {
       migrateHumanity: a2MigrateHumanity,
       migrate110: a2Migrate110,
       migrate110b: a2Migrate110b,
+      migrate110c: a2Migrate110c,
       native: a2Native,
       revertHumanity: a2RevertHumanity,
       refresh: a2RefreshActors,
@@ -2174,7 +2231,7 @@ async function a2Boot () {
       if (game.user.isGM) {
         await a2RemoveAlpha1Automation()
         a2ReportMigration(await a2MigrateHumanity())
-        try { await a2Migrate110(); await a2Migrate110b() } catch (e) { console.error('V6 Automation | wod6e 1.1.0 migration', e); v6aNote.error('V6 Automation: moving the world to the wod6e 1.1.0 fields failed (see console). Nothing was lost; reload to try again.') }
+        try { await a2Migrate110(); await a2Migrate110b(); await a2Migrate110c() } catch (e) { console.error('V6 Automation | wod6e 1.1.0 migration', e); v6aNote.error('V6 Automation: moving the world to the wod6e 1.1.0 fields failed (see console). Nothing was lost; reload to try again.') }
       }
       a2RefreshActors()
     }
@@ -4841,7 +4898,7 @@ function a2tNightCandidates () {
     if (t.document?.actorLink === false) out.push({ actor: t.actor, ticked: true, token: true })
     else onScene.add(t.actor.id)
   }
-  for (const a of game.actors ?? []) if (['vampire', 'npc'].includes(a.type)) out.push({ actor: a, ticked: Boolean(a.hasPlayerOwner) || onScene.has(a.id), token: false })
+  for (const a of game.actors ?? []) if (['vampire', 'npc'].includes(a.type)) out.push({ actor: a, ticked: a2IsPC(a) || onScene.has(a.id), token: false })
   return out.sort((a, b) => (b.ticked - a.ticked) || String(a.actor.name).localeCompare(String(b.actor.name)))
 }
 
@@ -5513,7 +5570,7 @@ function a2tMasqOpen () {
 
 // ---- XP award ---------------------------------------------------------------------------
 function a2tXp (actor) { return a2tXpNormalize(actor?.flags?.world?.a2?.xp) }
-function a2tAwardCandidates () { return [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a.hasPlayerOwner).sort((a, b) => String(a.name).localeCompare(String(b.name))) }
+function a2tAwardCandidates () { return [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a2IsPC(a)).sort((a, b) => String(a.name).localeCompare(String(b.name))) }
 
 async function a2tAwardXP () {
   if (!a2tReady(true)) return null
@@ -9117,7 +9174,8 @@ async function a2lOpenActor (name, ref) {
   if (!actor && ref?.pack) {
     if (!game.user.isGM) { v6aNote.info(`${name} isn't in the world yet. Ask the Storyteller to open it once.`); return null }
     const adv = await game.packs.get(ref.pack)?.getDocument(ref.adventure)
-    const src = adv?.actors?.get(ref.id)
+    // an Adventure keeps its actors in a Set, not a collection: there is no get()
+    const src = [...(adv?.actors ?? [])].find((a) => (a?.id ?? a?._id) === ref.id) ?? null
     if (!src) { v6aNote.warn(`${name} was not found in the book compendium.`); return null }
     const data = src.toObject()
     let folder = game.folders.find((f) => f.type === 'Actor' && f.name === 'Imported NPCs (V6)')
@@ -9152,7 +9210,7 @@ function a2lTestLabel (test) {
 }
 function a2lCandidates () {
   const out = new Map()
-  for (const a of game.actors) if (a.type === 'vampire' && a.hasPlayerOwner) out.set(a.uuid, { actor: a, on: true })
+  for (const a of game.actors) if (a.type === 'vampire' && a2IsPC(a)) out.set(a.uuid, { actor: a, on: true })
   for (const t of globalThis.canvas?.tokens?.controlled ?? []) if (t.actor) out.set(t.actor.uuid, { actor: t.actor, on: true })
   return [...out.values()]
 }
@@ -11704,7 +11762,7 @@ function a2wRecapRolls (rows) {
 
 const a2wState = { hooked: false, dash: null, patched: false }
 function a2wOn () { return a2Enabled() && a2eGet('tableTools', true) !== false }
-function a2wPCs () { return [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a.hasPlayerOwner).sort((a, b) => a.name.localeCompare(b.name)) }
+function a2wPCs () { return [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a2IsPC(a)).sort((a, b) => a.name.localeCompare(b.name)) }
 
 // ---- dashboard ----
 function a2wDashRows () {
@@ -11735,7 +11793,7 @@ function a2wDashHtml () {
     const fz = typeof a2xFrenzyState === 'function' ? a2xFrenzyState(actor) : null
     const bonds = (actor.flags?.world?.a2?.bonds ?? []).filter((b) => a2Int(b.stage) > 0).map((b) => `${a2Esc(b.name)} ${b.stage}`).join(', ')
     const vinc = actor.flags?.world?.a2?.vinculum?.mates?.length ? 'vinculum' : ''
-    const xp = actor.hasPlayerOwner && typeof a2tXp === 'function' ? a2tXp(actor).available : null
+    const xp = a2IsPC(actor) && typeof a2tXp === 'function' ? a2tXp(actor).available : null
     const head = group !== last ? `<tr class="a2w-group"><td colspan="9">${group}</td></tr>` : ''
     last = group
     return `${head}<tr data-uuid="${actor.uuid}">
@@ -13248,7 +13306,7 @@ const A2N_VIOLATIONS = [
 // A follower of a Path answers to that Path's own violations (the "path" item on the sheet, PG p.129):
 // they lead the list; the general ones stay below for what the Storyteller still wants to mark.
 function a2nViolationList (path) {
-  const own = path?.kind === 'path' ? (path.violations ?? []).map((v, i) => ({ id: `own${i}`, label: String(v?.text ?? '').trim(), n: 1, page: 'PG p.129' })).filter((v) => v.label) : []
+  const own = path?.kind === 'path' ? (path.violations ?? []).map((v, i) => ({ id: `own${i}`, label: String(v?.text ?? '').trim().replace(/[.;,]+$/, ''), n: 1, page: 'PG p.129' })).filter((v) => v.label) : []
   return [...own, ...A2N_VIOLATIONS]
 }
 const A2N_SPAN = { 'one day': 1, 'one week': 7, 'one month': 30, 'one year': 365, 'one decade': 3650, 'one century': 36500 }
@@ -13803,7 +13861,7 @@ async function a2nGhouls () {
   const ghouls = a2nGhoulList()
   const night = a2nNight()
   const interval = a2Int(a2eGet('ghoulInterval', 30), 30)
-  const masters = [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a2Creature(a) === 'vampire' && (a.hasPlayerOwner || ghouls.some((g) => a2nDomitor(g)?.uuid === a.uuid))).sort((a, b) => a.name.localeCompare(b.name))
+  const masters = [...(game.actors ?? [])].filter((a) => a.type === 'vampire' && a2Creature(a) === 'vampire' && (a2IsPC(a) || ghouls.some((g) => a2nDomitor(g)?.uuid === a.uuid))).sort((a, b) => a.name.localeCompare(b.name))
   const rows = ghouls.map((g, i) => {
     const d = a2nDomitor(g)
     const due = a2nGhoulDue({ fed: g.flags?.world?.a2?.ghoulFed ?? null, night, interval })
@@ -14800,7 +14858,7 @@ async function runV6Importer (opts = {}) {
       const actors = byKey(game.actors)
       for (const e of data.actors ?? []) {
         const d = meta(e); const ex = actors.get(e.key)
-        if (ex?.hasPlayerOwner) { rows.push({ kind: 'actor', name: ex.name, state: 'kept', paths: ['a player owns it: an import leaves it alone'] }); continue }
+        if (ex?.hasPlayerOwner || (ex && game.users.some((u) => u.character?.id === ex.id))) { rows.push({ kind: 'actor', name: ex.name, state: 'kept', paths: ['a player owns it: an import leaves it alone'] }); continue }
         if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
         rows.push(v6iRow('actor', d.name ?? e.key, ex, ex ? actorPaths(ex.toObject(), ex.items.map((i) => i.toObject()), d) : []))
       }
@@ -14828,7 +14886,7 @@ async function runV6Importer (opts = {}) {
     for (const e of data.actors ?? []) {
       const d = meta(e); const ex = actors.get(e.key)
       // a character a player owns is in play: a re-import would wipe its items and what it has tracked
-      if (ex?.hasPlayerOwner) { kept.push(ex.name); continue }
+      if (ex?.hasPlayerOwner || (ex && game.users.some((u) => u.character?.id === ex.id))) { kept.push(ex.name); continue }
       if (d.img) d.prototypeToken = foundry.utils.mergeObject(d.prototypeToken ?? {}, { texture: { src: d.img } })
       // nothing differs: its items keep their ids and whatever play has tracked on it stays
       if (ex && !actorPaths(ex.toObject(), ex.items.map((i) => i.toObject()), d).length) { as++; continue }
