@@ -5849,6 +5849,8 @@ function a2tRenderSheet (app, element) {
   const root = element instanceof HTMLElement ? element : (element?.[0] ?? app?.element)
   if (!actor || !root || actor.type !== 'vampire') return
   try {
+    // only vampires and Duskborn hunt: no Feed button on a ghoul's or a mortal's sheet (PG p.102, p.136)
+    if (a2Creature(actor) !== 'vampire') root.querySelectorAll('.vitae-section [data-action="feed"]').forEach((e) => e.remove())
     if (!a2tPatchSheetInstance(app)) a2tSurgeFallback(root, actor)
     const side = root.querySelector('.a2-health-row .a2-side')
     if (!side || !actor.isOwner) return
@@ -5906,6 +5908,7 @@ function a2tInjectStyles () {
   const style = document.createElement('style')
   style.id = 'v6a-alpha2-tools-style'
   style.textContent = `
+body.a2t-bar #wod6e-chronicle-bar button[data-action="day"] { display: none !important; }
 .a2t-dialog { font-size: 13px; }
 .a2t-dialog [hidden] { display: none !important; }
 .a2t-dialog .a2t-row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
@@ -5999,6 +6002,37 @@ function a2tApi () {
 // Called from a2Boot(). Idempotent: global markers on V6Alpha2 guard the
 // hooks and the socket, the Blood Surge wrapper is marked on the function,
 // the tier maxima on the config objects.
+// ---- the system's chronicle bar (wod6e 1.1.0) ------------------------------------------
+// Its End Scene / Night / Session only delete conditions by their duration; a power's condition went
+// without its icons or its upkeep, and nobody rose, slept or was paid XP. The buttons open this
+// module's tools instead, and + / − on the Masquerade ask for the reason like the tracker here.
+// "Day" has no counterpart: the New Night covers the day's sleep.
+function a2tBarHandle (event) {
+  const btn = event.target?.closest?.('#wod6e-chronicle-bar button[data-action]')
+  if (!btn || !game.user?.isGM || !a2Enabled()) return
+  const action = btn.dataset.action
+  const run = { scene: () => a2tEndScene(), night: () => a2tNewNight(), session: () => a2tAwardXP(), day: () => a2tNewNight() }[action]
+  let go = run
+  if (!go && (action === 'mark' || action === 'clear')) {
+    const scope = btn.closest('#wod6e-chronicle-bar')?.querySelector('select')?.value
+    if (!scope || scope === 'chronicle') go = () => a2tMasqPrompt(action === 'mark' ? 1 : -1)
+  }
+  if (!go) return
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+  Promise.resolve().then(go).catch((e) => console.error('V6 Automation | chronicle bar', e))
+}
+function a2tBarDress () {
+  try {
+    document.body?.classList.toggle('a2t-bar', Boolean(game.user?.isGM && a2Enabled()))
+    const bar = document.getElementById('wod6e-chronicle-bar')
+    if (!bar || !game.user?.isGM || !a2Enabled()) return
+    const tips = { scene: 'End the scene: Blood Surges, one-scene conditions and powers, uses (V6 Automation)', night: 'New Night: rising, Willpower, mending, the night\'s upkeep (V6 Automation)', session: 'End the session: award XP and close it (V6 Automation)', mark: 'Mark the Masquerade Tracker, with the reason (V6 Automation)', clear: 'Erase from the Masquerade Tracker, with the reason (V6 Automation)' }
+    for (const [action, tip] of Object.entries(tips)) { const b = bar.querySelector(`button[data-action="${action}"]`); if (b) b.title = tip }
+  } catch (e) { /* the bar is not there */ }
+}
+
 async function a2ToolsBoot () {
   globalThis.V6Alpha2 ??= {}
   const api = globalThis.V6Alpha2
@@ -6015,6 +6049,23 @@ async function a2ToolsBoot () {
       const onSetting = (setting) => { if (setting?.key === `wod6e.${A2T_NATIVE_MASQ}`) a2tMasqFromNative().catch((e) => console.warn('V6 Automation | chronicle bar', e)) }
       Hooks.on('updateSetting', onSetting)
       Hooks.on('createSetting', onSetting)
+      document.addEventListener('click', a2tBarHandle, true)
+      // The system's "group" actor is a second coterie sheet that knows nothing of the Coterie window
+      // here (shared Resources, haven, domain): leave it out of the "Create Actor" choices.
+      Hooks.on('renderDialogV2', (app, element) => {
+        try {
+          if (!a2Enabled()) return
+          const root = element instanceof HTMLElement ? element : app?.element
+          const sel = root?.querySelector?.('select[name="type"]')
+          const opts = sel ? [...sel.options] : []
+          const group = opts.find((o) => o.value === 'group')
+          if (!group || !opts.some((o) => o.value === 'vampire') || !opts.some((o) => o.value === 'npc')) return
+          const was = sel.value
+          group.remove()
+          if (was === 'group') { sel.value = 'vampire'; sel.dispatchEvent(new Event('change', { bubbles: true })) }
+        } catch (e) { /* the dialog stays as the system drew it */ }
+      })
+      for (const ms of [0, 1500, 5000]) setTimeout(a2tBarDress, ms) // the system mounts its bar a moment after "ready"
       api.toolsHooked = true
     }
     a2tSocketInit()
@@ -9257,6 +9308,18 @@ async function a2LinksBoot () {
     Hooks.on('renderChatMessageHTML', (message, html) => { try { a2lRenderChat(message, html) } catch (e) { console.error('V6 Automation | request card', e) } })
     for (const h of ['createItem', 'deleteItem', 'updateItem']) Hooks.on(h, (i, ch) => { if (!i.parent && (h !== 'updateItem' || 'name' in (ch ?? {}) || 'folder' in (ch ?? {}))) a2lState.items = null })
     Hooks.on('createChatMessage', a2lOnCreate)
+    // A secret request is whispered to the Storyteller and the character's players; the roll made
+    // for it was public all the same. It now goes to the same people.
+    Hooks.on('preCreateChatMessage', (message, data, options, userId) => {
+      try {
+        if (userId !== game.user.id || !message.rolls?.some((r) => r?.options?.a2)) return
+        const actor = a2xSpeaker(message)
+        const pend = actor ? a2lState.pendingReq.get(actor.uuid) : null
+        if (!pend || Date.now() - pend.at > 180000) return
+        const to = game.messages.get(pend.id)?.whisper ?? []
+        if (to.length && !(message.whisper ?? []).length) message.updateSource({ whisper: [...new Set([...to, game.user.id])] })
+      } catch (e) { console.error('V6 Automation | roll request', e) }
+    })
     Hooks.on('updateChatMessage', a2lOnUpdate)
     Hooks.on('getSceneControlButtons', (controls) => {
       const tools = controls?.tokens?.tools
@@ -11961,11 +12024,24 @@ async function a2wRecap () {
   const strip = (h) => String(h ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
   const rows = []
   const notable = []
+  // An attack is won or lost by the defence that answered it: the card shows that verdict, and the
+  // table counted the attack alone, so a critical win against a defender was no win at all.
+  const answered = new Map()
+  for (const m of msgs) for (const r of m.rolls ?? []) { const id = r?.options?.a2?.vsMessage; if (id) answered.set(id, r) }
+  const verdict = (m, roll) => {
+    let opp = null
+    try { opp = a2FindOpponent(m, roll) } catch (e) { /* judged alone */ }
+    if (!opp && answered.has(m.id)) {
+      const other = answered.get(m.id)
+      opp = { successes: a2Int(other.total), compare: a2Compare({ successes: a2Int(roll.total), attr: a2Int(roll.options.a2.attr) }, { successes: a2Int(other.total), attr: a2Int(other.options?.a2?.attr) }, true) }
+    }
+    return a2RollVerdict(roll, opp ? { successes: opp.successes, tieWin: opp.compare.win } : null)
+  }
   for (const m of msgs) {
     const roll = m.rolls?.find((r) => r?.options?.a2?.built)
     if (roll) {
       let v = {}
-      try { v = a2RollVerdict(roll) } catch (e) { /* skip */ }
+      try { v = verdict(m, roll) } catch (e) { /* skip */ }
       const name = m.speaker?.alias ?? a2xSpeaker(m)?.name ?? 'Someone'
       rows.push({ name, win: v.win === true, critical: Boolean(v.critical), painful: Boolean(v.painful), bestial: Boolean(v.bestial) })
       if (v.bestial || v.critical) notable.push(`${name}: ${v.bestial ? 'bestial failure' : 'critical win'}${m.flavor ? ` (${strip(m.flavor)})` : ''}`)
