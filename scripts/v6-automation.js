@@ -145,7 +145,19 @@ function v6aQueueSync (actor) {
   v6aPending.set(actor.uuid, setTimeout(() => { v6aPending.delete(actor.uuid); v6aSync(actor).catch((e) => console.error('V6 Automation |', e)) }, 150))
 }
 
-async function v6aSync (actor) {
+// One sync at a time for each actor. Two at once (the pass over every actor on loading the world,
+// and one queued by a change in the same moment) both found the bonus missing and both made it:
+// the same condition twice on the sheet.
+const v6aRunning = new Map()
+function v6aSync (actor) {
+  if (!actor) return Promise.resolve()
+  const prev = v6aRunning.get(actor.uuid) ?? Promise.resolve()
+  const p = prev.catch(() => null).then(() => v6aSyncNow(actor))
+  v6aRunning.set(actor.uuid, p)
+  p.catch(() => null).then(() => { if (v6aRunning.get(actor.uuid) === p) v6aRunning.delete(actor.uuid) })
+  return p
+}
+async function v6aSyncNow (actor) {
   const want = v6aDesired(actor)
   const have = actor.items.filter((i) => i.type === 'condition' && i.getFlag('world', 'v6auto'))
   const key = (d) => `${d.kind}|${d.source}`
@@ -3641,7 +3653,8 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
     const cur = a2Int(actor.system?.health?.value)
     const lose = Math.min(cur, total)
     await actor.update({ 'system.health.value': cur - lose })
-    return { ...out, taken: lose, line: `Applied ${total} to ${name} (the system's npc type has no Alpha 2 Health): Health ${cur - lose}.` }
+    const max = Math.max(0, a2Int(actor.system?.health?.max) - a2Int(actor.system?.health?.disabled))
+    return { ...out, taken: lose, line: `Applied ${total} to ${name}: Health ${cur - lose}${max ? ` of ${max}` : ''}.` }
   }
   const rules = a2Rules(actor)
   if (actor.type !== 'vampire' || !rules) return { ...out, line: `${name}: no Health track to damage.` }
@@ -7876,6 +7889,12 @@ async function a2pOppChanged (powerMsgId, oppMsg) {
       t.status = 'pending'; t.how = 'after the reroll'
       await a2pUpdateCard(msg, card)
       await a2pResolve(msg, t.uuid, true, Math.max(0, cmp.margin))
+    } else if (t.status === 'applied' && !holds && t.margin !== undefined && t.margin !== null && Math.max(0, cmp.margin) !== a2pInt(t.margin)) {
+      // still landed, by another margin: the card kept the old number
+      const note = `The margin is now ${Math.max(0, cmp.margin)} (${a2pInt(pr.total)} against ${a2pInt(or.total)}); the effect went on with ${a2pInt(t.margin)}. End it and apply it again if the margin matters for this power.`
+      if (t.note === note) continue
+      t.note = note
+      await a2pUpdateCard(msg, card)
     }
   }
 }
@@ -9272,7 +9291,8 @@ function a2lRenderChat (message, html) {
     const row = document.createElement('div')
     row.className = 'a2l-row'
     const span = document.createElement('span')
-    span.textContent = res ? `${t.name}: ${res.text}` : `${t.name}: not rolled yet`
+    // against a hidden Difficulty the margin would give the number away: players see the line without it
+    span.textContent = res ? `${t.name}: ${req.hideDiff && !game.user.isGM && res.hidden ? res.hidden : res.text}` : `${t.name}: not rolled yet`
     row.append(span)
     if (!res && actor?.isOwner) {
       const b = document.createElement('button')
@@ -9320,7 +9340,8 @@ async function a2lOnUpdate (message, change) {
     const win = bargain || (req.hideDiff ? (diff <= 0 ? successes > 0 : successes >= diff) : v.win !== false)
     const margin = bargain ? 0 : diff > 0 ? successes - diff : null
     const text = `${successes} ${successes === 1 ? 'success' : 'successes'}: ${win ? 'win' : 'failure'}${margin !== null ? `, margin ${margin > 0 ? '+' : ''}${margin}` : ''}${bargain ? ", by a Beast's Bargain" : ''}${v.critical ? ', critical' : ''}${v.painful && !bargain ? ', painful' : ''}${v.bestial && !bargain ? ', bestial' : ''}`
-    await card.update({ [`flags.world.a2req.results.${a2lKey(actor.uuid)}`]: { text, win, successes, messageId: message.id } })
+    const hidden = req.hideDiff ? text.replace(/, margin [+−-]?\d+/, '') : null
+    await card.update({ [`flags.world.a2req.results.${a2lKey(actor.uuid)}`]: { text, win, successes, messageId: message.id, ...(hidden ? { hidden } : {}) } })
   } catch (e) { console.error('V6 Automation | roll request', e) }
 }
 
@@ -11792,7 +11813,7 @@ function a2wDashHtml () {
     const states = (A.states?.list ?? []).filter((s) => A.states.has(actor, s.id)).map((s) => `<img src="${s.img}" title="${a2Esc(s.name)}" width="16" height="16">`).join('')
     const fz = typeof a2xFrenzyState === 'function' ? a2xFrenzyState(actor) : null
     const bonds = (actor.flags?.world?.a2?.bonds ?? []).filter((b) => a2Int(b.stage) > 0).map((b) => `${a2Esc(b.name)} ${b.stage}`).join(', ')
-    const vinc = actor.flags?.world?.a2?.vinculum?.mates?.length ? 'vinculum' : ''
+    const vinc = a2wVinculum(actor) ? 'vinculum' : ''
     const xp = a2IsPC(actor) && typeof a2tXp === 'function' ? a2tXp(actor).available : null
     const head = group !== last ? `<tr class="a2w-group"><td colspan="9">${group}</td></tr>` : ''
     last = group
@@ -12223,7 +12244,7 @@ globalThis.a2TableBoot ??= a2TableBoot
 // Made in the world the first time the Storyteller loads this version, and rewritten when
 // the module's guide changes. /v6 guide opens it. Setting (world): guide (on).
 
-const A2G_VERSION = 2
+const A2G_VERSION = 3
 const A2G_PLAYER = `
 <p>Everything here is done for you by the V6 Automation module. You never need to count dice or look up a modifier: open the right thing and it does the sums.</p>
 <h2>Rolling</h2>
@@ -12268,6 +12289,7 @@ const A2G_PLAYER = `
 <li>In journals, the name of a power, merit or flaw is a link: click it to read the item, or drag it onto your sheet once the Storyteller agrees.</li>
 <li>The <strong>Actions</strong> tab has a row of tools. <strong>Powers</strong> lists every power you have with its cost, greys out what you can't pay for right now, and rolls, uses or ends a power with one click.</li>
 <li><strong>Humanity</strong> marks a violation with its reason and lets you <em>Justify</em>: once a night, 1 Willpower and a Self-Control test against your rank. Each success erases a slash; a failure costs you 2 dice on everything until the next night.</li>
+<li>At Humanity or Path rank 8 and above, or 3 and below, your <strong>rank modifier</strong> is listed with the bonuses in the roll window. Tick it when the test fits your Path's teachings or is a dealing with humans.</li>
 <li><strong>Day</strong> has the tests for staying awake after sunrise and for waking when something disturbs you. <strong>Torpor</strong> shows how long a torpor lasts at your Humanity and the ways out of it.</li>
 <li><strong>Boons</strong> shows who owes whom a favour. The Storyteller keeps it.</li>
 </ul>
@@ -12314,6 +12336,7 @@ const A2G_ST = `
 <tr><td>Boons</td><td><code>/boons</code></td><td>The ledger of favours owed: add, mark repaid, remove. Players read it; entries can be kept secret. A house rule: the playtest has no prestation rules, so it only keeps the books.</td></tr>
 </tbody>
 </table>
+<p>The bar at the top of the screen is the system's. Its <strong>End scene</strong>, <strong>End night</strong> and <strong>End session</strong> buttons open End Scene, New Night and Award XP from the table above, and <strong>+</strong> and <strong>−</strong> on its Masquerade track ask for the reason like the Masquerade Tracker. Both tracks always show the same number.</p>
 <h2>Asking for rolls</h2>
 <ul>
 <li><strong>Megaphone tool</strong> or <code>/req wits+awareness 3</code>: pick the pool, the Difficulty (shown or hidden) and who rolls. Results collect on the card.</li>
@@ -12351,6 +12374,7 @@ const A2G_ST = `
 <h2>Humanity, day and torpor</h2>
 <ul>
 <li><code>/humanity</code> on a token: mark a violation with its reason, or press <strong>Warn the player</strong> first, as the Storyteller Packet asks. <strong>Precept kept</strong> erases a slash; <strong>Raise rank</strong> costs the character 20 XP and needs a clean tracker.</li>
+<li>A follower of a Path sees that Path's own violations first in the list. Dropping another Path on a sheet replaces the one it has; so does dropping another clan.</li>
 <li><code>/v6 day</code>: the flat Resolve test to stay awake each hour and the flat Wits test when a sleeper is disturbed. The <em>Awake by day</em> state does the penalty.</li>
 <li><code>/torpor</code>: enter voluntary torpor, or test one of the ways out. New Night takes the upkeep Vitae.</li>
 </ul>
