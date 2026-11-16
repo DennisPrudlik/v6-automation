@@ -1664,7 +1664,7 @@ function a2ZeroHealthLines (actor, st) {
     if (allBaneful) out.push(vitae > 0 ? 'All Health is baneful: torpor (PG p.100).' : 'All Health is baneful and no Vitae is left: Final Death (PG p.101).')
     else if (st.value === 0) out.push('0 Health: Physical Attributes impaired, −2 dice to pools using them, until 1 Health is regained (PG p.101).')
     if (a2NpcInfo(actor)) {
-      if (allBaneful) out.push('NPC in torpor: further baneful damage can destroy it (ST p.42).')
+      if (allBaneful && vitae > 0) out.push('NPC in torpor: further baneful damage can destroy it (ST p.42).')
       else if (st.value === 0) out.push(`NPC at 0 Health: it risks a hunger frenzy, Difficulty ${2 * a2ActorGenMod(actor)} (ST p.41).`)
     }
   } else if (st.value === 0) {
@@ -3641,6 +3641,11 @@ async function a2xApplyDamage (targets, opts = {}) {
   return results
 }
 
+// Final Death, or a mortal at 0 Health: the token shows it.
+async function a2xMarkDead (actor) {
+  const dead = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
+  try { if (!actor.statuses?.has?.(dead)) await actor.toggleStatusEffect(dead, { active: true, overlay: true }) } catch (e) { console.error('V6 Automation | dead marker', e) }
+}
 async function a2xDamageOne ({ actor, name, uuid }, o) {
   let total = o.amount + o.margin
   const out = { name, uuid, amount: total, taken: 0, line: '', extra: [] }
@@ -3665,6 +3670,7 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
     const max = Math.max(0, a2Int(actor.system?.health?.max) - a2Int(actor.system?.health?.disabled))
     const kind = String(actor.system?.creatureKind ?? 'human')
     const down = cur - lose > 0 ? [] : [`${name}: ${kind === 'vampire' ? '0 Health: Physical Attributes impaired, −2 dice to pools using them, until 1 Health is regained (PG p.101).' : kind === 'other' ? '0 Health: whether it dies depends on the creature and the cause (ST p.42).' : '0 Health: a mortal dies (PG p.101).'}`]
+    if (down.length && kind !== 'vampire' && kind !== 'other') await a2xMarkDead(actor)
     return { ...out, taken: lose, line: `Applied ${total} to ${name}: Health ${cur - lose}${max ? ` of ${max}` : ''}.`, extra: down }
   }
   const rules = a2Rules(actor)
@@ -3694,8 +3700,13 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
   if (aegis) extra.push(`${name}: ${aegis.note}.`)
   if (res.toBaneful) extra.push(`${name}: ${res.toBaneful} damage past an empty track became baneful (PG p.100).`)
   if (res.vitaeLoss) extra.push(`${name}: ${res.vitaeLoss} damage past a fully baneful track${rules.vitae ? ' came off Vitae' : ''} (PG p.100).`)
-  if (res.massive) extra.push(`${name}: massive damage, twice the maximum Health in one blow: Final Death in almost all cases (PG p.101).`)
+  if (res.massive) extra.push(`${name}: massive damage, twice the maximum Health in one blow: ${a2Creature(actor) === 'vampire' ? 'Final Death' : 'death'} in almost all cases (PG p.101).`)
   for (const l of a2ZeroHealthLines(actor, res)) extra.push(`${name}: ${l}`)
+  {
+    const kind = a2Creature(actor)
+    const gone = kind === 'vampire' ? (res.max > 0 && res.baneful >= res.max && a2Int(actor.system?.vitae?.value) <= 0) : (kind === 'mortal' || kind === 'ghoul' || kind === 'animal') && res.value === 0 && res.max > 0
+    if (gone) await a2xMarkDead(actor)
+  }
   // every box baneful with Vitae left is torpor (PG p.100): mark it, so the token shows it and New Night knows
   if (a2Creature(actor) === 'vampire' && res.max > 0 && res.baneful >= res.max && a2Int(actor.system?.vitae?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
     let night = 1
@@ -5398,6 +5409,10 @@ async function a2tFeedApply (actor, res) {
       lines.push(`The bite deals ${data.damage} damage to ${victim.name} (PG p.118).`)
     }
     if (data.vitaeLoss || data.damage || data.killed || (data.bloodLeft !== undefined && data.bloodLeft !== null)) await a2tVictimUpdate(data)
+    // Blood from a targeted vampire is a drink toward a Blood Bond: the feed attack recorded it, this tool only said so
+    if (plan.source === 'vampire' && plan.drink > 0 && typeof a2yDrink === 'function' && (typeof a2yOn !== 'function' || a2yOn())) { // eslint-disable-line no-undef
+      try { const master = a2FromUuid(victim.uuid); if (master && master.uuid !== actor.uuid && a2Creature(master) === 'vampire') await a2yDrink(actor, master) } catch (e) { console.error('V6 Automation | bond drink', e) } // eslint-disable-line no-undef
+    }
   }
   // Violations: Humanity per PG p.144 / TR30; Path walkers only on a match (TR31).
   const n = feeding ? a2Clamp(a2Int(d.violations), 0, 3) : 0
@@ -5659,7 +5674,7 @@ async function a2tAwardApply (rows = [], { close = true } = {}) {
 }
 
 async function a2tCloseSession () {
-  if (!game.user?.isGM) return null
+  if (!game.user?.isGM) { v6aNote.warn('Only the GM can do that.'); return null }
   const clock = a2tClock()
   await a2tSet('clock', { ...clock, session: clock.session + 1 })
   for (const actor of a2tAllActors()) {
