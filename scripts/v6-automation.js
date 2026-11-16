@@ -4533,6 +4533,19 @@ function a2tPatchBloodSurge () {
   const sheets = Object.values(CONFIG.Actor?.sheetClasses ?? {}).flatMap((t) => Object.values(t ?? {})).map((s) => s?.cls).filter(Boolean)
   for (const cls of new Set(sheets)) {
     const opts = Object.prototype.hasOwnProperty.call(cls, 'DEFAULT_OPTIONS') ? cls.DEFAULT_OPTIONS : null
+    // wod6e 1.1.0 has a Feed button of its own, which adds Vitae up to the system's maximum (20 at
+    // most, and a vampire's pool for a ghoul). It opens the feeding here instead: hunt, bite, Vitae by the creature.
+    const feed = opts?.actions?.feed
+    if (typeof feed === 'function' && !feed.__a2t) {
+      const w = function (event, target) {
+        if (!a2Enabled()) return feed.call(this, event, target)
+        event?.preventDefault?.()
+        return a2tFeed(this.actor ?? this.document)
+      }
+      Object.defineProperty(w, '__a2t', { value: true })
+      a2tState.surgeWraps.set(feed, w)
+      opts.actions.feed = w
+    }
     const orig = opts?.actions?.bloodSurge
     if (typeof orig !== 'function' || orig.__a2t) continue
     const wrapped = function (event, target) {
@@ -4549,6 +4562,8 @@ function a2tPatchBloodSurge () {
 // Sheets built before the patch keep their own options.actions copy.
 function a2tPatchSheetInstance (app) {
   const actions = app?.options?.actions
+  const feed = actions?.feed
+  if (typeof feed === 'function' && !feed.__a2t && a2tState.surgeWraps.has(feed)) { try { actions.feed = a2tState.surgeWraps.get(feed) } catch (e) { /* the sheet keeps the system's Feed */ } }
   const cur = actions?.bloodSurge
   if (typeof cur !== 'function') return true
   if (cur.__a2t) return true
@@ -5220,12 +5235,43 @@ function a2tTakeBags (actor, n) {
 
 // ---- Masquerade Tracker ------------------------------------------------------------
 function a2tMasqState () { return a2tMasqNormalize(a2tGet('masquerade')) }
+// wod6e 1.1.0 keeps a Masquerade value of its own (the chronicle bar, setting wod6e.masqueradeScopes,
+// scope "chronicle", 0-10 like ours). The two are kept equal: a change here is written there, a change on
+// the bar is taken over here (with a line in the tracker's log). On load the tracker here leads, as it has the history.
+const A2T_NATIVE_MASQ = 'masqueradeScopes'
+function a2tNativeMasq () {
+  try {
+    if (!game.settings.settings.has(`wod6e.${A2T_NATIVE_MASQ}`)) return null
+    const cur = game.settings.get('wod6e', A2T_NATIVE_MASQ) ?? {}
+    const scopes = Array.isArray(cur.scopes) && cur.scopes.length ? cur.scopes.map((s) => ({ ...s })) : [{ id: 'chronicle', name: '', value: 0 }]
+    const main = scopes.find((s) => s.id === 'chronicle') ?? scopes[0]
+    return { scopes, main, value: a2Clamp(a2Int(main.value), 0, 10) }
+  } catch (e) { return null }
+}
+async function a2tMasqToNative (rank) {
+  if (!game.user?.isGM || (game.users.activeGM && game.users.activeGM.id !== game.user.id)) return
+  const n = a2tNativeMasq()
+  if (!n || n.value === a2Int(rank)) return
+  n.main.value = a2Clamp(a2Int(rank), 0, 10)
+  n.main.reference = null
+  a2tState.masqSync = true
+  try { await game.settings.set('wod6e', A2T_NATIVE_MASQ, { scopes: n.scopes.map(({ id, name, value, reference }) => ({ id, name, value, reference: reference ?? null })) }) } catch (e) { console.warn('V6 Automation | chronicle bar', e) } finally { a2tState.masqSync = false }
+}
+async function a2tMasqFromNative () {
+  if (a2tState.masqSync || !a2Enabled() || !game.user?.isGM || (game.users.activeGM && game.users.activeGM.id !== game.user.id)) return
+  const n = a2tNativeMasq()
+  if (!n) return
+  const before = a2tMasqState()
+  if (n.value === before.rank) return
+  await a2tSet('masquerade', a2tMasqApply(before, n.value, 'set on the chronicle bar', game.user.name, new Date().toISOString()))
+}
 async function a2tMasqChange (delta = 0, reason = '', { set = null } = {}) {
   if (!a2tReady(true)) return null
   const before = a2tMasqState()
   const to = set === null || set === undefined ? a2Clamp(before.rank + a2Int(delta), 0, 10) : a2Clamp(a2Int(set), 0, 10)
   if (to === before.rank) { v6aNote.info(`The Masquerade Tracker stays at ${to}.`); return to }
   await a2tSet('masquerade', a2tMasqApply(before, to, reason, game.user.name, new Date().toISOString()))
+  await a2tMasqToNative(to)
   const lvA = a2tMasqLevel(before.rank)
   const lvB = a2tMasqLevel(to)
   const lines = [`${before.rank} → ${to} (${a2Signed(to - before.rank)})${reason ? `: ${reason}` : ''}.`, `${lvB.name}${lvA.name !== lvB.name ? ' (new level)' : ''}: ${lvB.effect} (ST p.35)`]
@@ -5858,9 +5904,13 @@ async function a2ToolsBoot () {
       Hooks.on('renderActorSheetV2', a2tRenderSheet)
       Hooks.on('renderChatMessageHTML', (message, html) => { try { a2tRenderChat(message, html) } catch (e) { console.error('V6 Alpha 2 tools | chat', e) } })
       Hooks.on('getSceneControlButtons', a2tSceneControls)
+      const onSetting = (setting) => { if (setting?.key === `wod6e.${A2T_NATIVE_MASQ}`) a2tMasqFromNative().catch((e) => console.warn('V6 Automation | chronicle bar', e)) }
+      Hooks.on('updateSetting', onSetting)
+      Hooks.on('createSetting', onSetting)
       api.toolsHooked = true
     }
     a2tSocketInit()
+    if (a2Enabled()) a2tMasqToNative(a2tMasqState().rank).catch((e) => console.warn('V6 Automation | chronicle bar', e))
     api.tools = a2tApi()
     api.toolsBooted = true
     try { ui.controls?.render?.({ reset: true }) } catch (e) { /* controls not drawn yet */ }
@@ -7655,6 +7705,9 @@ function a2pRenderChat (message, html) {
         b.title = 'Pay the cost and apply the power without a test (powers that need no test, or a test made elsewhere)'
         b.addEventListener('click', (ev) => { ev.preventDefault(); a2pActivateNoRoll(item, ev) })
         ;(card.querySelector('.item-card-test') ?? card).append(b)
+        // wod6e 1.1.0 puts a "Pay cost" button on the same card. The button above pays the cost and starts
+        // the power, and a roll pays it too: a third way to pay would take the Vitae twice.
+        root.querySelectorAll('[data-action="payItemCost"]').forEach((p) => p.remove())
       }
     }
   } catch (e) { console.error('V6 Automation | powers: chat card', e) }

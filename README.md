@@ -70,6 +70,7 @@ Needs Foundry v13 or later (verified on v14) and the wod6e system.
 - **Private Storyteller rolls:** when the Storyteller rolls a defence in private, the attacking player's card says so and leaves the damage to the Storyteller, whose client sees both rolls; a damage request from a defended attack is not applied.
 - **Skill dots above 5:** the sheet draws a Skill row up to the character's maximum (7 for ancillae, 8 for elders, 10 on the house Methuselah tier) in two groups of five; rows that stop at 5 are unchanged.
 - wod6e 1.1.0: the module uses the system's own Vitae, Health, Humanity and Path fields. A world that comes from 1.0.11 is moved over once, on the first load as GM (old values are kept in each actor's flags); bundles written for 1.0.11 are converted as they are imported. Requires wod6e 1.1.0 or later.
+- wod6e 1.1.0 doubles: the system's Take Half button, rank-modifier and Beast boxes, follow-up buttons and "Pay cost" button are hidden where this module does the same job; the sheet's Feed button opens this module's feeding; the Masquerade value of the system's chronicle bar and this module's Masquerade Tracker are kept equal.
 - **Storyteller tools:** New Night, End Scene, Feed, Frenzy test, Masquerade Tracker, Award and Spend XP.
 
 Every part can be switched off under **Configure Settings → V6 Automation**.
