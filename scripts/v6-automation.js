@@ -114,7 +114,7 @@ function v6aDesired (actor) {
   }
   if (actor.type === 'vampire') {
     if (v6aSetting('vitae')) {
-      const v = Number(actor.system.health?.value ?? 0)
+      const v = Number(actor.system.vitae?.value ?? 0)
       const t = V6A_STAGES.vitae.find((s) => v >= s.min && v <= s.max)
       if (t) v6aStage(out, actor, 'vitae', t, 'icons/svg/blood.svg')
     }
@@ -193,7 +193,8 @@ async function v6aPatchRollDialog () {
   RollDialog.open = async function (input = {}) {
     const item = input instanceof Item ? input : (input?.item ?? null)
     const result = await open.call(this, input)
-    if (item && result instanceof Roll && v6aSetting('costs')) await v6aPayCost(item)
+    // wod6e 1.1.0 pays the item's own cost inside the test; what is left for us are the extra costs
+    if (item && result instanceof Roll && v6aSetting('costs')) await v6aPayCost(item, { basePaid: typeof a2Native === 'function' && a2Native() })
     return result
   }
 
@@ -214,16 +215,18 @@ async function v6aPatchRollDialog () {
   }
 }
 
-async function v6aPayCost (item) {
+async function v6aPayCost (item, { basePaid = false } = {}) {
   const actor = item.actor
   if (!actor) return
   const base = item.system?.activation?.cost
   const costs = typeof a2xItemCosts === 'function' && typeof a2Enabled === 'function' && a2Enabled()
     ? a2xItemCosts(item.system, item.flags) // cost + extras marked "part of the cost" (PG p.149)
     : { [base?.type]: Number(base?.amount) || 0 }
+  // basePaid: the system took the item's own cost already (only for player sheets, and only a cost it knows)
+  if (basePaid && actor.type !== 'npc' && ['vitae', 'health', 'willpower'].includes(base?.type) && costs[base.type]) costs[base.type] = Math.max(0, costs[base.type] - (Number(base.amount) || 0))
   const upd = {}
   const paid = []
-  for (const [type, label] of [['health', 'Vitae'], ['willpower', 'Willpower']]) {
+  for (const [type, label] of [['vitae', 'Vitae'], ['health', 'Health'], ['willpower', 'Willpower']]) {
     const amount = Number(costs[type]) || 0
     if (!amount) continue
     const current = Number(foundry.utils.getProperty(actor, `system.${type}.value`) ?? 0)
@@ -258,7 +261,7 @@ function v6aHooks () {
   })
   Hooks.on('updateActor', async (actor, changes, options, userId) => {
     const s = changes?.system
-    if (s && (s.health || s.vampire?.humanity || s.vampire?.disciplines)) v6aQueueSync(actor)
+    if (s && (s.health || s.vitae || s.vampire?.humanity || s.vampire?.disciplines)) v6aQueueSync(actor)
     if (options.v6aOldDisc && v6aSetting('maturing') && game.user.id === userId) await v6aMaturing(actor, options.v6aOldDisc)
   })
 }
@@ -314,14 +317,15 @@ async function v6aBoot () {
 //    Hunger dice replace normal dice, painful / bestial failure, Beast's Bargain,
 //    Taking Half. Overqualified and Quickening are gone.
 //  - Actors of type "vampire" (PCs and fully statted NPCs, PG 99-105):
-//    Health = Stamina + 5 in flags.world.a2.health, system.health stays the
-//    Vitae track (max 5 + 5 x generation modifier, ghouls 5), Willpower =
+//    Health = Stamina + 5 in system.health (baneful = its "disabled" boxes),
+//    Vitae in system.vitae (max 5 + 5 x generation modifier, ghouls 5), Willpower =
 //    Composure + Resolve, Hunger dice from the Hunger Dice per Vitae table.
 //    flags.world.a2.creature picks the blood rules (vampire, ghoul, mortal,
 //    animal, other).
 //  - Humanity / Paths (PG 125-129): one 10-box tracker drawn from
-//    system.vampire.humanity.value (rank) and system.vampire.nature.value
-//    (violations), the convention of the Alpha 2 Paths data.
+//    system.vampire.humanity.value (rank) and .violations; the Path is the
+//    actor's "path" item. These are wod6e 1.1.0's own fields: see a2Migrate110
+//    for how a world from 1.0.11 is moved over.
 //  - The system's "npc" actor type rolls its level pools with the same dice.
 // ---------------------------------------------------------------------------
 /* global game, Hooks, ui, foundry, ChatMessage, Actor, CONFIG, WOD6E, fromUuidSync */
@@ -591,6 +595,10 @@ function a2PoolText (plan, { cap = null, difficulty = 0, rolling = (s) => `Rolli
 }
 
 // ---- settings --------------------------------------------------------------
+// wod6e 1.1.0 and later: Vitae, Health, Humanity and Paths are the system's own fields.
+function a2Native () {
+  try { return Boolean(globalThis.CONFIG?.Item?.dataModels?.path) || Boolean(globalThis.foundry?.utils?.isNewerVersion?.(globalThis.game?.system?.version ?? '0', '1.0.99')) } catch (e) { return false }
+}
 function a2Enabled () {
   try {
     for (const [ns, key] of A2_SETTING_KEYS) {
@@ -654,28 +662,38 @@ function a2ActorHunger (actor) {
   if (!a2Rules(actor)?.hunger) return 0
   const override = actor.flags?.world?.a2?.hungerOverride
   if (override !== null && override !== undefined && Number.isFinite(Number(override))) return a2Clamp(a2Int(override), 0, 5)
-  return a2HungerFromVitae(actor.system?.health?.value, a2ActorVitaeTotal(actor))
+  return a2HungerFromVitae(actor.system?.vitae?.value, a2ActorVitaeTotal(actor))
 }
 function a2ActorHealth (actor) {
+  if (actor?.type === 'npc') { // the system's own npc type: its Health track as it stands
+    const sh = actor.system?.health ?? {}
+    const max = Math.max(0, a2Int(sh.max))
+    const baneful = a2Clamp(a2Int(sh.disabled), 0, max)
+    return { value: a2Clamp(a2Int(sh.value), 0, max - baneful), baneful, max }
+  }
   const npc = a2NpcInfo(actor)
   const max = npc?.minion ? 1 : a2Int(npc?.healthMax) > 0 ? a2Int(npc.healthMax) : a2HealthMax(actor?.system?.attributes?.stamina?.value) // a made NPC keeps the Health from the ST Packet's table
-  const f = actor?.flags?.world?.a2?.health ?? {}
-  const baneful = a2Clamp(a2Int(f.baneful), 0, max)
+  // wod6e 1.1.0 keeps Health in system.health; its crossed-out ("disabled") boxes are the baneful ones.
+  // Read the stored numbers: the system clamps the prepared ones to its own maximum.
+  const f = actor?._source?.system?.health ?? actor?.system?.health ?? {}
+  const baneful = a2Clamp(a2Int(f.disabled), 0, max)
   const value = a2Clamp(f.value === undefined || f.value === null ? max : a2Int(f.value), 0, max - baneful)
   return { value, baneful, max }
 }
 function a2ActorHumanity (actor) {
-  const v = actor?.system?.vampire ?? {}
-  const migrated = a2Int(v.humanity?.max) === 10
-  const rank = migrated ? a2Clamp(a2Int(v.humanity?.value), 0, 10) : (A2_ALPHA1_RANK[a2Int(v.humanity?.value)] ?? 6)
-  const violations = migrated ? a2Clamp(a2Int(v.nature?.value), 0, 10 - rank) : 0
-  return { rank, violations, migrated }
+  // wod6e 1.1.0: the rank is humanity.value (0-10), the slashes are humanity.violations
+  const h = actor?.system?.vampire?.humanity ?? {}
+  const rank = a2Clamp(a2Int(h.value, 6), 0, 10)
+  return { rank, violations: a2Clamp(a2Int(h.violations), 0, 10 - rank), migrated: true }
 }
 function a2PathInfo (actor) {
-  const item = actor.items?.find((i) => i.type === 'nature') ?? null
+  // wod6e 1.1.0: the Path is an item of type "path" (Humanity is one of them); the old "nature" items are gone
+  const item = actor?.items?.find((i) => i.type === 'path') ?? null
   const flags = item?.flags?.world?.a2 ?? null
-  const kind = flags?.kind ?? (/^(path|road) of /i.test(item?.name ?? '') ? 'path' : 'humanity')
-  return { item, kind, name: kind === 'path' ? item.name : 'Humanity', bands: flags?.tracker?.rankBands ?? A2_RANK_BANDS, teachings: flags?.teachings ?? '' }
+  const type = String(item?.system?.pathType ?? '')
+  const kind = flags?.kind ?? ((type && type !== 'humanity' && type !== 'custom') || /^(path|road) of /i.test(item?.name ?? '') ? 'path' : 'humanity')
+  const violations = flags?.violations ?? (item?.system?.precepts ?? []).map((p) => ({ text: String(p?.violation ?? '') })).filter((v) => v.text)
+  return { item, kind, name: kind === 'path' && item ? item.name : 'Humanity', bands: flags?.tracker?.rankBands ?? A2_RANK_BANDS, teachings: flags?.teachings ?? item?.system?.teachings ?? '', violations }
 }
 function a2NpcLevels (actor) {
   const tiers = globalThis.WOD6E?.configs?.NpcTiers?.getList?.({}) ?? {}
@@ -694,9 +712,9 @@ function a2NpcBestLevel (actor, attributeKeys = []) {
 }
 
 // ---- data preparation ------------------------------------------------------
-// Runs after WoDActor.prepareDerivedData (whose Vitae / Willpower maxima are the
-// Alpha 1 ones). Derived data only: source values stay, so turning the
-// setting off restores the system's numbers.
+// Runs after WoDActor.prepareDerivedData. wod6e 1.1.0 has the Alpha 2 tracks itself, but it gives
+// every vampire-type sheet a vampire's Vitae (mortals and ghouls too) and stops at the elder
+// figure of 20. Derived data only: source values stay.
 function a2PrepareActor (actor) {
   const rules = a2Rules(actor)
   if (!rules) return
@@ -710,11 +728,18 @@ function a2PrepareActor (actor) {
     }
   }
   const total = a2ActorVitaeTotal(actor)
-  if (s.health && total !== null) {
-    s.health.max = total
-    // The system already clamped value to its Alpha 1 max (10 + Stamina); re-read the stored value.
-    const stored = actor._source?.system?.health?.value
-    s.health.value = a2Clamp(a2Int(stored ?? s.health.value), 0, total - a2Int(s.health.disabled))
+  if (s.vitae) {
+    s.vitae.max = total ?? 0
+    // The system already clamped the value to its own maximum; re-read the stored one.
+    const stored = actor._source?.system?.vitae?.value
+    s.vitae.value = a2Clamp(a2Int(stored ?? s.vitae.value), 0, s.vitae.max)
+    s.hunger = { value: a2ActorHunger(actor) }
+  }
+  if (s.health && actor.type === 'vampire') {
+    const h = a2ActorHealth(actor) // a made NPC or a minion keeps its own maximum
+    s.health.max = h.max
+    s.health.disabled = h.baneful
+    s.health.value = h.value
   }
   if (!rules.surge) s.canBloodSurge = false
   else if (a2Creature(actor) !== 'vampire') s.canBloodSurge = true // a ghoul surges (PG p.114), whatever its sheet was saved with
@@ -1001,6 +1026,8 @@ function a2AdjustContext (res, args, WOD6eTest) {
   t.quickeningSpent = 0
   t.canSpendQuickening = false
   t.showQuickening = false
+  // wod6e 1.1.0 draws its own Hunger line from the system's figures; ours is the box under the pool
+  t.showHunger = false
 
   let raw
   let attr = Math.max(0, ...(t.attributeOptions ?? []).filter((o) => o.selected).map((o) => a2Int(o.value)))
@@ -1087,7 +1114,20 @@ function a2RestoreFormData (dialog, actor) {
   if (li.category && !form.dataset.testCategory) form.dataset.testCategory = String(li.category)
 }
 // Under the pool, the reasons it is what it is (impairment, states, distance, frenzy).
+// wod6e 1.1.0 has its own Take Half button, rank modifier and Beast boxes. This module's roll is built
+// from the controls it adds (Hunger, Take Half, Contested, Resist frenzy) and its own bonus list, so
+// the system's doubles are taken out of the window: two switches for one rule would disagree.
+function a2TrimNative (element) {
+  try {
+    const root = element?.closest?.('.application, dialog') ?? element
+    for (const el of [root, ...document.querySelectorAll('.roll-dialog-side-panel')]) {
+      el?.querySelectorAll?.('button[data-action="takeHalf"]').forEach((b) => b.classList.add('a2-hidden'))
+      el?.querySelectorAll?.('input[name="humanityModifier"], input[name="resistBeast"]').forEach((i) => { if (i.checked) i.checked = false; (i.closest('section') ?? i.closest('label'))?.classList.add('a2-hidden') })
+    }
+  } catch (e) { /* the window still works with both */ }
+}
 function a2ShowNotes (element, actor) {
+  a2TrimNative(element)
   const box = element?.querySelector?.('.a2-controls')
   const n = a2State.lastNotes
   if (!box || !actor) return
@@ -1153,6 +1193,9 @@ function a2RenderChat (message, html) {
   const rolls = message.rolls ?? []
   if (!rolls.some((r) => r?.options?.a2?.built)) return
   root.querySelectorAll('.a2-result').forEach((e) => e.remove())
+  // the system's own follow-up buttons (Willpower reroll, Beast's Bargain, retry) read the dice its
+  // way; this roll was built here and carries its own buttons below
+  root.querySelectorAll('.wod6e-test-actions').forEach((e) => e.remove())
   const rollEls = root.querySelectorAll('.dice-roll')
   rolls.forEach((roll, i) => {
     if (!roll?.options?.a2?.built) return
@@ -1335,7 +1378,7 @@ function a2DecorateVampireSheet (app, root, actor) {
   const hw = root.querySelector('[data-actor-section="healthWillpower"]')
   if (hw) {
     hw.querySelectorAll('.a2-health-row').forEach((e) => e.remove())
-    const vitae = hw.querySelector('.health-section')
+    const vitae = hw.querySelector('.vitae-section') ?? hw.querySelector('.vitae-tracker')?.parentElement
     if (vitae) a2DecorateVitae(vitae, actor, rules, creature)
     hw.append(a2HealthRow(actor, editable, rules, creature))
   }
@@ -1400,12 +1443,6 @@ function a2HealthRow (actor, editable, rules, creature) {
   const h = a2ActorHealth(actor)
   const mod = a2ActorGenMod(actor)
   const usable = h.max - h.baneful
-  const buttons = a2Boxes(h.max, (pos) => {
-    const crossed = pos > usable
-    const cls = `resource-tracker-space a2-hbox${pos <= h.value ? ' filled' : ''}${crossed ? ' tracker-disabled' : ''}`
-    const title = crossed ? 'Baneful damage (right-click to mend this box)' : `Set Health to ${pos} (right-click: baneful)`
-    return `<button type="button" class="${cls}" data-pos="${pos}" title="${title}"></button>`
-  })
   const notes = []
   if (creature === 'vampire') notes.push(`Vampiric Endurance: −${mod} damage per hit (minimum 1), not against baneful damage. Mend: 1 Health per Vitae, up to ${2 * mod} Vitae per turn (PG p.99).`)
   else if (creature === 'ghoul') notes.push('Ghoul: no Vampiric Endurance, fire and sunlight deal normal damage. Mend: 1 Vitae per turn (PG p.99). At 0 Health a ghoul dies.')
@@ -1419,11 +1456,10 @@ function a2HealthRow (actor, editable, rules, creature) {
   row.innerHTML = `
     <div class="resource-tracker a2-health-tracker">
       <header class="resource-tracker-header">
-        <span class="resource-tracker-label" title="Alpha 2: Health = Stamina + 5 (PG p.99)">Health</span>
-        <span class="resource-tracker-total">(${h.value} / ${usable}${h.baneful ? `, ${h.baneful} baneful` : ''})</span>
+        <span class="resource-tracker-label" title="Health = Stamina + 5 (PG p.99). The boxes are the system's Health track above: click to set it, right-click to cross a box out as baneful.">Damage and mending</span>
+        <span class="resource-tracker-total">(Health ${h.value} / ${usable}${h.baneful ? `, ${h.baneful} baneful` : ''})</span>
         ${editable ? `<span class="a2-tools"><a class="a2-act" data-a2-act="damage" title="Take damage (applies Vampiric Endurance)"><i class="fa-solid fa-burst"></i></a>${rules.vitae ? '<a class="a2-act" data-a2-act="mend" title="Spend Vitae to mend Health"><i class="fa-solid fa-droplet"></i></a>' : ''}</span>` : ''}
       </header>
-      <div class="resource-tracker-spaces">${a2Grouped(buttons)}</div>
       <div class="a2-subnote">${notes.map(a2Esc).join(' ')}${status.length ? `<br><strong>${status.map(a2Esc).join(' ')}</strong>` : ''}</div>
     </div>
     <div class="a2-side">
@@ -1432,20 +1468,6 @@ function a2HealthRow (actor, editable, rules, creature) {
       <div class="a2-subnote">Willpower = Composure + Resolve (PG p.104). At 0 Willpower, Social and Mental Attributes are impaired (−2).${rules.surge ? '' : ' No Blood Surge.'}</div>
     </div>`
   if (!editable) return row
-  row.querySelectorAll('.a2-hbox').forEach((btn) => {
-    const pos = a2Int(btn.dataset.pos)
-    a2On(btn, 'click', () => {
-      const cur = a2ActorHealth(actor)
-      if (pos > cur.max - cur.baneful) return
-      a2WriteHealth(actor, { value: pos === cur.value ? pos - 1 : pos, baneful: cur.baneful })
-    })
-    a2On(btn, 'contextmenu', () => {
-      const cur = a2ActorHealth(actor)
-      const crossed = pos > cur.max - cur.baneful
-      const baneful = crossed ? cur.max - pos : cur.max - pos + 1
-      a2WriteHealth(actor, { value: Math.min(cur.value, cur.max - baneful), baneful })
-    })
-  })
   a2On(row.querySelector('[data-a2-act="damage"]'), 'click', () => a2PromptDamage(actor))
   a2On(row.querySelector('[data-a2-act="mend"]'), 'click', () => a2PromptMend(actor))
   const sel = row.querySelector('.a2-creature select')
@@ -1471,12 +1493,13 @@ function a2HumanityTracker (actor, editable, rules, creature) {
   wrap.className = 'resource-tracker a2-humanity'
   wrap.innerHTML = `
     <header class="resource-tracker-header">
-      <span class="resource-tracker-label" title="${a2Esc(path.teachings)}">${a2Esc(path.name)}</span>
+      <span class="resource-tracker-label a2-open-path" title="${a2Esc(path.teachings)}${path.item ? ' (click: open the Path)' : ''}">${a2Esc(path.name)}</span>
       <span class="resource-tracker-total">(${hum.rank} / 10)</span>
       <span class="a2-subnote">${a2Plural(hum.violations, 'violation', 'violations')}</span>
     </header>
     <div class="resource-tracker-spaces">${a2Grouped(buttons)}</div>
     <div class="a2-subnote">Rank modifier ${a2Esc(mod)} (PG p.126). Frenzy tests: at most ${hum.rank} dice. Torpor: ${a2Esc(band?.torpor ?? '—')} (extended ${a2Esc(band?.torporExtended ?? '—')}).${hum.migrated ? '' : ' <strong>Not yet migrated: shown from the Alpha 1 scale.</strong>'}${editable ? '<br>Click: set rank. Right-click: mark a violation. Shift + right-click: erase one.' : ''}</div>`
+  if (path.item) a2On(wrap.querySelector('.a2-open-path'), 'click', () => path.item.sheet?.render(true))
   if (!editable) return wrap
   wrap.querySelectorAll('button[data-pos]').forEach((btn) => {
     const pos = a2Int(btn.dataset.pos)
@@ -1519,19 +1542,13 @@ function a2DecorateNpcSheet (root, actor) {
 
 // ---- actor writes ------------------------------------------------------------
 function a2WriteHealth (actor, { value, baneful }, options = {}) {
-  return actor.update({ 'flags.world.a2.health': { value: Math.max(0, a2Int(value)), baneful: Math.max(0, a2Int(baneful)) } }, options)
+  return actor.update({ 'system.health.value': Math.max(0, a2Int(value)), 'system.health.disabled': Math.max(0, a2Int(baneful)) }, options)
 }
 
-// Native fields, per the Alpha 2 Paths data: humanity.value = rank (max 10),
-// nature.value = violations (max 10 - rank; the schema's minimum is 1).
+// wod6e 1.1.0's own fields: humanity.value = rank (0-10), humanity.violations = slashes.
 function a2WriteHumanity (actor, h) {
   const { rank, violations } = a2HumanityNormalize(h)
-  return actor.update({
-    'system.vampire.humanity.max': 10,
-    'system.vampire.humanity.value': rank,
-    'system.vampire.nature.max': Math.max(1, 10 - rank),
-    'system.vampire.nature.value': violations
-  })
+  return actor.update({ 'system.vampire.humanity.value': rank, 'system.vampire.humanity.violations': violations })
 }
 
 // quiet: the caller writes its own card (the Humanity window does), so the note here would say it twice
@@ -1558,7 +1575,7 @@ function a2ZeroHealthLines (actor, st) {
   const out = []
   const allBaneful = st.max > 0 && st.baneful >= st.max
   if (creature === 'vampire') {
-    const vitae = a2Int(actor.system?.health?.value)
+    const vitae = a2Int(actor.system?.vitae?.value)
     if (allBaneful) out.push(vitae > 0 ? 'All Health is baneful: torpor (PG p.100).' : 'All Health is baneful and no Vitae is left: Final Death (PG p.101).')
     else if (st.value === 0) out.push('0 Health: Physical Attributes impaired, −2 dice to pools using them, until 1 Health is regained (PG p.101).')
     if (a2NpcInfo(actor)) {
@@ -1576,17 +1593,17 @@ async function a2DamageActor (actor, amount, { baneful = false, note = true } = 
   if (!rules || actor.type !== 'vampire') return null
   const before = a2ActorHealth(actor)
   const res = a2ApplyDamage(before, amount, { baneful, endurance: rules.endurance ? a2ActorGenMod(actor) : 0, noBaneful: !rules.baneful })
-  const upd = { 'flags.world.a2.health': { value: res.value, baneful: res.baneful } }
+  const upd = { 'system.health.value': res.value, 'system.health.disabled': res.baneful }
   let vitaeLost = 0
   if (res.vitaeLoss && rules.vitae) {
-    const cur = a2Int(actor.system.health?.value)
+    const cur = a2Int(actor.system.vitae?.value)
     vitaeLost = Math.min(cur, res.vitaeLoss)
-    upd['system.health.value'] = cur - vitaeLost
+    upd['system.vitae.value'] = cur - vitaeLost
   }
   await actor.update(upd, { a2Damage: true })
   // every box baneful with Vitae left is torpor (PG p.100): mark it, whichever way the damage came
   // (a card, the sheet, a macro), so the token shows it and New Night knows
-  if (a2Creature(actor) === 'vampire' && res.allBaneful && a2Int(actor.system?.health?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
+  if (a2Creature(actor) === 'vampire' && res.allBaneful && a2Int(actor.system?.vitae?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
     let night = 1
     try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
     try { await actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }) } catch (e) { console.error('V6 Alpha 2 | torpor', e) }
@@ -1605,10 +1622,10 @@ async function a2DamageActor (actor, amount, { baneful = false, note = true } = 
 async function a2MendActor (actor, vitae) {
   const rules = a2Rules(actor)
   if (!rules?.vitae) return null
-  const cur = a2Int(actor.system.health?.value)
+  const cur = a2Int(actor.system.vitae?.value)
   const res = a2Mend(a2ActorHealth(actor), Math.min(a2Int(vitae), cur))
   if (!res.spent) { v6aNote.info(`${actor.name}: nothing to mend, or no Vitae.`); return res }
-  await actor.update({ 'flags.world.a2.health': { value: res.value, baneful: res.baneful }, 'system.health.value': cur - res.spent })
+  await actor.update({ 'system.health.value': res.value, 'system.health.disabled': res.baneful, 'system.vitae.value': cur - res.spent })
   return res
 }
 
@@ -1627,7 +1644,7 @@ async function a2PromptDamage (actor) {
 
 async function a2PromptMend (actor) {
   const h = a2ActorHealth(actor)
-  const vitae = a2Int(actor.system.health?.value)
+  const vitae = a2Int(actor.system.vitae?.value)
   const limit = a2Creature(actor) === 'vampire' ? 2 * a2ActorGenMod(actor) : 1
   const missing = h.max - h.baneful - h.value
   const def = Math.max(0, Math.min(limit, missing, vitae))
@@ -1643,7 +1660,7 @@ async function a2PromptMend (actor) {
 // Watch Health set from the sheet boxes (damage from a2DamageActor notes itself).
 function a2PreUpdateActor (actor, changes, options) {
   if (!a2Enabled() || actor.type !== 'vampire') return
-  if (foundry.utils.hasProperty(changes, 'flags.world.a2.health') || foundry.utils.hasProperty(changes, 'flags.world.a2.npc.minion')) options.a2OldHealth = a2ActorHealth(actor)
+  if (foundry.utils.hasProperty(changes, 'system.health') || foundry.utils.hasProperty(changes, 'flags.world.a2.npc.minion')) options.a2OldHealth = a2ActorHealth(actor)
 }
 function a2UpdateActor (actor, changes, options, userId) {
   if (!options?.a2OldHealth || options.a2Damage || game.user.id !== userId) return
@@ -1653,7 +1670,7 @@ function a2UpdateActor (actor, changes, options, userId) {
   const allBaneful = now.baneful >= now.max && before.baneful < before.max
   if (hitZero || allBaneful) a2Note(actor, `${actor.name}: Health`, a2ZeroHealthLines(actor, now))
   // the boxes crossed out by hand on the sheet: the same torpor as from damage (PG p.100)
-  if (allBaneful && now.max > 0 && a2Creature(actor) === 'vampire' && a2Int(actor.system?.health?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
+  if (allBaneful && now.max > 0 && a2Creature(actor) === 'vampire' && a2Int(actor.system?.vitae?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
     let night = 1
     try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
     actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }).catch((e) => console.error('V6 Alpha 2 | torpor', e))
@@ -1667,6 +1684,7 @@ function a2UpdateActor (actor, changes, options, userId) {
 async function a2MigrateHumanity ({ dryRun = false, actors = null } = {}) {
   const report = { converted: [], fixed: [], ambiguous: [], skipped: 0 }
   if (!game.user.isGM) return report
+  if (a2Native()) return report // wod6e 1.1.0 converts the Humanity track itself
   for (const actor of actors ?? game.actors) {
     if (actor.type !== 'vampire' || !a2Rules(actor)?.humanity) { report.skipped++; continue }
     const v = actor.system.vampire ?? {}
@@ -1705,6 +1723,7 @@ async function a2MigrateHumanity ({ dryRun = false, actors = null } = {}) {
 async function a2RevertHumanity () {
   const done = []
   if (!game.user.isGM) return done
+  if (a2Native()) { v6aNote.warn('V6 Automation: wod6e 1.1.0 has no Alpha 1 Humanity scale to go back to.'); return done }
   for (const actor of game.actors) {
     const old = actor.flags?.world?.a2?.alpha1Humanity
     if (!old) continue
@@ -1728,6 +1747,116 @@ function a2ReportMigration (rep) {
     console.warn('V6 Alpha 2 | Humanity left unchanged (ambiguous):\n' + rep.ambiguous.join('\n'))
     v6aNote.warn(`V6 Alpha 2: ${rep.ambiguous.length} actor(s) have a Humanity value that isn't an Alpha 1 scale position; left unchanged (see console).`)
   }
+}
+
+
+// ---- wod6e 1.1.0 ---------------------------------------------------------------------------------
+// Until 1.0.11 the system had one pool, system.health, which was the Vitae; this module kept Health in
+// flags.world.a2.health and the violations in system.vampire.nature. 1.1.0 has system.vitae,
+// system.health (Health, "disabled" = baneful), humanity.violations and Path items, and its cost
+// type "health" now means Health. It moved nothing over: after the update every sheet showed its old
+// Vitae as Health, 5 Vitae, and Humanity 6. This runs once per world, as the active GM:
+//   Vitae      old system.health.value          -> system.vitae.value
+//   Health     flags.world.a2.health            -> system.health.value / .disabled
+//   Humanity   humanity.legacy (kept by 1.1.0)  -> humanity.value / .violations
+//   costs      "health" (= Vitae until now)     -> "vitae", on world items, sheets and item packs
+//   tokens     bars a2health / health           -> health / vitae
+// What it replaced stays in flags.world.a2.m110 on each actor.
+function a2Cost110 (data) {
+  // an item's update for the cost change, or null
+  const upd = {}
+  if (data?.system?.activation?.cost?.type === 'health') upd['system.activation.cost.type'] = 'vitae'
+  const extra = data?.flags?.world?.a2?.extraCosts
+  if (Array.isArray(extra) && extra.some((e) => e?.type === 'health')) upd['flags.world.a2.extraCosts'] = extra.map((e) => (e?.type === 'health' ? { ...e, type: 'vitae' } : e))
+  return Object.keys(upd).length ? upd : null
+}
+function a2Humanity110 (vampire = {}) {
+  // the rank and slashes a sheet had before 1.1.0 reset it, from the copy the system kept
+  const lg = vampire?.humanity?.legacy
+  if (!lg?.humanity) return null
+  const m = a2MigrateHumanityValues({ humanity: lg.humanity, nature: lg.nature, beast: lg.beast }, false)
+  return m.status === 'ambiguous' ? null : { rank: m.rank, violations: m.violations }
+}
+function a2Bars110 (tok = {}) {
+  const upd = {}
+  if (tok?.bar1?.attribute === 'a2health') upd['bar1.attribute'] = 'health'
+  else if (tok?.bar1?.attribute === 'health') upd['bar1.attribute'] = 'vitae'
+  if (tok?.bar2?.attribute === 'a2health') upd['bar2.attribute'] = 'health'
+  else if (tok?.bar2?.attribute === 'health') upd['bar2.attribute'] = 'vitae'
+  return Object.keys(upd).length ? upd : null
+}
+async function a2Migrate110 ({ force = false, dryRun = false } = {}) {
+  const report = { actors: 0, humanity: 0, items: 0, embedded: 0, packs: 0, tokens: 0, skipped: 0 }
+  if (!a2Native() || !game.user.isGM || (game.users.activeGM && game.users.activeGM.id !== game.user.id)) return report
+  const KEY = 'a2m110'
+  if (!game.settings.settings.has(`v6-automation.${KEY}`)) game.settings.register('v6-automation', KEY, { scope: 'world', config: false, type: Number, default: 0 })
+  if (game.settings.get('v6-automation', KEY) >= 1 && !force) return report
+  if (!dryRun) v6aNote.info('V6 Automation: moving the world to the wod6e 1.1.0 fields (Vitae, Health, Humanity, costs). This runs once and takes a minute.', { permanent: false })
+  const at = new Date().toISOString()
+  for (const actor of game.actors) {
+    if (actor.type !== 'vampire') continue
+    const src = actor._source
+    const f = src.flags?.world?.a2 ?? {}
+    if (f.m110 && !force) { report.skipped++; continue }
+    const upd = {}
+    const oldPool = a2Int(src.system?.health?.value)
+    const a2h = f.health && typeof f.health === 'object' ? f.health : null
+    const npc = f.npc ?? null
+    const hpMax = npc?.minion ? 1 : a2Int(npc?.healthMax) > 0 ? a2Int(npc.healthMax) : a2HealthMax(src.system?.attributes?.stamina?.value)
+    const baneful = a2Clamp(a2Int(a2h?.baneful), 0, hpMax)
+    upd['system.vitae.value'] = Math.max(0, oldPool)
+    upd['system.vitae.max'] = Math.max(1, a2Int(a2ActorVitaeTotal(actor)) || oldPool || 5)
+    upd['system.health.max'] = Math.max(1, hpMax)
+    upd['system.health.disabled'] = baneful
+    upd['system.health.value'] = a2Clamp(a2h?.value === undefined || a2h?.value === null ? hpMax : a2Int(a2h.value), 0, hpMax - baneful)
+    const hum = src.system?.vampire?.humanity
+    const old = a2Humanity110(src.system?.vampire)
+    // only where nobody has touched the track since the system reset it to 6
+    if (old && a2Int(hum?.value, 6) === 6 && !a2Int(hum?.violations) && (old.rank !== 6 || old.violations)) {
+      upd['system.vampire.humanity.value'] = old.rank
+      upd['system.vampire.humanity.violations'] = old.violations
+      report.humanity++
+    }
+    upd['flags.world.a2.m110'] = { at, vitae: oldPool, health: a2h, humanity: hum ? { value: hum.value, violations: hum.violations ?? 0 } : null }
+    a2Unset(upd, 'flags.world.a2.health')
+    const proto = a2Bars110(src.prototypeToken)
+    if (proto) for (const [k, v] of Object.entries(proto)) upd[`prototypeToken.${k}`] = v
+    const items = []
+    for (const it of src.items ?? []) { const u = a2Cost110(it); if (u) items.push({ _id: it._id, ...u }) }
+    report.actors++
+    report.embedded += items.length
+    if (dryRun) continue
+    await actor.update(upd, { a2Damage: true, a2dUndo: true })
+    if (items.length) await actor.updateEmbeddedDocuments('Item', items)
+  }
+  const world = []
+  for (const it of game.items) { const u = a2Cost110(it._source); if (u) world.push({ _id: it.id, ...u }) }
+  report.items = world.length
+  if (world.length && !dryRun) for (let i = 0; i < world.length; i += 100) await Item.updateDocuments(world.slice(i, i + 100))
+  for (const pack of game.packs) {
+    if (pack.metadata.packageType !== 'world' || pack.documentName !== 'Item') continue
+    const docs = await pack.getDocuments()
+    const upds = docs.map((d) => { const u = a2Cost110(d._source); return u ? { _id: d.id, ...u } : null }).filter(Boolean)
+    if (!upds.length) continue
+    report.packs += upds.length
+    if (dryRun) continue
+    const locked = pack.locked
+    if (locked) await pack.configure({ locked: false })
+    try { await Item.updateDocuments(upds, { pack: pack.collection }) } finally { if (locked) await pack.configure({ locked: true }) }
+  }
+  for (const scene of game.scenes) {
+    const upds = scene.tokens.map((t) => { const u = a2Bars110(t._source); return u ? { _id: t.id, ...u } : null }).filter(Boolean)
+    report.tokens += upds.length
+    if (upds.length && !dryRun) await scene.updateEmbeddedDocuments('Token', upds)
+  }
+  if (!dryRun) {
+    await game.settings.set('v6-automation', KEY, 1)
+    a2RefreshActors()
+    const line = `V6 Automation: world moved to the wod6e 1.1.0 fields. ${report.actors} sheets (Vitae and Health), ${report.humanity} Humanity ranks restored, ${report.items + report.embedded + report.packs} power costs now paid in Vitae, ${report.tokens} token bars.`
+    console.log(line, report)
+    v6aNote.info(line, { permanent: true })
+  }
+  return report
 }
 
 // ---- Alpha 1 leftovers -----------------------------------------------------------
@@ -1815,6 +1944,9 @@ function a2InjectStyles () {
 .actor.sheet .a2-na { opacity: 0.4; filter: grayscale(1); pointer-events: none; }
 .actor.sheet .a2-na-label { font-size: 13px; text-transform: none; font-weight: normal; margin-left: 6px; }
 .actor.sheet [data-actor-section="humanityScale"].a2-on > .humanity-tracker { display: none; }
+.actor.sheet [data-actor-section="humanityScale"].a2-on > :not(.a2-humanity) { display: none; }
+.actor.sheet .a2-humanity .a2-open-path { cursor: pointer; }
+.roll-dialog-side-panel .a2-hidden, .dialog .a2-hidden { display: none !important; }
 .actor.sheet .a2-humanity { padding: 4px 16px 8px; }
 .actor.sheet .a2-humanity .resource-tracker-header .a2-subnote { margin: 0 0 0 auto; }
 .actor.sheet .resource-tracker-space.a2-square { border-radius: 3px; }
@@ -1839,10 +1971,18 @@ function a2Hooks () {
   // A new character starts with its full Vitae (the system's default is 5, the Alpha 1 figure).
   Hooks.on('preCreateActor', (actor, data) => {
     try {
-      if (!a2Enabled() || actor.type !== 'vampire' || data?.system?.health?.value !== undefined) return
+      if (!a2Enabled() || actor.type !== 'vampire') return
       const creature = A2_CREATURES.includes(data?.flags?.world?.a2?.creature) ? data.flags.world.a2.creature : 'vampire'
       const total = a2TotalVitae(creature, creature === 'vampire' ? a2GenModifier(data?.system?.vampire?.generation?.value) : 0)
-      if (total) actor.updateSource({ 'system.health.value': total, 'system.health.max': total })
+      const upd = {}
+      if (total && data?.system?.vitae?.value === undefined) Object.assign(upd, { 'system.vitae.value': total, 'system.vitae.max': total })
+      // Health starts full too (the system's default is 5 of 5, whatever the Stamina)
+      if (data?.system?.health?.value === undefined) {
+        const npc = data?.flags?.world?.a2?.npc
+        const hp = npc?.minion ? 1 : a2Int(npc?.healthMax) > 0 ? a2Int(npc.healthMax) : a2HealthMax(data?.system?.attributes?.stamina?.value ?? actor.system?.attributes?.stamina?.value)
+        Object.assign(upd, { 'system.health.value': hp, 'system.health.max': hp })
+      }
+      if (Object.keys(upd).length) actor.updateSource(upd)
     } catch (e) { console.error('V6 Alpha 2 | new actor', e) }
   })
   Hooks.on('createActor', (actor, options, userId) => {
@@ -1876,6 +2016,8 @@ async function a2Boot () {
       setEnabled: a2SetEnabled,
       removeAlpha1Automation: a2RemoveAlpha1Automation,
       migrateHumanity: a2MigrateHumanity,
+      migrate110: a2Migrate110,
+      native: a2Native,
       revertHumanity: a2RevertHumanity,
       refresh: a2RefreshActors,
       creature: a2Creature,
@@ -1921,6 +2063,7 @@ async function a2Boot () {
       if (game.user.isGM) {
         await a2RemoveAlpha1Automation()
         a2ReportMigration(await a2MigrateHumanity())
+        try { await a2Migrate110() } catch (e) { console.error('V6 Automation | wod6e 1.1.0 migration', e); v6aNote.error('V6 Automation: moving the world to the wod6e 1.1.0 fields failed (see console). Nothing was lost; reload to try again.') }
       }
       a2RefreshActors()
     }
@@ -2027,14 +2170,17 @@ const a2xState = { RD: null, Test: null, mod: { shift: false, t: 0 }, booting: n
 // ---- pure helpers (no Foundry globals; unit-tested in test/actions.test.mjs) ----
 function a2xKey (path) { return String(path ?? '').split('.').pop() }
 
-// Vitae ("health") and Willpower an item needs at activation: its cost plus the
-// extra costs our power data marks as "part of the cost" (PG p.149).
+// Vitae, Willpower and (wod6e 1.1.0) Health an item needs at activation: its cost plus the
+// extra costs our power data marks as "part of the cost" (PG p.149). The cost types are wod6e
+// 1.1.0's: "vitae", "willpower" and "health" (Health; until 1.0.11 that word meant the Vitae, and
+// a2Migrate110 and the importer rewrite data from then).
 function a2xItemCosts (system = {}, flags = {}) {
-  const out = { health: 0, willpower: 0 }
+  const out = { vitae: 0, health: 0, willpower: 0 }
   const c = system?.activation?.cost
-  if (c && Object.prototype.hasOwnProperty.call(out, c.type)) out[c.type] += Math.max(0, a2Int(c.amount))
+  const add = (type, amount) => { if (Object.prototype.hasOwnProperty.call(out, type)) out[type] += Math.max(0, a2Int(amount)) }
+  if (c) add(c.type, c.amount)
   for (const e of flags?.world?.a2?.extraCosts ?? []) {
-    if (e && Object.prototype.hasOwnProperty.call(out, e.type) && /part of the cost/i.test(String(e.when ?? ''))) out[e.type] += Math.max(0, a2Int(e.amount))
+    if (e && /part of the cost/i.test(String(e.when ?? ''))) add(e.type, e.amount)
   }
   return out
 }
@@ -2042,10 +2188,10 @@ function a2xItemCosts (system = {}, flags = {}) {
 // What the actor is short of. vitae = false: the creature has no Vitae (PG p.102).
 function a2xCostShortfall (costs = {}, have = {}, { vitae = true } = {}) {
   const out = []
-  for (const [type, label] of [['health', 'Vitae'], ['willpower', 'Willpower']]) {
+  for (const [type, label] of [['vitae', 'Vitae'], ['health', 'Health'], ['willpower', 'Willpower']]) {
     const need = Math.max(0, a2Int(costs[type]))
     if (!need) continue
-    const none = type === 'health' && !vitae
+    const none = type === 'vitae' && !vitae
     const cur = none ? 0 : Math.max(0, a2Int(have[type]))
     if (cur < need) out.push({ type, label, need, have: cur, none })
   }
@@ -2410,7 +2556,7 @@ async function a2xActivationGuard (item, actor, { override = false } = {}) {
   if (!item || !actor || actor.type === 'npc') return true // ST p.42: simple NPC abilities cost nothing
   const problems = []
   const rules = a2Rules(actor)
-  const short = a2xCostShortfall(a2xItemCosts(item.system, item.flags), { health: actor.system?.health?.value, willpower: actor.system?.willpower?.value }, { vitae: rules ? rules.vitae : true })
+  const short = a2xCostShortfall(a2xItemCosts(item.system, item.flags), { vitae: actor.system?.vitae?.value, health: actor.system?.health?.value, willpower: actor.system?.willpower?.value }, { vitae: rules ? rules.vitae : true })
   for (const s of short) problems.push(s.none ? `${actor.name} has no Vitae (${a2Creature(actor)}) for ${item.name} (cost ${s.need} Vitae).` : `${actor.name} has only ${s.have} ${s.label} for ${item.name} (cost ${s.need}).`)
   const fr = a2xFrenzyState(actor)
   if (fr && A2X_FRENZY[fr.type].noPowers && item.type === 'discipline' && ['mental', 'social'].includes(item.system?.attribute)) {
@@ -2526,9 +2672,9 @@ async function a2xRecoverImpairment (actorLike, key, { vitae = false } = {}) {
   if (!a2xImpairment(actor).manual.has(key)) return null
   const upd = { [`flags.world.a2.impaired.${key}`]: false }
   if (vitae) {
-    const cur = a2Int(actor.system?.health?.value)
+    const cur = a2Int(actor.system?.vitae?.value)
     if (!a2Rules(actor)?.vitae || cur < 2) { v6aNote.warn(`${actor.name} needs 2 Vitae to end an impairment (PG p.105).`); return null }
-    upd['system.health.value'] = cur - 2
+    upd['system.vitae.value'] = cur - 2
   }
   await actor.update(upd)
   return { key, vitae: vitae ? 2 : 0 }
@@ -3039,7 +3185,7 @@ async function a2xRideTheWave (actorLike, type = 'rage') {
   if (!actor) return null
   if (!A2X_FRENZY[type]) type = 'rage'
   const path = a2PathInfo(actor)
-  const viol = a2xRideViolation(path.item?.flags?.world?.a2?.violations, type)
+  const viol = a2xRideViolation(path.violations, type)
   await actor.update({ 'flags.world.a2.frenzy': { type, rode: true, since: Date.now(), messageId: null } })
   const lines = [
     `${actor.name} rides the wave of a ${A2X_FRENZY[type].label.toLowerCase()}: no test; the frenzy lasts for the scene or until it ends (PG p.145).`,
@@ -3358,7 +3504,7 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
   if (res.massive) extra.push(`${name}: massive damage, twice the maximum Health in one blow: Final Death in almost all cases (PG p.101).`)
   for (const l of a2ZeroHealthLines(actor, res)) extra.push(`${name}: ${l}`)
   // every box baneful with Vitae left is torpor (PG p.100): mark it, so the token shows it and New Night knows
-  if (a2Creature(actor) === 'vampire' && res.max > 0 && res.baneful >= res.max && a2Int(actor.system?.health?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
+  if (a2Creature(actor) === 'vampire' && res.max > 0 && res.baneful >= res.max && a2Int(actor.system?.vitae?.value) > 0 && !actor.flags?.world?.a2?.torpor) {
     let night = 1
     try { night = a2Int(a2tClock().night, 1) } catch (e) { /* no clock */ } // eslint-disable-line no-undef
     try { await actor.update({ 'flags.world.a2.torpor': { reason: 'baneful', since: night } }) } catch (e) { console.error('V6 Automation | torpor', e) }
@@ -3589,7 +3735,7 @@ function a2xDecorateFrenzy (root, actor, editable) {
 function a2xOnUpdateActor (actor, changes, options, userId) {
   if (!a2Enabled() || game.user.id !== userId) return
   const f = a2xFrenzyState(actor)
-  if (f?.type === 'hunger' && foundry.utils.hasProperty(changes ?? {}, 'system.health') && a2ActorHunger(actor) <= 1) a2xEndFrenzy(actor, { reason: 'hunger' })
+  if (f?.type === 'hunger' && foundry.utils.hasProperty(changes ?? {}, 'system.vitae') && a2ActorHunger(actor) <= 1) a2xEndFrenzy(actor, { reason: 'hunger' })
 }
 
 // ---- styles, hooks and boot ------------------------------------------------------------
@@ -4335,7 +4481,7 @@ async function a2tVictimLocal ({ uuid, vitaeLoss = 0, bloodLeft = null, damage =
   const victim = a2FromUuid(uuid)
   if (!victim) return
   const upd = {}
-  if (a2Int(vitaeLoss) > 0 && a2Rules(victim)?.vitae) upd['system.health.value'] = Math.max(0, a2Int(victim.system.health?.value) - a2Int(vitaeLoss))
+  if (a2Int(vitaeLoss) > 0 && a2Rules(victim)?.vitae) upd['system.vitae.value'] = Math.max(0, a2Int(victim.system.vitae?.value) - a2Int(vitaeLoss))
   if (bloodLeft !== null && bloodLeft !== undefined) upd['flags.world.a2.bloodLeft'] = a2Clamp(a2Int(bloodLeft), 0, 10)
   if (Object.keys(upd).length) await victim.update(upd)
   if (a2Int(damage) > 0) await a2DamageActor(victim, a2Int(damage))
@@ -4451,7 +4597,7 @@ async function a2tBloodSurge (actor) {
   if (!actor) { v6aNote.warn('Select a token first.'); return null }
   if (!actor.isOwner) { v6aNote.warn(`You don't own ${actor.name}.`); return null }
   if (!a2Rules(actor)?.surge || !actor.system?.canBloodSurge) { v6aNote.warn(`${actor.name} can't use Blood Surge: it has no Vitae to burn (PG p.137).`); return null }
-  const vitae = a2Int(actor.system.health?.value)
+  const vitae = a2Int(actor.system.vitae?.value)
   if (vitae < 1) { v6aNote.warn(`${actor.name} has no Vitae for a Blood Surge.`); return null }
   const tier = a2tActorTier(actor)
   const targets = a2tSurgeTargets(actor, tier)
@@ -4480,13 +4626,13 @@ async function a2tBloodSurge (actor) {
 async function a2tBloodSurgeApply (actor, targetId, vitaeSpent) {
   const tier = a2tActorTier(actor)
   const target = a2tSurgeTargets(actor, tier).find((t) => `${t.type}:${t.key}` === targetId)
-  const vitae = a2Int(actor.system.health?.value)
+  const vitae = a2Int(actor.system.vitae?.value)
   if (!target) { v6aNote.warn('Choose a valid Blood Surge target.'); return null }
   const check = a2tSurgeCheck({ kind: target.type, base: target.base, effective: target.effective, existing: target.existing, vitae: Number(vitaeSpent), available: vitae, cap: target.cap })
   if (!check.ok) { v6aNote.warn(check.reason); return null }
   const spend = a2Int(vitaeSpent)
   const hungerBefore = a2ActorHunger(actor)
-  await actor.update({ 'system.health.value': vitae - spend })
+  await actor.update({ 'system.vitae.value': vitae - spend })
   try {
     await actor.createEmbeddedDocuments('Item', [{
       name: `Blood Surge: ${target.label}`,
@@ -4503,7 +4649,7 @@ async function a2tBloodSurgeApply (actor, targetId, vitaeSpent) {
       }
     }])
   } catch (e) {
-    await actor.update({ 'system.health.value': vitae })
+    await actor.update({ 'system.vitae.value': vitae })
     throw e
   }
   const hungerAfter = a2ActorHunger(actor)
@@ -4580,7 +4726,7 @@ async function a2tNewNight (opts = {}) {
   const row = (c, i) => {
     const a = c.actor
     const creature = a2Creature(a)
-    const vit = a2Rules(a)?.vitae ? ` · Vitae ${a2Int(a.system?.health?.value)}/${a2ActorVitaeTotal(a)}` : ''
+    const vit = a2Rules(a)?.vitae ? ` · Vitae ${a2Int(a.system?.vitae?.value)}/${a2ActorVitaeTotal(a)}` : ''
     const torpor = Boolean(a.flags?.world?.a2?.torpor)
     const h = creature === 'vampire' ? a2ActorHealth(a) : null
     return `<tr><td class="c"><input type="checkbox" name="on" data-multi value="${i}"${c.ticked ? ' checked' : ''}></td>
@@ -4648,7 +4794,7 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
     const s = actor.system ?? {}
     const health = a2ActorHealth(actor)
     const prevTorpor = actor.flags?.world?.a2?.torpor ?? null
-    const vitae = a2Int(s.health?.value)
+    const vitae = a2Int(s.vitae?.value)
     const hungerBefore = a2ActorHunger(actor)
     const wpBefore = a2Int(s.willpower?.value)
     const res = a2tRise({
@@ -4665,9 +4811,9 @@ async function a2tNightActor (actor, e, night, { expire, uses }) {
       bloodLeft: actor.flags?.world?.a2?.bloodLeft ?? null
     })
     const upd = {}
-    if (rules?.vitae && res.vitae !== vitae) upd['system.health.value'] = res.vitae
+    if (rules?.vitae && res.vitae !== vitae) upd['system.vitae.value'] = res.vitae
     if (s.willpower && res.willpower !== wpBefore) upd['system.willpower.value'] = res.willpower
-    if (res.health.value !== health.value || res.health.baneful !== health.baneful) upd['flags.world.a2.health'] = { value: res.health.value, baneful: res.health.baneful }
+    if (res.health.value !== health.value || res.health.baneful !== health.baneful) { upd['system.health.value'] = res.health.value; upd['system.health.disabled'] = res.health.baneful }
     if (res.torpor && (!prevTorpor || prevTorpor.reason !== res.torpor.reason)) upd['flags.world.a2.torpor'] = { reason: res.torpor.reason, since: night }
     if (!res.torpor && prevTorpor) a2Unset(upd, 'flags.world.a2.torpor')
     if (res.bloodLeft !== null && res.bloodLeft !== (actor.flags?.world?.a2?.bloodLeft ?? null)) {
@@ -4727,7 +4873,7 @@ function a2tVictim () {
   if (!actor) return null
   const c = a2Creature(actor)
   const base = { uuid: actor.uuid, name: token.name ?? actor.name, actor }
-  if (c === 'vampire') return { ...base, source: 'vampire', available: a2Int(actor.system?.health?.value) }
+  if (c === 'vampire') return { ...base, source: 'vampire', available: a2Int(actor.system?.vitae?.value) }
   if (c === 'animal') return { ...base, source: 'animal', available: null }
   return { ...base, source: 'human', available: a2Int(actor.flags?.world?.a2?.bloodLeft ?? 10) }
 }
@@ -4760,7 +4906,7 @@ function a2tFeedStartDialog (actor) {
     return tests.map(([a, s, why], i) => a2tOpt(String(i), `${a2tTrait('Attributes', a)} + ${a2tTrait('Skills', s)}: ${why}`)).join('') + a2tOpt('custom', 'Another Attribute + Skill (pick below)', !tests.length)
   }
   const content = `<div class="a2t-dialog a2t-feed">
-    <p><strong>${a2Esc(actor.name)}</strong>: Vitae ${a2Int(actor.system.health?.value)}/${a2ActorVitaeTotal(actor)}, Hunger ${a2ActorHunger(actor)}.${victim ? ` Target: <strong>${a2Esc(victim.name)}</strong> (${a2Esc(victim.source)}).` : ''}</p>
+    <p><strong>${a2Esc(actor.name)}</strong>: Vitae ${a2Int(actor.system.vitae?.value)}/${a2ActorVitaeTotal(actor)}, Hunger ${a2ActorHunger(actor)}.${victim ? ` Target: <strong>${a2Esc(victim.name)}</strong> (${a2Esc(victim.source)}).` : ''}</p>
     <div class="form-group"><label>How</label><select name="method">
       ${a2tOpt('hunt', 'Hunt: roll the hunting test (PG p.142)', true)}
       ${a2tOpt('herd', `Herd: ${herd.dots ? `${herd.left} of ${herd.base + herd.taxed} feedings left this session` : 'no Herd Resource'} (PG p.143)`)}
@@ -4859,11 +5005,11 @@ async function a2tFeedTest (actor, start) {
 }
 
 function a2tFeedApplyDialog (actor, start, outcome) {
-  const missing = Math.max(0, a2ActorVitaeTotal(actor) - a2Int(actor.system.health?.value))
+  const missing = Math.max(0, a2ActorVitaeTotal(actor) - a2Int(actor.system.vitae?.value))
   const g = a2ActorGenMod(actor)
   const path = a2PathInfo(actor)
   const onPath = path.kind === 'path'
-  const pathViolations = onPath ? (path.item?.flags?.world?.a2?.violations ?? []).map((v) => v.text).filter(Boolean) : []
+  const pathViolations = onPath ? (path.violations ?? []).map((v) => (typeof v === 'string' ? v : v?.text)).filter(Boolean) : []
   const victim = a2tVictim()
   const stored = a2tStoredBags(actor)
   const attack = start.method === 'attack'
@@ -4939,7 +5085,7 @@ function a2tFeedApplyDialog (actor, start, outcome) {
     if (!out) return
     if (!feeding) { out.textContent = 'No feeding.'; return }
     if (p2.blocked) { out.innerHTML = `<span class="a2t-err">${a2Esc(p2.blocked)}</span>`; return }
-    const vit = a2Int(actor.system.health?.value)
+    const vit = a2Int(actor.system.vitae?.value)
     const after = vit + p2.gained
     const dmg = attack ? a2tFeedAttackDamage(str, d.margin, d.option, d.willing) : 0
     out.innerHTML = `Gain ${p2.gained} Vitae: ${vit} → ${after}, Hunger ${a2ActorHunger(actor)} → ${a2HungerFromVitae(after, a2ActorVitaeTotal(actor))}.` +
@@ -4981,7 +5127,7 @@ async function a2tFeedApply (actor, res) {
   const { start, outcome, d, feeding, plan, attack, victim } = res
   if (feeding && plan.blocked) { v6aNote.warn(plan.blocked); return null }
   const lines = []
-  const vitae = a2Int(actor.system.health?.value)
+  const vitae = a2Int(actor.system.vitae?.value)
   const hungerBefore = a2ActorHunger(actor)
   const wp = a2Int(actor.system.willpower?.value)
   const upd = {}
@@ -5009,7 +5155,7 @@ async function a2tFeedApply (actor, res) {
   if (feeding) {
     gained = plan.gained
     const after = Math.min(a2ActorVitaeTotal(actor), vitae + gained)
-    if (after !== vitae) upd['system.health.value'] = after
+    if (after !== vitae) upd['system.vitae.value'] = after
     if (plan.willpower) upd['system.willpower.value'] = Math.min(a2Int(actor.system.willpower?.max), wp + plan.willpower)
     const srcLabel = plan.source === 'animal' ? `an animal (${A2T_ANIMALS[d.size]?.label ?? d.size})` : plan.source === 'bag' ? 'blood bags' : plan.source === 'stored' ? 'stored blood bags' : plan.source === 'vampire' ? (victim?.name ?? 'a vampire') : plan.source === 'other' ? 'another source' : (victim?.name ?? 'a human')
     lines.push(`Drank ${plan.drink} Vitae from ${srcLabel}: Vitae ${vitae} → ${after}, Hunger ${hungerBefore} → ${a2HungerFromVitae(after, a2ActorVitaeTotal(actor))}.`)
@@ -5888,7 +6034,7 @@ function a2bHooks () {
   Hooks.on('updateActor', (actor, changes) => {
     if (!a2bOn()) return
     const has = (p) => foundry.utils.hasProperty(changes, p)
-    if ((has('flags.world.a2.health') || has('flags.world.a2.hungerOverride') || has('flags.world.a2.creature') || has('flags.world.a2.npc')) && a2bHasA2Effects(actor)) a2bQueue(actor)
+    if ((has('system.health') || has('system.vitae') || has('flags.world.a2.hungerOverride') || has('flags.world.a2.creature') || has('flags.world.a2.npc')) && a2bHasA2Effects(actor)) a2bQueue(actor)
   })
 }
 
@@ -6679,15 +6825,15 @@ async function a2pInstant (actor, x, power = 'Power') {
     if (!h) return
     if (x.track === 'baneful') {
       const ban = Math.max(0, h.baneful - x.amount)
-      await actor.update({ 'flags.world.a2.health': { value: Math.min(h.value, h.max - ban), baneful: ban } })
+      await actor.update({ 'system.health.value': Math.min(h.value, h.max - ban), 'system.health.disabled': ban })
     } else {
-      await actor.update({ 'flags.world.a2.health': { value: Math.min(h.max - h.baneful, h.value + x.amount), baneful: h.baneful } })
+      await actor.update({ 'system.health.value': Math.min(h.max - h.baneful, h.value + x.amount), 'system.health.disabled': h.baneful })
     }
     return
   }
   if (x.type === 'resource') {
     if (x.resource === 'health') return a2pInstant(actor, x.amount >= 0 ? { type: 'heal', track: 'health', amount: x.amount } : { type: 'damage', amount: -x.amount, track: 'health' }, power)
-    const path = x.resource === 'vitae' ? 'system.health' : 'system.willpower'
+    const path = x.resource === 'vitae' ? 'system.vitae' : 'system.willpower'
     const res = foundry.utils.getProperty(actor, path)
     if (!res) return
     const max = a2pInt(res.max) - a2pInt(res.disabled)
@@ -6733,7 +6879,7 @@ async function a2pAsk (spec, actor, vars) {
   // Extra costs are paid at activation (PG p.149).
   if (out.extra && ask.extra?.cost) {
     const each = Math.max(1, a2pInt(ask.extra.cost.each, 1))
-    const path = ask.extra.cost.resource === 'willpower' ? 'system.willpower.value' : 'system.health.value'
+    const path = ask.extra.cost.resource === 'willpower' ? 'system.willpower.value' : 'system.vitae.value'
     const cur = a2pInt(foundry.utils.getProperty(actor, path))
     const afford = Math.floor(cur / each)
     if (afford < out.extra) { v6aNote.warn(`${actor.name} can only pay for ${afford} extra.`); out.extra = afford }
@@ -6768,20 +6914,20 @@ async function a2pAskRepeat (item, prior, spec) {
 async function a2pRefund (item, before = null) {
   const cost = item?.system?.activation?.cost
   const actor = item?.actor
-  if (!actor || !a2pInt(cost?.amount) || !['health', 'willpower'].includes(cost?.type)) return
+  if (!actor || !a2pInt(cost?.amount) || !['vitae', 'health', 'willpower'].includes(cost?.type)) return
   const res = actor.system?.[cost.type]
   const paid = before === null ? 0 : Math.min(a2pInt(cost.amount), Math.max(0, a2pInt(before) - a2pInt(res?.value)))
   if (!paid) return
   await actor.update({ [`system.${cost.type}.value`]: Math.min(a2pInt(res?.value) + paid, a2pInt(res?.max)) })
-  v6aNote.info(`${item.name}: same activation, ${paid} ${cost.type === 'health' ? 'Vitae' : 'Willpower'} refunded.`)
+  v6aNote.info(`${item.name}: same activation, ${paid} ${cost.type === 'vitae' ? 'Vitae' : cost.type === 'health' ? 'Health' : 'Willpower'} refunded.`)
 }
 
 async function a2pPayNoRoll (item, { force = false } = {}) {
   const actor = item.actor
   const cost = item.system?.activation?.cost
   const amount = a2pInt(cost?.amount)
-  if (!amount || !['health', 'willpower'].includes(cost?.type)) return true
-  const label = cost.type === 'health' ? 'Vitae' : 'Willpower'
+  if (!amount || !['vitae', 'health', 'willpower'].includes(cost?.type)) return true
+  const label = cost.type === 'vitae' ? 'Vitae' : cost.type === 'health' ? 'Health' : 'Willpower'
   const cur = a2pInt(actor.system?.[cost.type]?.value)
   if (cur < amount && !force) {
     if (!game.user.isGM) { v6aNote.warn(`${actor.name} has only ${cur} ${label}; ${item.name} costs ${amount}.`); return false }
@@ -7230,7 +7376,7 @@ async function a2pUpkeepDue (actor, cond) {
   a2pState.prompting.add(cond.uuid)
   try {
     const label = u.resource === 'vitae' ? 'Vitae' : 'Willpower'
-    const path = u.resource === 'vitae' ? 'system.health.value' : 'system.willpower.value'
+    const path = u.resource === 'vitae' ? 'system.vitae.value' : 'system.willpower.value'
     const cur = a2pInt(foundry.utils.getProperty(actor, path))
     const extend = u.per === 'turnEnd'
     const night = u.per === 'night'
@@ -7318,7 +7464,7 @@ async function a2pPatchOpen () {
     }
     const targets = isPower ? a2pCurrentTargets() : null
     const costType = item?.system?.activation?.cost?.type
-    const before = isPower && ['health', 'willpower'].includes(costType) ? a2pInt(item.actor.system?.[costType]?.value) : null
+    const before = isPower && ['vitae', 'health', 'willpower'].includes(costType) ? a2pInt(item.actor.system?.[costType]?.value) : null
     const result = await open.call(this, input)
     if (isPower && result instanceof Roll) {
       try {
@@ -7598,7 +7744,7 @@ function a2pHooks () {
   Hooks.on('v6a2EndScene', (ev) => { if (a2pOn() && !ev?.powersDone) a2pEndScene().catch((e) => console.error(e)) })
   // Torpor (all Health baneful) ends the creator's powers of one scene or less (PG p.149).
   Hooks.on('updateActor', (actor, changes) => {
-    if (!a2pOn() || !a2pIsActiveGM() || !foundry.utils.hasProperty(changes ?? {}, 'flags.world.a2.health')) return
+    if (!a2pOn() || !a2pIsActiveGM() || !foundry.utils.hasProperty(changes ?? {}, 'system.health')) return
     const h = globalThis.V6Alpha2?.health?.(actor)
     if (h && h.max > 0 && h.baneful >= h.max) a2pEndWhere((ap) => ap.source === actor.uuid && a2pEndsOn(ap, 'incapacitated'), 'creator in torpor').catch((e) => console.error(e))
   })
@@ -8605,8 +8751,8 @@ function a2lEnhance (root, entry, page) {
 }
 
 // ---- items: every power, clan trait, merit and flaw named on a page links to its item ----
-const A2L_ITEM_TYPES = ['discipline', 'clanTrait', 'merit', 'flaw', 'lifepath', 'clan', 'nature']
-const A2L_ITEM_ICON = { discipline: 'fa-bolt', clanTrait: 'fa-dna', merit: 'fa-star', flaw: 'fa-heart-crack', lifepath: 'fa-road', clan: 'fa-users', nature: 'fa-scale-balanced' }
+const A2L_ITEM_TYPES = ['discipline', 'clanTrait', 'merit', 'flaw', 'lifepath', 'clan', 'path']
+const A2L_ITEM_ICON = { discipline: 'fa-bolt', clanTrait: 'fa-dna', merit: 'fa-star', flaw: 'fa-heart-crack', lifepath: 'fa-road', clan: 'fa-users', path: 'fa-scale-balanced' }
 // A name as it stands in a cell or in bold: without dots, a trailing colon or full stop. Pure.
 function a2lItemKey (text) { return String(text ?? '').replace(/[●○•]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\s"“”']+|[\s"“”':.,;]+$/g, '').toLowerCase() }
 // Is a name distinctive enough to link in running text? Two words, or one long one. Pure.
@@ -8676,7 +8822,7 @@ function a2lLinkItems (root) {
   for (const h of root.querySelectorAll('h2, h3, h4, h5')) {
     if (h.querySelector('a.v6-item') || h.classList.contains('v6-dup')) continue
     const ref = idx.byKey.get(a2lItemKey(h.textContent))
-    if (ref && !(a2lPlainWord(ref.name) && ['lifepath', 'clan', 'nature'].includes(ref.type))) { h.appendChild(doc.createTextNode(' ')); h.appendChild(a2lItemLink(doc, ref, '', { iconOnly: true })); made++ }
+    if (ref && !(a2lPlainWord(ref.name) && ['lifepath', 'clan', 'path'].includes(ref.type))) { h.appendChild(doc.createTextNode(' ')); h.appendChild(a2lItemLink(doc, ref, '', { iconOnly: true })); made++ }
   }
   // 3. distinctive names in running text, first mention on the page
   if (idx.regex) {
@@ -9527,16 +9673,16 @@ function a2cBuild (state, lib) {
   if (f.generation) update['system.vampire.generation.value'] = f.generation
   update['system.vampire.clan.name'] = state.clan
   update['system.vampire.humanity.value'] = state.humanity
-  update['system.vampire.humanity.max'] = 10 // the Alpha 2 track, also on a sheet that was never converted
-  update['system.vampire.nature.value'] = 0
-  update['system.vampire.nature.max'] = Math.max(1, 10 - a2Int(state.humanity, 6))
+  update['system.vampire.humanity.violations'] = 0
   const wp = state.attrs.composure + state.attrs.resolve
   update['system.willpower.value'] = wp
   update['system.willpower.max'] = wp
-  update['system.health.value'] = f.vitae
-  update['system.health.max'] = f.vitae
+  update['system.vitae.value'] = f.vitae
+  update['system.vitae.max'] = f.vitae
   const hp = state.attrs.stamina + 5
-  update['flags.world.a2.health'] = { value: hp, max: hp }
+  update['system.health.value'] = hp
+  update['system.health.max'] = hp
+  update['system.health.disabled'] = 0
   update['flags.world.a2.creation'] = { v: 1, concept: state.concept, born: state.born || null, embraced: state.embraced || null, apparentAge: state.apparentAge || null, decade: state.decade, sireName: state.sireName, sireType: state.sireType, sireDisc: state.sireDisc, extraDiscs: state.extraDiscs.filter(Boolean), tier: f.key }
   // the sheet's own header fields
   if (a2Int(state.apparentAge) > 0) update['system.age.apparent'] = a2Int(state.apparentAge)
@@ -9557,7 +9703,7 @@ function a2cBuild (state, lib) {
   for (const n of state.traits) take(lib.clanTrait, n)
   for (const n of state.merits) take(lib.merit, n)
   for (const n of state.flaws) { if (n === state.ownFlaw) items.push({ name: n, type: 'flaw', img: 'icons/svg/downgrade.svg', system: { description: '<p>Flaw dice penalty: −2 on a test this flaw makes harder (PG p.56).</p>' } }); else take(lib.flaw, n) }
-  if (state.creature !== 'ghoul') take(lib.nature, 'Humanity')
+  if (state.creature !== 'ghoul') take(lib.path ?? lib.nature, 'Humanity')
   const kind = (text) => (/^wealth/i.test(text) ? 'wealth' : /^social/i.test(text) ? 'socialAssets' : 'physicalAssets')
   const clean = (text) => String(text).replace(/^(?:Physical|Social) Asset\s*\(([^]*)\)\s*$/i, '$1').trim()
   for (const l of state.lifepaths) (l.resourceNames ?? []).forEach((r, j) => { if (a2Int(l.resources[j]) > 0) items.push({ name: clean(r), type: 'resource', img: 'icons/svg/coins.svg', system: { description: `<p>From the ${a2Esc(l.name)} lifepath.</p>`, dots: { value: a2Int(l.resources[j]), max: 5 }, resourceType: kind(r) } }) })
@@ -9574,7 +9720,7 @@ function a2cBuild (state, lib) {
   }
   items.length = 0
   items.push(...merged)
-  return { update, items, removeTypes: ['clan', 'lifepath', 'discipline', 'clanTrait', 'merit', 'flaw', 'resource', 'nature'] }
+  return { update, items, removeTypes: ['clan', 'lifepath', 'discipline', 'clanTrait', 'merit', 'flaw', 'resource', 'nature', 'path'] }
 }
 
 async function a2cApply (actor, state, lib) {
@@ -10336,8 +10482,8 @@ async function a2vResolve (attack, defender, { again = false } = {}) {
     margin = win && v.win === true && !mine ? Math.max(0, a2Int(v.margin)) : 0
   }
   if (prev && prev.win === win && a2Int(prev.margin) === margin) return null // nothing changed
-  const vit = attacker?.system?.health
-  const out = a2vOutcome(effect, { win, margin, attacker: { name: attacker?.name, strength: a2vEff(attacker, 'strength'), stamina: a2vEff(attacker, 'stamina'), missing: vit ? a2Int(vit.max) - a2Int(vit.value) : 0 }, target: { name: defender.name, vampire: a2Creature(defender) === 'vampire', blood: a2Creature(defender) === 'vampire' ? a2Int(defender.system?.health?.value) : null } })
+  const vit = attacker?.system?.vitae
+  const out = a2vOutcome(effect, { win, margin, attacker: { name: attacker?.name, strength: a2vEff(attacker, 'strength'), stamina: a2vEff(attacker, 'stamina'), missing: vit ? a2Int(vit.max) - a2Int(vit.value) : 0 }, target: { name: defender.name, vampire: a2Creature(defender) === 'vampire', blood: a2Creature(defender) === 'vampire' ? a2Int(defender.system?.vitae?.value) : null } })
   const had = { damage: a2Int(prev?.damage), vitae: a2Int(prev?.vitae) }
   const done = { win, margin, set: out.set, edge: prev?.edge ?? null, edgeDice: prev?.edgeDice ?? null, damage: had.damage, vitae: had.vitae, shared: Boolean(prev?.shared) }
   await attack.update({ 'flags.world.a2def.resolved': true, 'flags.world.a2def.settled': !out.button, 'flags.world.a2def.done': done }) // settled: nothing left to apply by hand
@@ -10362,9 +10508,9 @@ async function a2vResolve (attack, defender, { again = false } = {}) {
       done.damage = out.damage
     } else if (prev && a2Int(out.damage) !== had.damage) notes.push(`${had.damage} damage went in on the first result; it would now be ${a2Int(out.damage)}. Storyteller: put it right by hand (the Automation log can take the first back).`)
     if (out.vitae && attacker && !had.vitae) {
-      await attacker.update({ 'system.health.value': Math.min(a2Int(vit.max), a2Int(vit.value) + out.vitae) })
+      await attacker.update({ 'system.vitae.value': Math.min(a2Int(vit.max), a2Int(vit.value) + out.vitae) })
       if (a2Creature(defender) === 'vampire') {
-        await defender.update({ 'system.health.value': Math.max(0, a2Int(defender.system.health.value) - out.vitae) })
+        await defender.update({ 'system.vitae.value': Math.max(0, a2Int(defender.system.vitae.value) - out.vitae) })
         if (typeof a2yDrink === 'function') await a2yDrink(attacker, defender) // eslint-disable-line no-undef
       }
       done.vitae = out.vitae
@@ -11322,7 +11468,7 @@ function a2wDashHtml () {
     const c = a2Creature(actor)
     const rules = a2Rules(actor) ?? {}
     const h = a2ActorHealth(actor)
-    const vit = actor.system?.health ?? {}
+    const vit = actor.system?.vitae ?? {}
     const wp = actor.system?.willpower ?? {}
     const hum = rules.humanity ? a2ActorHumanity(actor) : null
     const hunger = rules.hunger ? a2ActorHunger(actor) : null
@@ -11381,7 +11527,7 @@ function a2wPatchBars () {
   // "a2health" is the Alpha 2 Health track, which lives outside the system's own data
   proto.getBarAttribute = function (barName, opts = {}) {
     const attr = opts.alternative ?? this[barName]?.attribute
-    if (attr === 'a2health' && this.actor) { const h = a2ActorHealth(this.actor); return { type: 'bar', attribute: 'a2health', value: h.value, max: h.max, editable: false } }
+    if (attr === 'a2health' && this.actor) { const h = a2ActorHealth(this.actor); return { type: 'bar', attribute: 'a2health', value: h.value, max: h.max, editable: false } } // tokens set up before wod6e 1.1.0
     return orig.call(this, barName, opts)
   }
 }
@@ -11390,21 +11536,21 @@ function a2wTokenHooks () {
     try {
       if (a2eGet('tokenSetup', true) === false || !a2Enabled() || !doc.actor || doc.actor.type !== 'vampire') return
       const rules = a2Rules(doc.actor) ?? {}
-      const upd = { displayBars: CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER, bar1: { attribute: 'a2health' } }
-      upd.bar2 = { attribute: rules.vitae ? 'health' : 'willpower' }
+      const upd = { displayBars: CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER, bar1: { attribute: 'health' } }
+      upd.bar2 = { attribute: rules.vitae ? 'vitae' : 'willpower' }
       doc.updateSource(upd)
     } catch (e) { console.error('V6 Automation | token setup', e) }
   })
   Hooks.on('updateActor', (actor, changes) => {
     try {
       const a2 = changes?.flags?.world?.a2
-      if (a2 && ('health' in a2)) for (const t of actor.getActiveTokens?.() ?? []) { t.renderFlags?.set?.({ refreshBars: true }); if (!t.renderFlags) t.drawBars?.() }
+      if (changes?.system?.health) for (const t of actor.getActiveTokens?.() ?? []) { t.renderFlags?.set?.({ refreshBars: true }); if (!t.renderFlags) t.drawBars?.() }
       if (a2wState.dash) a2wDashRefresh()
       if (!a2xIsGM() || !a2Enabled() || a2eGet('tokenSetup', true) === false) return
       // torpor from the tools shows as the Torpor state
       if (a2 && 'torpor' in a2 && typeof a2zSet === 'function' && typeof a2zHas === 'function') { const on = Boolean(actor.flags?.world?.a2?.torpor); if (a2zHas(actor, 'torpor') !== on) a2zSet(actor, 'torpor', on) }
       // a mortal, ghoul or animal at 0 Health is down (ST p.42)
-      if (a2 && 'health' in a2 && actor.type === 'vampire') {
+      if (changes?.system?.health && actor.type === 'vampire') {
         const c = a2Creature(actor)
         if (c !== 'vampire') {
           const dead = a2ActorHealth(actor).value === 0
@@ -11531,19 +11677,19 @@ async function a2wNpcCreate (o) {
   if (creature === 'vampire') {
     const genMod = a2GenModifier(o.gen)
     try { tier = a2cTierKey('vampire', o.gen) } catch (e) { /* neonate */ }
-    system.vampire = { generation: { value: o.gen }, humanity: { value: a2wNpcHumanity(tier), max: 10 }, nature: { value: 0, max: Math.max(1, 10 - a2wNpcHumanity(tier)) }, clan: { name: o.clan ?? '' }, disciplines: {} }
-    system.health = { value: 5 + 5 * genMod, max: 5 + 5 * genMod }
+    system.vampire = { generation: { value: o.gen }, humanity: { value: a2wNpcHumanity(tier), max: 10, violations: 0, rulesVersion: 2 }, clan: { name: o.clan ?? '' }, disciplines: {} }
+    system.vitae = { value: 5 + 5 * genMod, max: 5 + 5 * genMod }
     const clan = o.clan ? game.items.find((i) => i.type === 'clan' && i.name === o.clan) : null
     if (clan) { const d = clan.toObject(); delete d._id; delete d.folder; items.push(d); for (const k of clan.system?.disciplines ?? []) system.vampire.disciplines[k] = { value: st.discipline, visible: true } }
-  } else if (creature === 'ghoul') system.health = { value: 5, max: 5 }
+  } else if (creature === 'ghoul') system.vitae = { value: 5, max: 5 }
   let folder = game.folders.find((f) => f.type === 'Actor' && f.name === 'Made NPCs (V6)')
   folder ??= await Folder.create({ name: 'Made NPCs (V6)', type: 'Actor' })
   const made = []
   for (let n = 1; n <= o.count; n++) {
     const name = `${o.name || o.role || 'NPC'}${o.count > 1 ? ` ${n}` : ''}`
     const actor = await Actor.create({
-      name, type: 'vampire', folder: folder.id, system,
-      flags: { world: { a2: { creature, tier: creature === 'vampire' ? tier : null, health: { value: st.health, max: st.health, baneful: 0 }, npc: { v: 1, made: true, category: o.category, minion: o.category === 'minion', healthMax: st.health, pools: st.pools } } } },
+      name, type: 'vampire', folder: folder.id, system: { ...system, health: { value: st.health, max: st.health, disabled: 0 } },
+      flags: { world: { a2: { creature, tier: creature === 'vampire' ? tier : null, npc: { v: 1, made: true, category: o.category, minion: o.category === 'minion', healthMax: st.health, pools: st.pools } } } },
       prototypeToken: { name, actorLink: false, disposition: CONST.TOKEN_DISPOSITIONS.HOSTILE, displayName: CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER },
       items
     })
@@ -11571,7 +11717,7 @@ function a2wHuntRender (message, root) {
     const hunger = a2ActorHunger(actor)
     const row = document.createElement('div')
     row.className = 'a2w-hunt-row'
-    row.innerHTML = `<span><strong>${a2Esc(actor.name)}</strong> Hunger ${'●'.repeat(hunger)}${'○'.repeat(Math.max(0, 5 - hunger))} <small>Vitae ${a2Int(actor.system?.health?.value)}/${a2Int(actor.system?.health?.max)}</small></span>`
+    row.innerHTML = `<span><strong>${a2Esc(actor.name)}</strong> Hunger ${'●'.repeat(hunger)}${'○'.repeat(Math.max(0, 5 - hunger))} <small>Vitae ${a2Int(actor.system?.vitae?.value)}/${a2Int(actor.system?.vitae?.max)}</small></span>`
     if (actor.isOwner) { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = '<i class="fa-solid fa-droplet"></i> Hunt'; b.addEventListener('click', (ev) => { ev.preventDefault(); globalThis.V6Alpha2?.tools?.feed?.(actor) }); row.append(b) }
     box.append(row)
   }
@@ -12013,9 +12159,9 @@ async function a2rFeedAegis (actor) {
   const ae = actor?.flags?.world?.a2?.aegis
   if (!ae) { v6aNote.info('No Blood Aegis is up.'); return }
   if (a2Int(ae.fed) >= a2Int(ae.maxFed)) { v6aNote.warn(`The barrier has taken all the extra Vitae it can (${ae.maxFed}).`); return }
-  const vit = a2Int(actor.system?.health?.value)
+  const vit = a2Int(actor.system?.vitae?.value)
   if (vit < 1) { v6aNote.warn('No Vitae to feed it.'); return }
-  await actor.update({ 'system.health.value': vit - 1, 'flags.world.a2.aegis': { ...ae, points: a2Int(ae.points) + 2, fed: a2Int(ae.fed) + 1 } })
+  await actor.update({ 'system.vitae.value': vit - 1, 'flags.world.a2.aegis': { ...ae, points: a2Int(ae.points) + 2, fed: a2Int(ae.fed) + 1 } })
 }
 async function a2rHaruspexReroll (message) {
   const actor = a2xSpeaker(message)
@@ -12099,7 +12245,7 @@ async function a2TrackBoot () {
         const f = a.flags?.world?.a2 ?? {}
         const upd = {}
         if (f.haruspex) upd['flags.world.a2.haruspex'] = null
-        if (f.pactRa) { const v = a2Int(a.system?.health?.value); const loss = a2rRaLoss(v); upd['flags.world.a2.pactRa'] = null; upd['system.health.value'] = v - loss; lines.push(`${a.name}: the Pact with Ra ends at sunset, ${loss} Vitae lost (${v} → ${v - loss}).`) }
+        if (f.pactRa) { const v = a2Int(a.system?.vitae?.value); const loss = a2rRaLoss(v); upd['flags.world.a2.pactRa'] = null; upd['system.vitae.value'] = v - loss; lines.push(`${a.name}: the Pact with Ra ends at sunset, ${loss} Vitae lost (${v} → ${v - loss}).`) }
         if (Object.keys(upd).length) { try { await a.update(upd) } catch (e) { console.error('V6 Automation | tracked power at New Night', e) } }
       }
       if (lines.length) await ChatMessage.create({ content: `<div class="a2r-line">${lines.map((l) => `<p>${a2Esc(l)}</p>`).join('')}</div>`, speaker: { alias: 'Storyteller' } })
@@ -12649,7 +12795,7 @@ async function a2fLimbsOpen (actorLike = null) {
   const data = await foundry.applications.api.DialogV2.wait({
     window: { title: `Limbs: ${actor.name}` },
     position: { width: 600 },
-    content: `<div class="a2f-dialog"><p class="hint">Vitae ${a2Int(actor.system?.health?.value)} · Willpower ${a2Int(actor.system?.willpower?.value)}. Mending needs a heart, and the head on the body (PG p.138).</p>
+    content: `<div class="a2f-dialog"><p class="hint">Vitae ${a2Int(actor.system?.vitae?.value)} · Willpower ${a2Int(actor.system?.willpower?.value)}. Mending needs a heart, and the head on the body (PG p.138).</p>
       ${limbs.length ? `<table class="a2f-table"><tr><th>Limb</th><th class="c">Size</th><th class="c">Vitae</th><th></th></tr>${rows}</table>` : '<p><em>No limb is hurt.</em></p>'}
       <fieldset><legend>Add an injury by hand</legend><div class="form-group"><input type="text" name="newLimb" placeholder="left arm"><select name="newLevel">${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}: ${A2F_INJURY[n].name}</option>`).join('')}</select><button type="button" data-a2f-add="1"><i class="fa-solid fa-plus"></i> Add</button></div></fieldset></div>`,
     buttons: [{ action: 'close', label: 'Close' }],
@@ -12693,11 +12839,11 @@ async function a2fLimbsOpen (actorLike = null) {
   if (action.kind === 'mend') {
     const c = a2fMendCost(l.level, { small: action.small, kept: action.kept })
     const vit = action.vitae === null ? c.vitae[0] : a2Clamp(action.vitae, c.vitae[0], c.vitae[1])
-    const haveV = a2Int(actor.system?.health?.value)
+    const haveV = a2Int(actor.system?.vitae?.value)
     const haveW = a2Int(actor.system?.willpower?.value)
     if (haveV < vit || haveW < c.willpower) { v6aNote.warn(`${actor.name} needs ${vit} Vitae${c.willpower ? ` and ${c.willpower} Willpower` : ''} to mend the ${l.limb} (has ${haveV} and ${haveW}).`); return a2fLimbsOpen(actor) }
     const upd = {}
-    if (vit) upd['system.health.value'] = haveV - vit
+    if (vit) upd['system.vitae.value'] = haveV - vit
     if (c.willpower) upd['system.willpower.value'] = haveW - c.willpower
     if (Object.keys(upd).length) await actor.update(upd)
     lines.push(`${a2Cap(l.limb)} mended: ${vit} Vitae${c.willpower ? `, ${c.willpower} Willpower` : ''}${c.rest === 'scene' ? ', and a full scene of rest without conflict' : c.rest === 'day' ? ', and a full day of rest' : ''}.`, c.note)
@@ -13167,7 +13313,7 @@ async function a2nTorpor (actorLike = null) {
   const diff = a2nWakeDifficulty(g)
   const length = a2nTorporNights(hum.rank, path.bands) ?? 30
   const st = t ? a2nTorporState({ since: t.since ?? night, night, length }) : null
-  const vitae = a2Int(actor.system?.health?.value)
+  const vitae = a2Int(actor.system?.vitae?.value)
   const mod = a2Int(band?.modifier)
   const staked = a2zHas(actor, 'staked')
   const pick = await foundry.applications.api.DialogV2.wait({
@@ -13229,9 +13375,9 @@ async function a2nTorpor (actorLike = null) {
     return a2nFollow(r, async (now, before) => {
       if (before && (before.win || !now.win)) return
       if (now.win) {
-        const have = a2Int(actor.system?.health?.value)
+        const have = a2Int(actor.system?.vitae?.value)
         if (have < 1) { await a2nCard(actor, `${actor.name} can't rise`, ['The will is there, but it has no Vitae to pay for rising (PG p.141).']); return }
-        await actor.update({ 'system.health.value': have - 1 })
+        await actor.update({ 'system.vitae.value': have - 1 })
         await rise([before ? 'The roll changed: it rises by its own will, 1 Vitae paid (PG p.141).' : 'It rises by its own will: 1 Vitae paid (PG p.141).'])
       } else await a2nCard(actor, `${actor.name} stays in torpor`, ['It can try again at the start of the next night.'])
     })
@@ -13247,7 +13393,7 @@ async function a2nDiablerie (actorLike = null, victimLike = null) {
   const victim = victimLike?.documentName === 'Actor' ? victimLike : (actor ? a2vTarget(actor) : null)
   if (!actor || !victim) { v6aNote.warn('Select the diablerist\'s token and target the victim (T).'); return null }
   const helpless = ['tied', 'staked', 'torpor'].some((id) => a2zHas(victim, id)) || Boolean(victim.flags?.world?.a2?.torpor)
-  const vVitae = a2Rules(victim)?.vitae ? a2Int(victim.system?.health?.value) : 0
+  const vVitae = a2Rules(victim)?.vitae ? a2Int(victim.system?.vitae?.value) : 0
   const problems = a2nDiablerieCheck({ actorCreature: a2Creature(actor), victimCreature: victim.type === 'npc' ? 'vampire' : a2Creature(victim), victimVitae: vVitae, victimHelpless: helpless, sameActor: actor.uuid === victim.uuid })
   const myGen = a2Int(actor.system?.vampire?.generation?.value, 13)
   const theirGen = a2Int(victim.system?.vampire?.generation?.value, 13)
@@ -13380,8 +13526,8 @@ async function a2nGhouls () {
   const rows = ghouls.map((g, i) => {
     const d = a2nDomitor(g)
     const due = a2nGhoulDue({ fed: g.flags?.world?.a2?.ghoulFed ?? null, night, interval })
-    return `<tr><td><strong>${a2Esc(g.name)}</strong><br><small>Vitae ${a2Int(g.system?.health?.value)}/5</small></td>
-      <td><select name="dom.${i}"><option value="">${d && !d.uuid ? a2Esc(d.name) : 'nobody'}</option>${masters.map((m) => `<option value="${m.uuid}"${d?.uuid === m.uuid ? ' selected' : ''}>${a2Esc(m.name)} (Vitae ${a2Int(m.system?.health?.value)})</option>`).join('')}</select></td>
+    return `<tr><td><strong>${a2Esc(g.name)}</strong><br><small>Vitae ${a2Int(g.system?.vitae?.value)}/5</small></td>
+      <td><select name="dom.${i}"><option value="">${d && !d.uuid ? a2Esc(d.name) : 'nobody'}</option>${masters.map((m) => `<option value="${m.uuid}"${d?.uuid === m.uuid ? ' selected' : ''}>${a2Esc(m.name)} (Vitae ${a2Int(m.system?.vitae?.value)})</option>`).join('')}</select></td>
       <td class="c${due.due ? ' a2n-due' : ''}">${due.since === null ? 'never' : a2Plural(due.since, 'night', 'nights')}</td>
       <td class="c"><button type="button" data-a2n-feed="${i}"><i class="fa-solid fa-droplet"></i> 1 Vitae</button></td></tr>`
   }).join('')
@@ -13404,11 +13550,11 @@ async function a2nGhouls () {
   const known = a2nDomitor(ghoul)
   if (!master && !known?.name) { v6aNote.warn(`Pick who feeds ${ghoul.name}.`); return a2nGhouls() }
   if (master) {
-    const have = a2Int(master.system?.health?.value)
+    const have = a2Int(master.system?.vitae?.value)
     if (have < 1) { v6aNote.warn(`${master.name} has no Vitae to give.`); return a2nGhouls() }
-    await master.update({ 'system.health.value': have - 1 })
+    await master.update({ 'system.vitae.value': have - 1 })
   }
-  await ghoul.update({ 'system.health.value': Math.min(5, a2Int(ghoul.system?.health?.value) + 1), 'flags.world.a2.ghoulFed': night, 'flags.world.a2.domitor': master ? { uuid: master.uuid, name: master.name } : known })
+  await ghoul.update({ 'system.vitae.value': Math.min(5, a2Int(ghoul.system?.vitae?.value) + 1), 'flags.world.a2.ghoulFed': night, 'flags.world.a2.domitor': master ? { uuid: master.uuid, name: master.name } : known })
   try { if (typeof a2yDrink === 'function') await a2yDrink(ghoul, master ?? known.name, { quiet: true }) } catch (e) { console.error('V6 Automation | ghoul bond', e) } // eslint-disable-line no-undef
   await a2nCard(null, 'Ghouls', [`${ghoul.name} drinks from ${master?.name ?? known.name}: 1 Vitae${master ? ` (${master.name} −1)` : ''}, the bond holds.`])
   return a2nGhouls()
@@ -13425,8 +13571,8 @@ async function a2nOnNewNight (ev) {
       if (a2Int(actor.flags?.world?.a2?.dayHours) > 0) upd['flags.world.a2.dayHours'] = 0
       const t = actor.flags?.world?.a2?.torpor
       if (t && a2Creature(actor) === 'vampire' && a2nUpkeepDue({ since: t.since ?? night, night, tier: a2nTier(actor) })) {
-        const cur = a2Int(actor.system?.health?.value)
-        if (cur > 0) { upd['system.health.value'] = cur - 1; lines.push(`${actor.name}: torpor upkeep, Vitae ${cur} → ${cur - 1}${cur - 1 === 0 ? '. Out of Vitae: it can\'t rise by itself' : ''} (PG p.140).`) }
+        const cur = a2Int(actor.system?.vitae?.value)
+        if (cur > 0) { upd['system.vitae.value'] = cur - 1; lines.push(`${actor.name}: torpor upkeep, Vitae ${cur} → ${cur - 1}${cur - 1 === 0 ? '. Out of Vitae: it can\'t rise by itself' : ''} (PG p.140).`) }
       }
       if (Object.keys(upd).length) await actor.update(upd)
     } catch (e) { console.error('V6 Automation | night', actor?.name, e) }
@@ -13618,7 +13764,7 @@ async function a2dPowers (actorLike = null) {
   const powers = (actor.items ?? []).filter((i) => i.type === 'discipline').sort((a, b) => String(a.system?.disciplineType ?? '').localeCompare(String(b.system?.disciplineType ?? '')) || a2Int(a.system?.level) - a2Int(b.system?.level) || a.name.localeCompare(b.name))
   if (!powers.length) { v6aNote.info(`${actor.name} has no Discipline powers.`); return null }
   const rules = a2Rules(actor)
-  const have = { health: a2Int(actor.system?.health?.value), willpower: a2Int(actor.system?.willpower?.value) }
+  const have = { vitae: a2Int(actor.system?.vitae?.value), health: a2Int(actor.system?.health?.value), willpower: a2Int(actor.system?.willpower?.value) }
   const frenzy = typeof a2xFrenzyState === 'function' ? a2xFrenzyState(actor) : null
   const rows = []
   let last = null
@@ -13627,7 +13773,7 @@ async function a2dPowers (actorLike = null) {
     if (disc !== last) { rows.push(`<tr class="a2d-head"><th colspan="5">${a2Esc(a2TraitLabel('Disciplines', disc))} ${'●'.repeat(a2Clamp(a2Int(actor.system?.vampire?.disciplines?.[disc]?.effective ?? actor.system?.vampire?.disciplines?.[disc]?.value), 0, 10))}</th></tr>`); last = disc }
     const costs = a2xItemCosts(p.system, p.flags)
     const short = actor.type === 'npc' ? [] : a2xCostShortfall(costs, have, { vitae: rules ? rules.vitae : true })
-    const cost = [costs.health ? `${costs.health} Vitae` : '', costs.willpower ? `${costs.willpower} Willpower` : ''].filter(Boolean).join(', ') || 'free'
+    const cost = [costs.vitae ? `${costs.vitae} Vitae` : '', costs.health ? `${costs.health} Health` : '', costs.willpower ? `${costs.willpower} Willpower` : ''].filter(Boolean).join(', ') || 'free'
     const active = typeof a2pFindActiveFor === 'function' ? a2pFindActiveFor(p) : null
     const blocked = Boolean(frenzy && ['mental', 'social'].includes(p.system?.attribute))
     const t = p.system?.test ?? {}
@@ -13643,7 +13789,7 @@ async function a2dPowers (actorLike = null) {
   await foundry.applications.api.DialogV2.wait({
     window: { title: `Powers: ${actor.name}`, resizable: true },
     position: { width: 620 },
-    content: `<div class="a2d-dialog"><p class="hint">Vitae ${have.health} · Willpower ${have.willpower}${frenzy ? ` · in a ${a2Esc(frenzy.type)} frenzy` : ''}. Greyed: it can't be paid for right now.
+    content: `<div class="a2d-dialog"><p class="hint">Vitae ${have.vitae} · Willpower ${have.willpower}${frenzy ? ` · in a ${a2Esc(frenzy.type)} frenzy` : ''}. Greyed: it can't be paid for right now.
       <select name="filter"><option value="">all</option><option value="action">actions</option><option value="minorAction">minor actions</option><option value="reaction">reactions</option><option value="prolonged">prolonged</option></select></p>
       <div class="a2d-scroll"><table class="a2d-table"><tr><th>Power</th><th class="c">Takes</th><th class="c">Cost</th><th></th></tr>${rows.join('')}</table></div></div>`,
     buttons: [{ action: 'close', label: 'Close' }],
@@ -13764,7 +13910,7 @@ function a2dSnap (actor) {
     if (actor.type === 'npc') return { health: a2Int(s.health?.value), baneful: null, vitae: null, willpower: s.willpower ? a2Int(s.willpower.value) : null, rank: null, violations: null }
     const h = a2ActorHealth(actor)
     const hum = rules?.humanity ? a2ActorHumanity(actor) : null
-    return { health: h.value, baneful: h.baneful, vitae: rules?.vitae ? a2Int(s.health?.value) : null, willpower: s.willpower ? a2Int(s.willpower.value) : null, rank: hum ? hum.rank : null, violations: hum ? hum.violations : null }
+    return { health: h.value, baneful: h.baneful, vitae: rules?.vitae ? a2Int(s.vitae?.value) : null, willpower: s.willpower ? a2Int(s.willpower.value) : null, rank: hum ? hum.rank : null, violations: hum ? hum.violations : null }
   } catch (e) { return null }
 }
 function a2dSnapAll () {
@@ -13796,11 +13942,11 @@ function a2dTouched (type, changes = {}) {
   const f = changes?.flags?.world?.a2
   const sys = changes?.system
   if (type === 'npc') { if (sys?.health) out.add('health') } else {
-    if (f && typeof f === 'object' && 'health' in f) { out.add('health'); out.add('baneful') }
-    if (sys?.health) out.add('vitae')
+    if (sys?.health) { out.add('health'); out.add('baneful') }
+    if (sys?.vitae) out.add('vitae')
   }
   if (sys?.willpower) out.add('willpower')
-  if (sys?.vampire?.humanity || sys?.vampire?.nature) { out.add('rank'); out.add('violations') }
+  if (sys?.vampire?.humanity) { out.add('rank'); out.add('violations') }
   return out
 }
 function a2dOnUpdateActor (actor, changes, options, userId) {
@@ -13831,8 +13977,8 @@ async function a2dUndo (id) {
   if (actor.type === 'npc') {
     if (keys.has('health')) upd['system.health.value'] = e.before.health
   } else {
-    if (keys.has('health') || keys.has('baneful')) upd['flags.world.a2.health'] = { value: e.before.health, baneful: e.before.baneful ?? 0 }
-    if (keys.has('vitae')) upd['system.health.value'] = e.before.vitae
+    if (keys.has('health') || keys.has('baneful')) { upd['system.health.value'] = e.before.health; upd['system.health.disabled'] = e.before.baneful ?? 0 }
+    if (keys.has('vitae')) upd['system.vitae.value'] = e.before.vitae
   }
   if (keys.has('willpower')) upd['system.willpower.value'] = e.before.willpower
   if (Object.keys(upd).length) await actor.update(upd, { a2Damage: true, a2dUndo: true })
@@ -14110,6 +14256,76 @@ function v6iTally (rows = []) {
   const out = {}
   for (const r of rows) { out[r.kind] ??= { new: 0, changed: 0, same: 0, kept: 0 }; out[r.kind][r.state]++ }
   return out
+}
+
+
+// ---- wod6e 1.1.0 ---------------------------------------------------------------------------------
+// The bundles were written for 1.0.11: Vitae in system.health, Health in flags.world.a2.health, the
+// violations in system.vampire.nature, "nature" items for Humanity and the Paths, and a cost type
+// "health" that meant Vitae. On 1.1.0 each bundle is brought to the system's own fields as it is read
+// (a bundle that says "schema": 2 or more is already there).
+const V6I_PATH_TYPES = { humanity: 'humanity', 'path of caine': 'caine', 'path of honor': 'honor', 'path of power': 'power', 'path of temptation': 'temptation', 'path of the beast': 'beast' }
+function v6iItem110 (d, paths = new Map()) {
+  if (!d || typeof d !== 'object') return d
+  if (d.type === 'nature') {
+    const key = String(d.name ?? '').trim().toLowerCase()
+    const native = paths.get(key) ?? null
+    const a2 = d.flags?.world?.a2 ?? {}
+    d.type = 'path'
+    d.system = {
+      ...(native?.system ?? {}),
+      description: d.system?.description || native?.system?.description || '',
+      ...(d.system?.source ? { source: d.system.source } : {}),
+      pathType: native?.system?.pathType ?? V6I_PATH_TYPES[key] ?? 'custom',
+      teachings: String(a2.teachings || native?.system?.teachings || ''),
+      resistanceTeaching: native?.system?.resistanceTeaching ?? /resist(?:ing)? the beast/i.test(String(a2.teachings ?? '')),
+      precepts: native?.system?.precepts ?? (Array.isArray(a2.violations) ? a2.violations.map((v) => ({ precept: String(v?.precept ?? ''), violation: String(typeof v === 'string' ? v : v?.text ?? '') })).filter((p) => p.violation) : [])
+    }
+    if (!d.img && native?.img) d.img = native.img
+  }
+  const c = d.system?.activation?.cost
+  if (c?.type === 'health') c.type = 'vitae'
+  for (const e of d.flags?.world?.a2?.extraCosts ?? []) if (e?.type === 'health') e.type = 'vitae'
+  return d
+}
+function v6iActor110 (d, paths = new Map()) {
+  if (!d || typeof d !== 'object') return d
+  if (d.type === 'vampire' && d.system) {
+    const s = d.system
+    const a2 = d.flags?.world?.a2 ?? null
+    if (!s.vitae) {
+      const pool = s.health ?? null
+      if (pool) s.vitae = { value: pool.value, max: pool.max }
+      const npc = a2?.npc ?? null
+      const stamina = Number(s.attributes?.stamina?.value)
+      const hp = npc?.minion ? 1 : Number(npc?.healthMax) > 0 ? Number(npc.healthMax) : (Number.isFinite(stamina) ? stamina : 1) + 5
+      const h = a2?.health && typeof a2.health === 'object' ? a2.health : null
+      const baneful = Math.min(hp, Math.max(0, Number(h?.baneful) || 0))
+      s.health = { value: Math.min(hp - baneful, Math.max(0, h?.value === undefined || h?.value === null ? hp : Number(h.value) || 0)), max: hp, disabled: baneful }
+    }
+    if (a2 && 'health' in a2) delete a2.health
+    const v = s.vampire
+    if (v && (v.nature || v.beast || (v.humanity && v.humanity.rulesVersion !== 2))) {
+      const onPath = (d.items ?? []).some((i) => (i.type === 'nature' || i.type === 'path') && /^(path|road) of /i.test(String(i.name ?? '')))
+      const m = typeof a2MigrateHumanityValues === 'function' ? a2MigrateHumanityValues({ humanity: v.humanity, nature: v.nature, beast: v.beast }, onPath) : null // eslint-disable-line no-undef
+      const ok = m && m.status !== 'ambiguous'
+      const rank = ok ? m.rank : Math.min(10, Math.max(0, Number(v.humanity?.value ?? 6) || 0))
+      v.humanity = { value: rank, max: 10, violations: ok ? m.violations : 0, rulesVersion: 2 }
+      delete v.nature
+      delete v.beast
+    }
+  }
+  if (Array.isArray(d.items)) d.items = d.items.map((i) => v6iItem110(i, paths))
+  return d
+}
+function v6iBundle110 (bundle, paths = new Map()) {
+  if (!bundle || Number(bundle.schema) >= 2) return bundle
+  for (const src of [bundle, bundle.data]) {
+    if (!src || typeof src !== 'object') continue
+    for (const e of src.items ?? []) if (e?.data) v6iItem110(e.data, paths)
+    for (const e of src.actors ?? []) if (e?.data) v6iActor110(e.data, paths)
+  }
+  return bundle
 }
 
 async function runV6Importer (opts = {}) {
@@ -14421,9 +14637,16 @@ async function runV6Importer (opts = {}) {
   }
 
   let done = 0
+  // wod6e 1.1.0: the system's own Paths, to give a converted Humanity / Path item its precepts
+  const native110 = Boolean(CONFIG?.Item?.dataModels?.path)
+  const paths110 = new Map()
+  if (native110) {
+    try { const pk = game.packs.get('wod6e.paths'); for (const p of (pk ? await pk.getDocuments() : [])) paths110.set(p.name.trim().toLowerCase(), p.toObject()) } catch (e) { /* the Paths then come without precepts */ }
+  }
   for (const f of choice.list) {
     try {
       const bundle = JSON.parse(await f.text())
+      if (native110) v6iBundle110(bundle, paths110)
       urlMap.clear() // each book looks in its own folder first
       const toWorld = bundle.target === 'world' || choice.mode === 'world'
       if (dry) {
