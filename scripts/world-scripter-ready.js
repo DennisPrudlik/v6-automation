@@ -697,7 +697,19 @@ function a2PathInfo (actor) {
   const violations = flags?.violations ?? (item?.system?.precepts ?? []).map((p) => ({ text: String(p?.violation ?? '') })).filter((v) => v.text)
   return { item, kind, name: kind === 'path' && item ? item.name : 'Humanity', bands: flags?.tracker?.rankBands ?? A2_RANK_BANDS, teachings: flags?.teachings ?? item?.system?.teachings ?? '', violations }
 }
+// wod6e 1.1.0: a "major" NPC has Attributes and Skills like a player character
+function a2NpcDetailed (actor) {
+  if (actor?.type !== 'npc') return false
+  try { return Boolean(actor.system?.usesDetailedTraits ?? globalThis.WOD6E?.configs?.NpcTiers?.getDefinition?.(actor.system?.tier)?.usesDetailedTraits) } catch (e) { return false }
+}
 function a2NpcLevels (actor) {
+  // wod6e 1.1.0: the simple NPC has three Attribute pools in place of the old level(s)
+  const pools = actor?.system?.attributePools
+  if (pools && typeof pools === 'object') {
+    const label = { physical: 'Physical', social: 'Social', mental: 'Mental' }
+    const out = ['physical', 'social', 'mental'].filter((k) => k in pools).map((key) => ({ key, label: label[key], value: a2Int(pools[key]) }))
+    if (out.length) return out
+  }
   const tiers = globalThis.WOD6E?.configs?.NpcTiers?.getList?.({}) ?? {}
   const keys = tiers[actor.system?.tier]?.levels ?? ['value']
   const names = { value: 'Level', physical: 'Physical', social: 'Social', mental: 'Mental' }
@@ -905,7 +917,7 @@ function a2PatchRollDialog (RD, WOD6eTest) {
   const init = RD._prepareInitialData
   RD._prepareInitialData = function (args = {}) {
     const data = init.call(this, args)
-    try { if (args?.actor?.uuid) (a2State.inits ??= new Map()).set(args.actor.uuid, { itemModifier: a2Int(data?.itemModifier), action: data?.action ?? null, category: data?.category ?? null, at: Date.now() }) } catch (e) { /* keep rolling */ }
+    try { if (args?.actor?.uuid) (a2State.inits ??= new Map()).set(args.actor.uuid, { itemModifier: a2Int(data?.itemModifier), action: data?.action ?? null, category: data?.category ?? null, npcPool: data?.npcPool ?? null, at: Date.now() }) } catch (e) { /* keep rolling */ }
     return data
   }
   const preview = RD._updatePreview
@@ -1028,13 +1040,20 @@ function a2AdjustContext (res, args, WOD6eTest) {
   t.quickeningSpent = 0
   t.canSpendQuickening = false
   t.showQuickening = false
-  // wod6e 1.1.0 draws its own Hunger line from the system's figures; ours is the box under the pool
-  t.showHunger = false
+  // wod6e 1.1.0 draws its own Hunger line from the system's figures; ours is the box under the pool.
+  // The system's npc type has no Vitae track: there its Hunger field stays, and is what is rolled.
+  if (actor.type !== 'npc') t.showHunger = false
 
   let raw
   let attr = Math.max(0, ...(t.attributeOptions ?? []).filter((o) => o.selected).map((o) => a2Int(o.value)))
-  if (actor.type === 'npc') {
-    // The system's npc type has no Attributes: roll a level as the pool.
+  let nativeNpcPool = null
+  if (actor.type === 'npc' && data.npcPool) { try { nativeNpcPool = a2State.RollDialog?._getNpcPool?.(actor, data.npcPool) ?? null } catch (e) { nativeNpcPool = null } }
+  if (nativeNpcPool) {
+    // wod6e 1.1.0: a pool picked on the NPC sheet. The system has counted it with its modifiers and specialty.
+    raw = a2Int(t.baseDicePool)
+    attr = a2Half(nativeNpcPool.value) // ST p.42: Attribute rank = half the pool
+  } else if (actor.type === 'npc' && !a2NpcDetailed(actor)) {
+    // The system's simple npc has no Attributes: roll one of its pools.
     const levels = a2NpcLevels(actor)
     const key = c?.npcLevel ?? preset?.level ?? levels[0]?.key ?? 'value'
     const lvl = levels.find((l) => l.key === key) ?? levels[0] ?? { key: 'value', label: 'Level', value: 0 }
@@ -1070,8 +1089,9 @@ function a2AdjustContext (res, args, WOD6eTest) {
   t.baseDicePool = raw // executeTest rebuilds the pool from this
   t.dicePool = et.dicePool
 
-  const hungerAvailable = a2ActorHunger(actor)
-  const hunger = (c ? Boolean(c.hunger) : true) ? hungerAvailable : 0
+  const npcHunger = actor.type === 'npc' ? a2Clamp(a2Int(data.hungerDice ?? t.hungerDice), 0, 5) : null
+  const hungerAvailable = npcHunger ?? a2ActorHunger(actor)
+  const hunger = npcHunger ?? ((c ? Boolean(c.hunger) : true) ? hungerAvailable : 0)
   const humanity = a2Rules(actor)?.humanity ? a2ActorHumanity(actor).rank : null
   const frenzy = Boolean(c?.frenzy) && humanity !== null
   const oppose = a2OpposeInfo(item)
@@ -1107,6 +1127,7 @@ function a2AdjustContext (res, args, WOD6eTest) {
 
 function a2RestoreFormData (dialog, actor) {
   const li = actor?.uuid ? a2State.inits?.get(actor.uuid) : null
+  a2State.npcPoolFor = { actor: actor?.uuid ?? null, pool: li?.npcPool ?? null } // read by a2InjectControls
   if (actor?.uuid) a2State.inits?.delete(actor.uuid)
   const root = dialog?.element
   const form = root?.matches?.('form') ? root : root?.querySelector?.('form')
@@ -1154,9 +1175,11 @@ function a2InjectControls (RD, dialog, { actor, item } = {}) {
   const target = oppose ? a2TargetInfo(oppose) : null
   const tf = a2Int(a2NpcInfo(actor)?.trueFaith)
   const parts = []
-  if (actor.type === 'npc') {
+  // not when the pool was picked on the NPC sheet (wod6e 1.1.0), nor for a "major" NPC with Attributes
+  const nativePool = a2State.npcPoolFor?.actor === actor.uuid ? a2State.npcPoolFor.pool : null
+  if (actor.type === 'npc' && !nativePool && !a2NpcDetailed(actor)) {
     const levels = a2NpcLevels(actor)
-    parts.push(`<label title="The system's NPC level, rolled as the dice pool.">Pool <select data-a2="npcLevel">${levels.map((l) => `<option value="${l.key}"${l.key === preset?.level ? ' selected' : ''}>${a2Esc(l.label)} (${l.value})</option>`).join('')}</select></label>`)
+    parts.push(`<label title="Which of the NPC's pools is rolled.">Pool <select data-a2="npcLevel">${levels.map((l) => `<option value="${l.key}"${l.key === preset?.level ? ' selected' : ''}>${a2Esc(l.label)} (${l.value})</option>`).join('')}</select></label>`)
   }
   if (hunger > 0) parts.push(`<label title="Hunger dice replace normal dice one for one and can't be rerolled with Willpower (PG p.103)."><input type="checkbox" data-a2="hunger" checked> Hunger dice (${hunger})</label>`)
   parts.push('<label title="No roll: successes = half the pool, rounded up. Not in stressful situations (PG p.94)."><input type="checkbox" data-a2="takeHalf"> Take Half</label>')
@@ -1786,6 +1809,52 @@ function a2Bars110 (tok = {}) {
   return Object.keys(upd).length ? upd : null
 }
 // actors: only these (a sheet that arrives later in the old shape, from an Adventure built before 1.1.0)
+// Step 2 (2.9.3). Until 1.0.11 a test that listed two Attributes rolled both; 1.1.0 reads such a list
+// as alternatives ("any") unless the item says "all". Composure with Resolve is the Self-Control test,
+// which is a sum (PG p.145): those items are set to "all". Other lists stay a choice for the player.
+function a2SelfControl110 (data) {
+  const t = data?.system?.test
+  if (!t || (t.attributeMode && t.attributeMode !== 'any')) return null
+  const a = [...(t.attributes ?? [])].map((k) => String(k).split('.').pop()).sort()
+  if (a.length !== 2 || a[0] !== 'composure' || a[1] !== 'resolve') return null
+  if ([...(t.skills ?? [])].length || [...(t.disciplines ?? [])].length) return null
+  return { 'system.test.attributeMode': 'all' }
+}
+async function a2Migrate110b ({ dryRun = false } = {}) {
+  const report = { items: 0, embedded: 0, packs: 0 }
+  if (!a2Native() || !game.user.isGM || (game.users.activeGM && game.users.activeGM.id !== game.user.id)) return report
+  const KEY = 'a2m110'
+  if (!game.settings.settings.has(`v6-automation.${KEY}`)) game.settings.register('v6-automation', KEY, { scope: 'world', config: false, type: Number, default: 0 })
+  const done = game.settings.get('v6-automation', KEY)
+  if (done < 1 || done >= 2) return report // step 1 first; this one runs once
+  const world = []
+  for (const it of game.items) { const u = a2SelfControl110(it._source); if (u) world.push({ _id: it.id, ...u }) }
+  report.items = world.length
+  if (world.length && !dryRun) await Item.updateDocuments(world)
+  for (const actor of game.actors) {
+    const upds = (actor._source.items ?? []).map((it) => { const u = a2SelfControl110(it); return u ? { _id: it._id, ...u } : null }).filter(Boolean)
+    report.embedded += upds.length
+    if (upds.length && !dryRun) await actor.updateEmbeddedDocuments('Item', upds)
+  }
+  for (const pack of game.packs) {
+    if (pack.metadata.packageType !== 'world' || pack.documentName !== 'Item') continue
+    const docs = await pack.getDocuments()
+    const upds = docs.map((d) => { const u = a2SelfControl110(d._source); return u ? { _id: d.id, ...u } : null }).filter(Boolean)
+    if (!upds.length) continue
+    report.packs += upds.length
+    if (dryRun) continue
+    const locked = pack.locked
+    if (locked) await pack.configure({ locked: false })
+    try { await Item.updateDocuments(upds, { pack: pack.collection }) } finally { if (locked) await pack.configure({ locked: true }) }
+  }
+  if (!dryRun) {
+    await game.settings.set('v6-automation', KEY, 2)
+    const n = report.items + report.embedded + report.packs
+    if (n) v6aNote.info(`V6 Automation: ${n} Self-Control tests (Composure + Resolve) set to roll both Attributes again, as before wod6e 1.1.0.`)
+    console.log('V6 Automation | wod6e 1.1.0 step 2', report)
+  }
+  return report
+}
 async function a2Migrate110 ({ force = false, dryRun = false, actors = null } = {}) {
   const only = Array.isArray(actors)
   const report = { actors: 0, humanity: 0, items: 0, embedded: 0, packs: 0, tokens: 0, skipped: 0 }
@@ -2023,6 +2092,7 @@ async function a2Boot () {
       removeAlpha1Automation: a2RemoveAlpha1Automation,
       migrateHumanity: a2MigrateHumanity,
       migrate110: a2Migrate110,
+      migrate110b: a2Migrate110b,
       native: a2Native,
       revertHumanity: a2RevertHumanity,
       refresh: a2RefreshActors,
@@ -2069,7 +2139,7 @@ async function a2Boot () {
       if (game.user.isGM) {
         await a2RemoveAlpha1Automation()
         a2ReportMigration(await a2MigrateHumanity())
-        try { await a2Migrate110() } catch (e) { console.error('V6 Automation | wod6e 1.1.0 migration', e); v6aNote.error('V6 Automation: moving the world to the wod6e 1.1.0 fields failed (see console). Nothing was lost; reload to try again.') }
+        try { await a2Migrate110(); await a2Migrate110b() } catch (e) { console.error('V6 Automation | wod6e 1.1.0 migration', e); v6aNote.error('V6 Automation: moving the world to the wod6e 1.1.0 fields failed (see console). Nothing was lost; reload to try again.') }
       }
       a2RefreshActors()
     }
@@ -9483,7 +9553,7 @@ function a2cPrereq (item, { tier, disc }) {
 const a2cState = { lib: null, hooked: false }
 async function a2cLibrary () {
   if (a2cState.lib) return a2cState.lib
-  const lib = { clan: new Map(), lifepath: new Map(), merit: new Map(), flaw: new Map(), clanTrait: new Map(), discipline: new Map(), nature: new Map() }
+  const lib = { clan: new Map(), lifepath: new Map(), merit: new Map(), flaw: new Map(), clanTrait: new Map(), discipline: new Map(), nature: new Map(), path: new Map() }
   // superseded material kept for reference (the "Alpha 1 (archive)" folder) is not offered
   const archived = (i) => { for (let f = i.folder, n = 0; f && n < 6; f = f.folder, n++) if (/archive/i.test(f.name ?? '')) return true; return false }
   const add = (i) => { const m = lib[i.type]; if (m && !m.has(i.name) && !archived(i)) m.set(i.name, i) }
@@ -9762,7 +9832,9 @@ function a2cBuild (state, lib) {
   for (const n of state.traits) take(lib.clanTrait, n)
   for (const n of state.merits) take(lib.merit, n)
   for (const n of state.flaws) { if (n === state.ownFlaw) items.push({ name: n, type: 'flaw', img: 'icons/svg/downgrade.svg', system: { description: '<p>Flaw dice penalty: −2 on a test this flaw makes harder (PG p.56).</p>' } }); else take(lib.flaw, n) }
-  if (state.creature !== 'ghoul') take(lib.path ?? lib.nature, 'Humanity')
+  // wod6e 1.1.0: Humanity is a Path item; without one in the library the sheet keeps the Path it has
+  const humanity = lib.path?.has('Humanity') ? lib.path : lib.nature
+  if (state.creature !== 'ghoul') take(humanity, 'Humanity')
   const kind = (text) => (/^wealth/i.test(text) ? 'wealth' : /^social/i.test(text) ? 'socialAssets' : 'physicalAssets')
   const clean = (text) => String(text).replace(/^(?:Physical|Social) Asset\s*\(([^]*)\)\s*$/i, '$1').trim()
   for (const l of state.lifepaths) (l.resourceNames ?? []).forEach((r, j) => { if (a2Int(l.resources[j]) > 0) items.push({ name: clean(r), type: 'resource', img: 'icons/svg/coins.svg', system: { description: `<p>From the ${a2Esc(l.name)} lifepath.</p>`, dots: { value: a2Int(l.resources[j]), max: 5 }, resourceType: kind(r) } }) })
@@ -9779,7 +9851,7 @@ function a2cBuild (state, lib) {
   }
   items.length = 0
   items.push(...merged)
-  return { update, items, removeTypes: ['clan', 'lifepath', 'discipline', 'clanTrait', 'merit', 'flaw', 'resource', 'nature', 'path'] }
+  return { update, items, removeTypes: ['clan', 'lifepath', 'discipline', 'clanTrait', 'merit', 'flaw', 'resource', 'nature', ...(state.creature !== 'ghoul' && humanity?.has('Humanity') ? ['path'] : [])] }
 }
 
 async function a2cApply (actor, state, lib) {
