@@ -2135,6 +2135,15 @@ function a2InjectStyles () {
 function a2Hooks () {
   if (globalThis.V6Alpha2?.hooked) return
   Hooks.on('renderActorSheetV2', a2RenderSheet)
+  // A test without a Difficulty (a contest, a count of successes, a hidden Difficulty) was posted
+  // with the system's "vs Difficulty (0)" on its line.
+  Hooks.on('preCreateChatMessage', (message) => {
+    try {
+      if (!a2Enabled() || !message.rolls?.some((r) => r?.options?.a2?.built)) return
+      const f = String(message.flavor ?? '')
+      if (/ vs Difficulty \(0\)\s*$/.test(f)) message.updateSource({ flavor: f.replace(/ vs Difficulty \(0\)\s*$/, '') })
+    } catch (e) { console.error('V6 Automation | roll line', e) }
+  })
   Hooks.on('renderChatMessageHTML', (message, html) => {
     try { a2RenderChat(message, html) } catch (e) { console.error('V6 Alpha 2 | chat card', e) }
   })
@@ -3654,7 +3663,9 @@ async function a2xDamageOne ({ actor, name, uuid }, o) {
     const lose = Math.min(cur, total)
     await actor.update({ 'system.health.value': cur - lose })
     const max = Math.max(0, a2Int(actor.system?.health?.max) - a2Int(actor.system?.health?.disabled))
-    return { ...out, taken: lose, line: `Applied ${total} to ${name}: Health ${cur - lose}${max ? ` of ${max}` : ''}.` }
+    const kind = String(actor.system?.creatureKind ?? 'human')
+    const down = cur - lose > 0 ? [] : [`${name}: ${kind === 'vampire' ? '0 Health: Physical Attributes impaired, −2 dice to pools using them, until 1 Health is regained (PG p.101).' : kind === 'other' ? '0 Health: whether it dies depends on the creature and the cause (ST p.42).' : '0 Health: a mortal dies (PG p.101).'}`]
+    return { ...out, taken: lose, line: `Applied ${total} to ${name}: Health ${cur - lose}${max ? ` of ${max}` : ''}.`, extra: down }
   }
   const rules = a2Rules(actor)
   if (actor.type !== 'vampire' || !rules) return { ...out, line: `${name}: no Health track to damage.` }
@@ -7478,13 +7489,13 @@ async function a2pResolveByHand (message, t) {
   if (m === null || m === undefined) return
   await a2pResolve(message, t.uuid, true, m)
 }
-async function a2pResolve (message, targetUuid, win, margin) {
+async function a2pResolve (message, targetUuid, win, margin, how = null) {
   if (!message) return
-  if (!game.user.isGM && !message.isOwner) return a2pGm('resolve', { messageId: message.id, targetUuid, win, margin })
+  if (!game.user.isGM && !message.isOwner) return a2pGm('resolve', { messageId: message.id, targetUuid, win, margin, how })
   const card = foundry.utils.deepClone(message.flags?.world?.a2p ?? {})
   const t = card.targets?.find((x) => x.uuid === targetUuid)
   if (!t || (t.status !== 'pending' && t.status !== 'won')) return
-  if (!win) { t.status = 'lost'; t.how = t.how === 'waiting for the opposing roll' ? 'by hand' : t.how; await a2pUpdateCard(message, card); return }
+  if (!win) { t.status = 'lost'; t.how = how ?? (t.how === 'waiting for the opposing roll' ? 'by hand' : t.how); await a2pUpdateCard(message, card); return }
   await a2pApplyTarget(message, targetUuid, margin)
 }
 async function a2pApplyToCurrent (message) {
@@ -7916,7 +7927,7 @@ async function a2pResolveFromRolls (powerMsgId, oppMsg) {
     if (!t) continue
     // eslint-disable-next-line no-undef
     const cmp = typeof a2Compare === 'function' ? a2Compare({ successes: pr.total, attr: pr.options.a2.attr }, { successes: or.total, attr: or.options.a2.attr }, true) : { margin: a2pInt(pr.total) - a2pInt(or.total), win: a2pInt(pr.total) > a2pInt(or.total) }
-    await a2pResolve(card, t.uuid, cmp.win, Math.max(0, cmp.margin))
+    await a2pResolve(card, t.uuid, cmp.win, Math.max(0, cmp.margin), 'by its roll')
   }
 }
 async function a2pCountUses (message, ids) {
@@ -8009,7 +8020,7 @@ const a2pSocketOps = {
     for (const s of statuses ?? []) await a2pSetStatus(actor, s, false)
   },
   end: async ({ id }) => a2pEnd(id),
-  resolve: async ({ messageId, targetUuid, win, margin }) => a2pResolve(game.messages.get(messageId), targetUuid, win, margin),
+  resolve: async ({ messageId, targetUuid, win, margin, how }) => a2pResolve(game.messages.get(messageId), targetUuid, win, margin, how ?? null),
   card: async ({ messageId, card }) => game.messages.get(messageId)?.update({ 'flags.world.a2p': card }),
   endScene: async () => a2pEndScene(),
   newNight: async () => a2pNewNight()
@@ -9298,7 +9309,7 @@ function a2lRenderChat (message, html) {
       const b = document.createElement('button')
       b.type = 'button'
       b.innerHTML = '<i class="fa-solid fa-dice-d10"></i> Roll'
-      b.addEventListener('click', (ev) => { ev.preventDefault(); a2lRollTest(req.hideDiff && !game.user.isGM ? { ...req.test, difficulty: undefined } : req.test, { actor, request: message.id }) })
+      b.addEventListener('click', (ev) => { ev.preventDefault(); a2lRollTest(req.hideDiff ? { ...req.test, difficulty: undefined } : req.test, { actor, request: message.id }) })
       row.append(b)
     }
     rows.append(row)
