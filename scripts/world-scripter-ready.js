@@ -220,8 +220,13 @@ async function v6aPatchRollDialog () {
 async function v6aPayCost (item, { basePaid = false } = {}) {
   const actor = item.actor
   if (!actor) return
-  const base = item.system?.activation?.cost
-  const costs = typeof a2xItemCosts === 'function' && typeof a2Enabled === 'function' && a2Enabled()
+  // The system's simple NPC has no Vitae: it pays the item's "NPC cost" (wod6e 1.1.0), most often
+  // nothing (ST p.42), and the system takes that itself on a roll. Charging the player cost here
+  // only raised "has only 0 Vitae" on every power.
+  const npc = actor.type === 'npc'
+  if (npc && basePaid) return
+  const base = npc ? item.system?.activation?.npcCost : item.system?.activation?.cost
+  const costs = !npc && typeof a2xItemCosts === 'function' && typeof a2Enabled === 'function' && a2Enabled()
     ? a2xItemCosts(item.system, item.flags) // cost + extras marked "part of the cost" (PG p.149)
     : { [base?.type]: Number(base?.amount) || 0 }
   // basePaid: the system took the item's own cost already (only for player sheets, and only a cost it knows)
@@ -1135,6 +1140,11 @@ function a2AdjustContext (res, args, WOD6eTest) {
     difficulty: t.difficulty,
     rolling: (s) => game.i18n.format('WOD6E.ROLL.RollingString', { string: s })
   })
+  // a test with alternatives (Strength or Charisma...) waits for the choice: say so, not "automatic failure"
+  const open = [['attribute', 'Attribute'], ['skill', 'Skill'], ['discipline', 'Discipline']]
+    .filter(([g]) => t[`${g}Mode`] === 'any' && (t[`${g}Options`]?.length ?? 0) > 1 && !t[`${g}Options`].some((o) => o.selected))
+    .map(([, label]) => label)
+  if (open.length && t.canRoll === false) t.dicePoolText = `Choose the ${open.join(' and the ')} to roll`
 }
 
 function a2RestoreFormData (dialog, actor) {
@@ -13161,6 +13171,12 @@ const A2N_VIOLATIONS = [
   { id: 'path', label: "Broke a precept of the character's Path", n: 1, page: 'PG p.129' },
   { id: 'other', label: 'Something else', n: 1, page: 'PG p.127' }
 ]
+// A follower of a Path answers to that Path's own violations (the "path" item on the sheet, PG p.129):
+// they lead the list; the general ones stay below for what the Storyteller still wants to mark.
+function a2nViolationList (path) {
+  const own = path?.kind === 'path' ? (path.violations ?? []).map((v, i) => ({ id: `own${i}`, label: String(v?.text ?? '').trim(), n: 1, page: 'PG p.129' })).filter((v) => v.label) : []
+  return [...own, ...A2N_VIOLATIONS]
+}
 const A2N_SPAN = { 'one day': 1, 'one week': 7, 'one month': 30, 'one year': 365, 'one decade': 3650, 'one century': 36500 }
 const A2N_UPKEEP = { duskborn: 30, neonate: 30, ancilla: 180, elder: 365, methuselah: 36500 } // nights per Vitae in torpor (PG p.140)
 
@@ -13390,7 +13406,7 @@ async function a2nHumanity (actorLike = null) {
     position: { width: 560 },
     content: `<div class="a2n-dialog"><p><strong>${a2Esc(path.name)} ${hum.rank}</strong> · ${a2Plural(hum.violations, 'violation', 'violations')} marked, room for ${Math.max(0, room)} more before the rank drops${band ? ` · rank modifier ${a2Signed(band.modifier)}` : ''}.</p>
       <fieldset><legend>Mark a violation</legend>
-        <div class="form-group"><label>What happened</label><select name="reason">${A2N_VIOLATIONS.map((v) => `<option value="${v.id}" data-n="${v.n}">${a2Esc(v.label)} (${v.n}${['feed7', 'drain'].includes(v.id) ? '' : '+'})</option>`).join('')}</select></div>
+        <div class="form-group"><label>What happened</label><select name="reason">${a2nViolationList(path).map((v) => `<option value="${v.id}" data-n="${v.n}" data-label="${a2Esc(v.label)}" data-page="${a2Esc(v.page)}">${a2Esc(v.label)} (${v.n}${['feed7', 'drain'].includes(v.id) ? '' : '+'})</option>`).join('')}</select></div>
         <div class="form-group"><label>Slashes</label><select name="n"><option value="1">1</option><option value="2">2</option><option value="3">3: an act that can't be undone</option></select><input type="text" name="note" placeholder="a few words, for the card"></div>
         <p class="hint">Feeding below 7 Vitae is 1 and killing by draining 2; everything else is 1 to 3 at the Storyteller's call, with 3 kept for what can't be undone (ST p.15). Entering a frenzy is no violation in itself; what is done in it may be.</p>
       </fieldset>
@@ -13427,7 +13443,8 @@ async function a2nHumanity (actorLike = null) {
 }
 function a2nReadViolation (form) {
   const f = form.elements
-  const def = A2N_VIOLATIONS.find((v) => v.id === f.reason.value) ?? A2N_VIOLATIONS.at(-1)
+  const picked = f.reason.selectedOptions?.[0]?.dataset
+  const def = picked?.label ? { label: picked.label, page: picked.page ?? 'PG p.127' } : A2N_VIOLATIONS.find((v) => v.id === f.reason.value) ?? A2N_VIOLATIONS.at(-1)
   const note = String(f.note.value ?? '').trim()
   return { n: a2Clamp(a2Int(f.n.value, 1), 1, 3), text: `${def.label}${note ? ` (${note})` : ''}, ${def.page}` }
 }
