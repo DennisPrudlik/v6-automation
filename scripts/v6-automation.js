@@ -4669,8 +4669,8 @@ async function a2tVictimUpdate (data) {
   game.socket.emit(globalThis.V6Alpha2?.toolsSocket ?? a2tSocketName(), { a2t: 1, op: 'victim', data, user: game.user.id })
   return true
 }
-// data = { uuid, vitaeLoss, bloodLeft, damage }
-async function a2tVictimLocal ({ uuid, vitaeLoss = 0, bloodLeft = null, damage = 0 } = {}) {
+// data = { uuid, vitaeLoss, bloodLeft, damage, killed }
+async function a2tVictimLocal ({ uuid, vitaeLoss = 0, bloodLeft = null, damage = 0, killed = false } = {}) {
   const victim = a2FromUuid(uuid)
   if (!victim) return
   const upd = {}
@@ -4678,6 +4678,10 @@ async function a2tVictimLocal ({ uuid, vitaeLoss = 0, bloodLeft = null, damage =
   if (bloodLeft !== null && bloodLeft !== undefined) upd['flags.world.a2.bloodLeft'] = a2Clamp(a2Int(bloodLeft), 0, 10)
   if (Object.keys(upd).length) await victim.update(upd)
   if (a2Int(damage) > 0) await a2DamageActor(victim, a2Int(damage))
+  if (killed) {
+    const dead = CONFIG.specialStatusEffects?.DEFEATED ?? 'dead'
+    try { if (!victim.statuses?.has?.(dead)) await victim.toggleStatusEffect(dead, { active: true, overlay: true }) } catch (e) { console.error('V6 Automation | drained victim', e) }
+  }
 }
 
 // ---- system tier maxima ------------------------------------------------------------
@@ -5387,11 +5391,13 @@ async function a2tFeedApply (actor, res) {
     const data = { uuid: victim.uuid }
     if (plan.source === 'vampire') data.vitaeLoss = plan.drink
     else if (plan.source === 'human') data.bloodLeft = plan.left
+    // drained to death: the token said nothing of it
+    if (plan.killed && plan.source === 'human') { data.killed = true; lines.push(`${victim.name} is marked dead.`) }
     if (attack) {
       data.damage = a2tFeedAttackDamage(res.str, d.margin, d.option, d.willing)
       lines.push(`The bite deals ${data.damage} damage to ${victim.name} (PG p.118).`)
     }
-    if (data.vitaeLoss || data.damage || (data.bloodLeft !== undefined && data.bloodLeft !== null)) await a2tVictimUpdate(data)
+    if (data.vitaeLoss || data.damage || data.killed || (data.bloodLeft !== undefined && data.bloodLeft !== null)) await a2tVictimUpdate(data)
   }
   // Violations: Humanity per PG p.144 / TR30; Path walkers only on a match (TR31).
   const n = feeding ? a2Clamp(a2Int(d.violations), 0, 3) : 0
