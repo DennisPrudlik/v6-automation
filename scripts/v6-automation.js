@@ -1120,10 +1120,8 @@ function a2RestoreFormData (dialog, actor) {
 function a2TrimNative (element) {
   try {
     const root = element?.closest?.('.application, dialog') ?? element
-    for (const el of [root, ...document.querySelectorAll('.roll-dialog-side-panel')]) {
-      el?.querySelectorAll?.('button[data-action="takeHalf"]').forEach((b) => b.classList.add('a2-hidden'))
-      el?.querySelectorAll?.('input[name="humanityModifier"], input[name="resistBeast"]').forEach((i) => { if (i.checked) i.checked = false; (i.closest('section') ?? i.closest('label'))?.classList.add('a2-hidden') })
-    }
+    root?.classList?.add('a2-rolldlg') // the styles hide the doubles; the side panel is redrawn on every preview
+    root?.querySelectorAll?.('input[name="humanityModifier"], input[name="resistBeast"]').forEach((i) => { if (i.checked) i.checked = false })
   } catch (e) { /* the window still works with both */ }
 }
 function a2ShowNotes (element, actor) {
@@ -1785,16 +1783,18 @@ function a2Bars110 (tok = {}) {
   else if (tok?.bar2?.attribute === 'health') upd['bar2.attribute'] = 'vitae'
   return Object.keys(upd).length ? upd : null
 }
-async function a2Migrate110 ({ force = false, dryRun = false } = {}) {
+// actors: only these (a sheet that arrives later in the old shape, from an Adventure built before 1.1.0)
+async function a2Migrate110 ({ force = false, dryRun = false, actors = null } = {}) {
+  const only = Array.isArray(actors)
   const report = { actors: 0, humanity: 0, items: 0, embedded: 0, packs: 0, tokens: 0, skipped: 0 }
   if (!a2Native() || !game.user.isGM || (game.users.activeGM && game.users.activeGM.id !== game.user.id)) return report
   const KEY = 'a2m110'
   if (!game.settings.settings.has(`v6-automation.${KEY}`)) game.settings.register('v6-automation', KEY, { scope: 'world', config: false, type: Number, default: 0 })
-  if (game.settings.get('v6-automation', KEY) >= 1 && !force) return report
-  if (!dryRun) v6aNote.info('V6 Automation: moving the world to the wod6e 1.1.0 fields (Vitae, Health, Humanity, costs). This runs once and takes a minute.', { permanent: false })
+  if (!only && game.settings.get('v6-automation', KEY) >= 1 && !force) return report
+  if (!dryRun && !only) v6aNote.info('V6 Automation: moving the world to the wod6e 1.1.0 fields (Vitae, Health, Humanity, costs). This runs once and takes a minute.', { permanent: false })
   const at = new Date().toISOString()
-  for (const actor of game.actors) {
-    if (actor.type !== 'vampire') continue
+  for (const actor of only ? actors : game.actors) {
+    if (actor?.type !== 'vampire') continue
     const src = actor._source
     const f = src.flags?.world?.a2 ?? {}
     if (f.m110 && !force) { report.skipped++; continue }
@@ -1829,6 +1829,7 @@ async function a2Migrate110 ({ force = false, dryRun = false } = {}) {
     await actor.update(upd, { a2Damage: true, a2dUndo: true })
     if (items.length) await actor.updateEmbeddedDocuments('Item', items)
   }
+  if (only) return report
   const world = []
   for (const it of game.items) { const u = a2Cost110(it._source); if (u) world.push({ _id: it.id, ...u }) }
   report.items = world.length
@@ -1946,7 +1947,7 @@ function a2InjectStyles () {
 .actor.sheet [data-actor-section="humanityScale"].a2-on > .humanity-tracker { display: none; }
 .actor.sheet [data-actor-section="humanityScale"].a2-on > :not(.a2-humanity) { display: none; }
 .actor.sheet .a2-humanity .a2-open-path { cursor: pointer; }
-.roll-dialog-side-panel .a2-hidden, .dialog .a2-hidden { display: none !important; }
+.a2-rolldlg button[data-action="takeHalf"], .a2-rolldlg .roll-dialog-side-panel section:has(input[name="humanityModifier"]), .a2-rolldlg .roll-dialog-side-panel section:has(input[name="resistBeast"]) { display: none !important; }
 .actor.sheet .a2-humanity { padding: 4px 16px 8px; }
 .actor.sheet .a2-humanity .resource-tracker-header .a2-subnote { margin: 0 0 0 auto; }
 .actor.sheet .resource-tracker-space.a2-square { border-radius: 3px; }
@@ -1987,6 +1988,9 @@ function a2Hooks () {
   })
   Hooks.on('createActor', (actor, options, userId) => {
     if (a2Enabled() && game.user.id === userId && game.user.isGM && actor.type === 'vampire') a2MigrateHumanity({ actors: [actor] }).then(a2ReportMigration)
+    // a sheet in the 1.0.11 shape (Health still in our flag): bring it over like the rest of the world
+    const f = actor.flags?.world?.a2
+    if (a2Enabled() && a2Native() && game.user.id === userId && game.user.isGM && actor.type === 'vampire' && f?.health && !f.m110) a2Migrate110({ actors: [actor] }).catch((e) => console.error('V6 Automation | wod6e 1.1.0 migration', actor.name, e))
   })
   Hooks.on('renderQuickeningDramaTrackerApplication', (app) => { if (a2Enabled()) app.close({ animate: false }) })
   globalThis.V6Alpha2.hooked = true
