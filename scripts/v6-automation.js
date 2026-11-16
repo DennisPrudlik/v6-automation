@@ -915,12 +915,22 @@ function a2PatchRollDialog (RD, WOD6eTest) {
   const init = RD._prepareInitialData
   RD._prepareInitialData = function (args = {}) {
     const data = init.call(this, args)
+    // wod6e 1.1.0 opens every test against Difficulty 1. An attack on a target, a contested roll and a
+    // defence are counted, not set against a number, and this module tells them apart by a Difficulty
+    // of 0: start there, as before 1.1.0, unless the item or the caller names a Difficulty.
+    try {
+      if (a2Enabled() && data && !data.retryOf && !data.frenzyType) {
+        const fixed = ['fixed', 'fixedPlusTargetsTrait'].includes(args?.item?.system?.difficulty?.type)
+        const given = (args?.item?.system?.test ?? args?.test)?.difficulty
+        if (!fixed && (given === undefined || given === null)) data.difficulty = 0
+      }
+    } catch (e) { /* the system's default stands */ }
     try { if (args?.actor?.uuid) (a2State.inits ??= new Map()).set(args.actor.uuid, { itemModifier: a2Int(data?.itemModifier), action: data?.action ?? null, category: data?.category ?? null, npcPool: data?.npcPool ?? null, at: Date.now() }) } catch (e) { /* keep rolling */ }
     return data
   }
   const preview = RD._updatePreview
-  RD._updatePreview = function (element, actor) {
-    const out = preview.call(this, element, actor)
+  RD._updatePreview = function (element, actor, ...rest) {
+    const out = preview.call(this, element, actor, ...rest)
     try { a2ShowNotes(element, actor) } catch (e) { /* the preview is a convenience */ }
     return out
   }
@@ -1041,6 +1051,8 @@ function a2AdjustContext (res, args, WOD6eTest) {
   // wod6e 1.1.0 draws its own Hunger line from the system's figures; ours is the box under the pool.
   // The system's npc type has no Vitae track: there its Hunger field stays, and is what is rolled.
   if (actor.type !== 'npc') t.showHunger = false
+  // "Count successes only" (wod6e 1.1.0): no Difficulty, whatever the hidden field still holds
+  if (t.testType && t.testType !== 'standard') t.difficulty = 0
 
   let raw
   let attr = Math.max(0, ...(t.attributeOptions ?? []).filter((o) => o.selected).map((o) => a2Int(o.value)))
@@ -1059,7 +1071,7 @@ function a2AdjustContext (res, args, WOD6eTest) {
     attr = a2Half(lvl.value) // ST p.42: Attribute rank = half the pool
     const label = `${lvl.label} (${lvl.value})`
     const none = game.i18n.localize('WOD6E.ROLL.NoTraitsSelected')
-    t.testText = String(t.testText ?? '').startsWith(none) ? String(t.testText).replace(none, label) : `${label} · ${String(t.testText).replace(/ \(0\)/g, '')}` // the simple sheet has no traits: name them, without the zeros
+    t.testText = String(t.testText ?? '').startsWith(none) ? String(t.testText).replace(none, label) : `${label} · ${String(t.testText).replace(/ \(\d+\)/g, '')}` // the simple sheet has no traits: name them, without the zeros
   } else {
     raw = a2RawPool(actor, { ...data, focus: t.focus })
     const imp = a2Impairment(actor, t.attributes)
@@ -1128,6 +1140,10 @@ function a2RestoreFormData (dialog, actor) {
   a2State.npcPoolFor = { actor: actor?.uuid ?? null, pool: li?.npcPool ?? null } // read by a2InjectControls
   if (actor?.uuid) a2State.inits?.delete(actor.uuid)
   const root = dialog?.element
+  // wod6e 1.1.0 keeps the test's data on its own .roll-dialog element. A copy on the outer form
+  // made the system read the form instead and lose the rest: the "choose one" trait modes, the
+  // NPC pool, the item, attack and defence marks. Only fill in when nothing in the window has it.
+  if (root?.matches?.('[data-item-modifier]') || root?.querySelector?.('[data-item-modifier]')) return
   const form = root?.matches?.('form') ? root : root?.querySelector?.('form')
   if (!form || !li || Date.now() - li.at > 20000) return
   if (form.dataset.itemModifier === undefined) form.dataset.itemModifier = String(li.itemModifier)
@@ -1203,8 +1219,8 @@ function a2InjectControls (RD, dialog, { actor, item } = {}) {
   header.after(box)
   const diff = el.querySelector('.difficulty-section label')
   if (diff) diff.title = 'Alpha 2: the number of successes needed to win. The full pool is rolled (PG p.96).'
-  box.addEventListener('change', () => RD._updatePreview(el, actor))
-  RD._updatePreview(el, actor)
+  box.addEventListener('change', () => RD._updatePreview(el, actor, item))
+  RD._updatePreview(el, actor, item)
 }
 
 // ---- chat card ---------------------------------------------------------------
@@ -1250,7 +1266,15 @@ function a2DecorateRoll (el, roll) {
     const tot = part.querySelector('.part-total')
     if (tot) tot.textContent = String(a2CountSuccesses(vals))
   })
-  el.querySelector('.dice-total')?.classList.add('a2-total', `a2-${a2RollVerdict(roll).outcome}`)
+  const total = el.querySelector('.dice-total')
+  if (total) {
+    const v = a2RollVerdict(roll)
+    total.classList.add('a2-total', `a2-${v.outcome}`)
+    // wod6e 1.1.0 writes its own verdict here ("Success by 4"), counted against its own Difficulty;
+    // it contradicted the line below whenever an opponent decided the test. Keep the count.
+    total.textContent = a2Plural(a2Int(v.successes), 'success', 'successes')
+  }
+  el.querySelectorAll('.wod6e-test-result, .wod6e-test-guidance').forEach((e) => e.remove())
 }
 
 // Another roll this one is compared with: a linked opposition roll, a manual
@@ -1443,6 +1467,9 @@ function a2SkillDots (root, actor, editable) {
 
 function a2DecorateVitae (section, actor, rules, creature) {
   section.classList.toggle('a2-na', !rules.vitae)
+  // wod6e 1.1.0 prints its own "Hunger dice" under the track, counted its way: a full ghoul showed 3,
+  // a mortal 5, and a Methuselah was measured against 20 Vitae. The chip in the header is the one rolled.
+  section.querySelectorAll('.vitae-hunger').forEach((e) => e.remove())
   const header = section.querySelector('.resource-tracker-header')
   if (!header) return
   header.querySelectorAll('.a2-hunger-chip, .a2-na-label').forEach((e) => e.remove())
@@ -3205,10 +3232,10 @@ function a2xFrenzyPoolFor (actor, modifier = 0) {
 }
 
 async function a2xRollFrenzy (actor, o) {
-  if (typeof a2uHint === 'function') a2uHint(actor, { frenzy: o.type }) // eslint-disable-line no-undef
   const info = A2X_FRENZY[o.type]
   const p = a2xFrenzyPoolFor(actor, o.modifier)
   const difficulty = Math.max(0, a2Int(o.difficulty))
+  if (difficulty > 0 && typeof a2uHint === 'function') a2uHint(actor, { frenzy: o.type }) // eslint-disable-line no-undef
   if (difficulty <= 0) {
     // Difficulty 0 isn't rolled: it simply succeeds (TR1).
     await a2xPostNote(actor, `${actor.name}: ${info.label}`, [`Difficulty 0: resisted without a roll (TR1, ${info.page}).`], { note: { kind: 'frenzy' } })
@@ -3231,6 +3258,7 @@ async function a2xRollFrenzy (actor, o) {
   }
   const Test = a2xState.Test ?? (await import(a2SystemUrl('core/scripts/wod6e-test.js'))).WOD6eTest
   const roll = await Test.executeTest({ actor, context, flavor: testText, createMessage: false })
+  if (typeof a2uDrop === 'function') a2uDrop(actor, 'frenzy') // eslint-disable-line no-undef
   let messageMode
   for (const k of ['messageMode', 'rollMode']) {
     try { if (game.settings.settings.has(`core.${k}`)) { messageMode = game.settings.get('core', k); break } } catch (e) { /* not in this version */ }
@@ -7397,7 +7425,7 @@ async function a2pRemoveWhere (actor, test) {
   const keep = new Set(a2pConds(actor).filter((c) => !gone.has(c.id)).flatMap((c) => a2pAP(c).statuses ?? []))
   const drop = new Set(conds.flatMap((c) => a2pAP(c).statuses ?? []))
   if (actor.isOwner) {
-    await actor.deleteEmbeddedDocuments('Item', [...gone])
+    await actor.deleteEmbeddedDocuments('Item', [...gone], { a2pEnd: true })
     for (const s of drop) if (!keep.has(s)) await a2pSetStatus(actor, s, false)
   } else {
     await a2pGm('remove', { holderUuid: actor.uuid, ids: [...gone], statuses: [...drop].filter((s) => !keep.has(s)) })
@@ -7416,11 +7444,19 @@ async function a2pEnd (idOrItem, { quiet = false, reason = '' } = {}) {
   return n
 }
 // End every activation one of whose parts matches (GM: scene end, new night, torpor).
-async function a2pEndWhere (test, reason) {
-  const ids = new Set()
-  for (const actor of a2pAllActors()) for (const c of a2pConds(actor)) { const ap = a2pAP(c); if (test(ap)) ids.add(ap.id) }
-  for (const id of ids) await a2pEnd(id, { reason })
-  return ids.size
+// One at a time: a New Night ends the scene and the night in the same moment, and two passes at
+// once both tried to delete the same conditions ("Item does not exist").
+let a2pEndChain = Promise.resolve()
+function a2pEndWhere (test, reason) {
+  const run = async () => {
+    const ids = new Set()
+    for (const actor of a2pAllActors()) for (const c of a2pConds(actor)) { const ap = a2pAP(c); if (test(ap)) ids.add(ap.id) }
+    for (const id of ids) await a2pEnd(id, { reason })
+    return ids.size
+  }
+  const p = a2pEndChain.then(run, run)
+  a2pEndChain = p.catch(() => null)
+  return p
 }
 async function a2pEndScene () {
   if (!game.user.isGM) return a2pGm('endScene', {})
@@ -7832,7 +7868,7 @@ const a2pSocketOps = {
     const actor = a2pFrom(holderUuid)
     if (!actor) return
     const have = ids.filter((id) => actor.items.get(id))
-    if (have.length) await actor.deleteEmbeddedDocuments('Item', have)
+    if (have.length) await actor.deleteEmbeddedDocuments('Item', have, { a2pEnd: true })
     for (const s of statuses ?? []) await a2pSetStatus(actor, s, false)
   },
   end: async ({ id }) => a2pEnd(id),
@@ -7863,6 +7899,21 @@ function a2pHooks () {
     a2pEndWhere((ap) => ap.expires?.combatId === combat.id && (ap.expires.type === 'turn' || ap.upkeep?.per === 'turnStart' || ap.upkeep?.per === 'turnEnd'), 'combat ended').catch((e) => console.error(e))
   })
   Hooks.on('updateItem', a2pOnUpdateItem)
+  // A power's condition taken off some other way (the bin on the sheet, End Scene on the system's
+  // chronicle bar, its last use) left its status icons on the token: take those off with it.
+  let statusChain = Promise.resolve()
+  Hooks.on('deleteItem', (item, options) => {
+    try {
+      if (!a2pOn() || !a2pIsActiveGM() || options?.a2pEnd) return
+      const actor = item?.parent
+      const ap = item?.type === 'condition' ? a2pAP(item) : null
+      if (!ap?.statuses?.length || actor?.documentName !== 'Actor') return
+      statusChain = statusChain.then(async () => {
+        const keep = new Set(a2pConds(actor).filter((c) => c.id !== item.id).flatMap((c) => a2pAP(c).statuses ?? []))
+        for (const s of ap.statuses) if (!keep.has(s)) await a2pSetStatus(actor, s, false)
+      }).catch((e) => console.warn('V6 Automation | powers: status icon', e))
+    } catch (e) { console.warn('V6 Automation | powers: status icon', e) }
+  })
   Hooks.on('updateScene', (scene, changes) => {
     if (!a2pOn() || !a2pIsActiveGM() || changes?.active !== true || !a2pSetting('sceneChange')) return
     a2pEndScene().catch((e) => console.error(e))
@@ -8656,6 +8707,12 @@ function a2uClaim (actor, appId) {
   if (!h || !appId) return
   if (!h.app) h.app = appId
   else if (h.app !== appId) a2uState.hints.delete(actor.uuid)
+}
+// A roll made without the dialog (the frenzy test) has no window to claim its hint: take it back,
+// or the next, unrelated roll of this actor within two minutes got the frenzy bonuses ticked.
+function a2uDrop (actor, key = null) {
+  const h = actor?.uuid ? a2uState.hints.get(actor.uuid) : null
+  if (h && !h.app && (!key || key in h)) a2uState.hints.delete(actor.uuid)
 }
 function a2uFresh (actor) {
   const h = actor?.uuid ? a2uState.hints.get(actor.uuid) : null
@@ -11809,7 +11866,9 @@ async function a2wNpcCreate (o) {
     system.vampire = { generation: { value: o.gen }, humanity: { value: a2wNpcHumanity(tier), max: 10, violations: 0, rulesVersion: 2 }, clan: { name: o.clan ?? '' }, disciplines: {} }
     system.vitae = { value: 5 + 5 * genMod, max: 5 + 5 * genMod }
     const clan = o.clan ? game.items.find((i) => i.type === 'clan' && i.name === o.clan) : null
-    if (clan) { const d = clan.toObject(); delete d._id; delete d.folder; items.push(d); for (const k of clan.system?.disciplines ?? []) system.vampire.disciplines[k] = { value: st.discipline, visible: true } }
+    // an id of its own: wod6e 1.1.0 writes the item list a second time when it adds the Humanity Path
+    // to a new vampire, and an item without an id came out twice (two clans on a made NPC)
+    if (clan) { const d = clan.toObject(); d._id = foundry.utils.randomID(); delete d.folder; items.push(d); for (const k of clan.system?.disciplines ?? []) system.vampire.disciplines[k] = { value: st.discipline, visible: true } }
   } else if (creature === 'ghoul') system.vitae = { value: 5, max: 5 }
   let folder = game.folders.find((f) => f.type === 'Actor' && f.name === 'Made NPCs (V6)')
   folder ??= await Folder.create({ name: 'Made NPCs (V6)', type: 'Actor' })
